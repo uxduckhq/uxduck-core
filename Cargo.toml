@@ -50,6 +50,9 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # The rustls reqwest builds on, for a WHEP address's pinned certificate
 # (ADR-0064 W10): the same 0.23 and aws-lc-rs.
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
+# The same aws-lc-rs, for the Ed25519 public key UXDuck's own SSH key's seed
+# makes, so a key damaged anywhere is found (FB-268).
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
 # WebRTC for WHEP cameras (ADR-0064 W2), pinned: sans-IO, on the daemon's own
 # tasks and sockets, with aws-lc-rs as the workspace's TLS has. Its default
 # features add the examples' web server.

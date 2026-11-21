@@ -11,16 +11,25 @@
 //! uses it once, through `SSH_ASKPASS` pointing back at this binary, to add
 //! that key to the companion's `authorized_keys`; the password is never
 //! kept, and later checks sign in with the key.
+//!
+//! A failed check says what failed and what to do, with the messages `ssh`
+//! itself wrote, never a server's banner or what ran on the computer, and
+//! with the password and any key hidden (FB-268). A key or password `ssh`
+//! reads from a file is in a new file only this computer's account may
+//! open, which Windows' OpenSSH requires, in a folder of its own for that
+//! one `ssh`, removed when it ends and when UXDuck starts.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use uxduck_core::domain::companion::{CompanionClock, CompanionComputer};
-use uxduck_engine::companions::{CheckAnswer, CompanionOrder, CompanionPort, Found};
+use uxduck_core::domain::companion::{CheckProblem, CompanionClock, CompanionComputer};
+use uxduck_engine::companions::{CheckAnswer, CheckFailure, CompanionOrder, CompanionPort, Found};
 use uxduck_engine::runtime::Credentials as _;
 
-use crate::adapters::credentials::FileCredentials;
+use crate::adapters::credentials::{
+    FileCredentials, create_private, create_private_dir, private_dir_problem,
+};
 use crate::daemon::engine_task::EngineHandle;
 
 /// How long a check may take, signing in included.
@@ -50,6 +59,15 @@ const OWN_KEY: &str = "companion-own-key";
 pub fn askpass(path: &Path) -> std::process::ExitCode {
     match std::fs::read_to_string(path) {
         Ok(password) => {
+            // A check adds UXDuck's key only once `ssh` has asked for the
+            // password (FB-268). The marker is new in the run's own folder.
+            if let Err(error) = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(askpass_used(path))
+            {
+                eprintln!("uxduck askpass: {error}");
+            }
             println!("{password}");
             std::process::ExitCode::SUCCESS
         }
@@ -58,6 +76,12 @@ pub fn askpass(path: &Path) -> std::process::ExitCode {
             std::process::ExitCode::from(1)
         }
     }
+}
+
+/// The file [`askpass`] leaves beside the password's once it has given it to
+/// `ssh`.
+fn askpass_used(path: &Path) -> PathBuf {
+    path.with_extension("used")
 }
 
 /// This computer's own UXDuck key, its private key and its public line.
@@ -78,47 +102,212 @@ pub(crate) struct SignIn<'a> {
     pub password: Option<&'a str>,
 }
 
-/// UXDuck's own key from the credential store, made on first use.
-fn own_key(credentials: &mut FileCredentials) -> Result<OwnKey, String> {
-    let private = if let Some(private) = credentials.get(OWN_KEY) {
-        private
-    } else {
-        let dir = tempfile::tempdir().map_err(|e| format!("Cannot make UXDuck's SSH key: {e}"))?;
-        let path = dir.path().join("key");
-        let status = std::process::Command::new("ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", "", "-C", "uxduck", "-f"])
-            .arg(&path)
-            .status()
-            .map_err(|e| format!("Cannot run ssh-keygen to make UXDuck's SSH key: {e}"))?;
-        if !status.success() {
-            return Err("ssh-keygen could not make UXDuck's SSH key".to_owned());
-        }
-        let private = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Cannot read UXDuck's new SSH key: {e}"))?;
-        credentials.set(OWN_KEY, &private)?;
-        private
-    };
-    let dir = tempfile::tempdir().map_err(|e| format!("Cannot read UXDuck's SSH key: {e}"))?;
-    let path = dir.path().join("key");
-    write_private(&path, &private)?;
-    let output = std::process::Command::new("ssh-keygen")
-        .arg("-y")
-        .arg("-f")
-        .arg(&path)
-        .output()
-        .map_err(|e| format!("Cannot run ssh-keygen to read UXDuck's SSH key: {e}"))?;
-    let public = String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .take(2)
-        .collect::<Vec<_>>()
-        .join(" ");
-    if !output.status.success() || public.is_empty() {
-        return Err("UXDuck's SSH key in the credential store cannot be read".to_owned());
+/// A problem with UXDuck's own key, which a check with the computer's
+/// password solves by making a new one when it cannot be read.
+fn key_failure(problem: String, detail: Option<String>) -> CheckFailure {
+    CheckFailure {
+        problem,
+        kind: CheckProblem::Key,
+        detail,
     }
+}
+
+/// UXDuck's own key from the credential store, made on first use. The key
+/// is read whole and its public line made from it ([`own_public`], FB-268).
+/// It was read with `ssh-keygen -y` from a temporary file, which Windows'
+/// OpenSSH refuses when other accounts may open it, and what `ssh-keygen`
+/// said was lost.
+/// A stored key that cannot be read is replaced only when `replace`, for
+/// a check with a password, which adds the new key to the computer.
+fn own_key(credentials: &mut FileCredentials, replace: bool) -> Result<OwnKey, CheckFailure> {
+    if let Some(private) = credentials.get(OWN_KEY) {
+        let why = match own_public(&private) {
+            Ok(own) => return Ok(own),
+            Err(why) => why,
+        };
+        if !replace {
+            return Err(key_failure(
+                format!(
+                    "UXDuck's own SSH key, kept on this computer, cannot be read, as {why}. Check with the computer's password to make a new one and add it."
+                ),
+                None,
+            ));
+        }
+        tracing::warn!(%why, "replacing UXDuck's SSH key, which cannot be read");
+    }
+    let dir = tempfile::tempdir()
+        .map_err(|e| key_failure(format!("UXDuck cannot make its SSH key: {e}"), None))?;
+    let path = dir.path().join("key");
+    let made = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "uxduck", "-f"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                key_failure(
+                    ssh_missing().replace("OpenSSH's ssh command", "OpenSSH's ssh-keygen command"),
+                    None,
+                )
+            } else {
+                key_failure(
+                    format!("UXDuck cannot run ssh-keygen to make its SSH key: {e}"),
+                    None,
+                )
+            }
+        })?;
+    if !made.status.success() {
+        return Err(key_failure(
+            "ssh-keygen could not make UXDuck's SSH key.".to_owned(),
+            hidden(&String::from_utf8_lossy(&made.stderr)),
+        ));
+    }
+    let private = std::fs::read_to_string(&path).map_err(|e| {
+        key_failure(
+            format!("UXDuck cannot read the SSH key ssh-keygen made: {e}"),
+            None,
+        )
+    })?;
+    let own = own_public(&private).map_err(|why| {
+        key_failure(
+            format!("UXDuck cannot read the SSH key ssh-keygen made, as {why}."),
+            None,
+        )
+    })?;
+    credentials.set(OWN_KEY, &own.private).map_err(|why| {
+        key_failure(
+            "UXDuck cannot keep its SSH key in its credential store on this computer, so it cannot add it to the companion. The detail says why.".to_owned(),
+            Some(why),
+        )
+    })?;
+    Ok(own)
+}
+
+/// UXDuck's own key read from the whole of its private half: the Ed25519
+/// key with no passphrase that UXDuck makes, its two check numbers equal,
+/// its public key the same in both halves and the one its private seed
+/// makes, and its padding as OpenSSH writes it. A key damaged anywhere is
+/// refused with why, so a check with the password makes a new one
+/// (FB-268). Its private half is written out again as `ssh-keygen` writes
+/// it ([`openssh_ed25519`]), with the comment `uxduck`, so `ssh` reads
+/// exactly the key checked here, whatever spacing or comment the stored
+/// text had.
+fn own_public(private: &str) -> Result<OwnKey, String> {
+    use aws_lc_rs::signature::KeyPair as _;
+    use base64::Engine as _;
+    fn field<'a>(rest: &mut &'a [u8]) -> Option<&'a [u8]> {
+        let length = number(rest)?;
+        let (value, after) = rest.split_at_checked(usize::try_from(length).ok()?)?;
+        *rest = after;
+        Some(value)
+    }
+    fn number(rest: &mut &[u8]) -> Option<u32> {
+        let (number, after) = rest.split_first_chunk::<4>()?;
+        *rest = after;
+        Some(u32::from_be_bytes(*number))
+    }
+    let damaged = || "its text is damaged or cut short".to_owned();
+    let body: String = private
+        .trim()
+        .strip_prefix("-----BEGIN OPENSSH PRIVATE KEY-----")
+        .and_then(|body| body.strip_suffix("-----END OPENSSH PRIVATE KEY-----"))
+        .ok_or_else(|| "it is not an OpenSSH private key".to_owned())?
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .map_err(|_| damaged())?;
+    let mut rest = bytes
+        .strip_prefix(b"openssh-key-v1\0")
+        .ok_or_else(damaged)?;
+    if field(&mut rest).ok_or_else(damaged)? != b"none" {
+        return Err("it has a passphrase".to_owned());
+    }
+    if field(&mut rest) != Some(b"none")
+        || field(&mut rest) != Some(b"")
+        || number(&mut rest) != Some(1)
+    {
+        return Err(damaged());
+    }
+    let public = field(&mut rest).ok_or_else(damaged)?;
+    let mut section = field(&mut rest).ok_or_else(damaged)?;
+    if !rest.is_empty() || section.len() % 8 != 0 {
+        return Err(damaged());
+    }
+    let mut blob = public;
+    if field(&mut blob) != Some(b"ssh-ed25519") {
+        return Err("it is not the Ed25519 key UXDuck makes".to_owned());
+    }
+    let key = field(&mut blob)
+        .filter(|key| key.len() == 32 && blob.is_empty())
+        .ok_or_else(damaged)?;
+    let check = number(&mut section);
+    if check.is_none() || check != number(&mut section) {
+        return Err(damaged());
+    }
+    if field(&mut section) != Some(b"ssh-ed25519") || field(&mut section) != Some(key) {
+        return Err(damaged());
+    }
+    let secret = field(&mut section)
+        .filter(|secret| secret.len() == 64 && &secret[32..] == key)
+        .ok_or_else(damaged)?;
+    field(&mut section).ok_or_else(damaged)?;
+    if section.len() >= 8
+        || !section
+            .iter()
+            .enumerate()
+            .all(|(at, byte)| usize::from(*byte) == at + 1)
+    {
+        return Err(damaged());
+    }
+    let pair = aws_lc_rs::signature::Ed25519KeyPair::from_seed_unchecked(&secret[..32])
+        .map_err(|_| damaged())?;
+    if pair.public_key().as_ref() != key {
+        return Err(damaged());
+    }
+    let base64 = base64::engine::general_purpose::STANDARD;
+    let bytes = openssh_ed25519(public, check.unwrap_or_default(), secret, b"uxduck");
+    let mut private = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+    for line in base64.encode(&bytes).as_bytes().chunks(70) {
+        private.push_str(&String::from_utf8_lossy(line));
+        private.push('\n');
+    }
+    private.push_str("-----END OPENSSH PRIVATE KEY-----\n");
     Ok(OwnKey {
         private,
-        public: format!("{public} uxduck"),
+        public: format!("ssh-ed25519 {} uxduck", base64.encode(public)),
     })
+}
+
+/// An Ed25519 key with no passphrase as `ssh-keygen` writes it, before its
+/// base64: `public` its public key's blob, `check` its private half's
+/// check number, `secret` its 64-byte secret, and `comment`.
+fn openssh_ed25519(public: &[u8], check: u32, secret: &[u8], comment: &[u8]) -> Vec<u8> {
+    fn put(out: &mut Vec<u8>, field: &[u8]) {
+        out.extend_from_slice(&u32::try_from(field.len()).unwrap_or(u32::MAX).to_be_bytes());
+        out.extend_from_slice(field);
+    }
+    let mut section = Vec::new();
+    section.extend_from_slice(&check.to_be_bytes());
+    section.extend_from_slice(&check.to_be_bytes());
+    put(&mut section, b"ssh-ed25519");
+    put(&mut section, &secret[32..]);
+    put(&mut section, secret);
+    put(&mut section, comment);
+    let mut pad = 1u8;
+    while section.len() % 8 != 0 {
+        section.push(pad);
+        pad += 1;
+    }
+    let mut bytes = b"openssh-key-v1\0".to_vec();
+    put(&mut bytes, b"none");
+    put(&mut bytes, b"none");
+    put(&mut bytes, b"");
+    bytes.extend_from_slice(&1u32.to_be_bytes());
+    put(&mut bytes, public);
+    put(&mut bytes, &section);
+    bytes
 }
 
 /// What signs in to a computer through its pinned host key, from the
@@ -138,7 +327,34 @@ pub(crate) fn saved_sign_in(
     } else {
         None
     };
-    Ok((key, own_key(&mut credentials)?))
+    Ok((
+        key,
+        own_key(&mut credentials, false).map_err(|failure| failure.problem)?,
+    ))
+}
+
+/// The keys a check signs in with: the one given for the computer, from the
+/// credential store when it has one, and UXDuck's own. A key given for it
+/// signs in alone when no password was typed, so then a problem with
+/// UXDuck's own key does not stop the check (FB-268).
+fn check_keys(
+    has_key: bool,
+    given: Option<String>,
+    own: Result<OwnKey, CheckFailure>,
+    password: bool,
+) -> Result<(Option<String>, Option<OwnKey>), CheckFailure> {
+    if has_key && given.is_none() {
+        return Err(CheckFailure {
+            problem: "The private key you gave for this computer is missing from UXDuck's credential store. Remove the computer and add it again.".to_owned(),
+            kind: CheckProblem::GivenKey,
+            detail: None,
+        });
+    }
+    match own {
+        Ok(own) => Ok((given, Some(own))),
+        Err(_) if given.is_some() && !password => Ok((given, None)),
+        Err(failure) => Err(failure),
+    }
 }
 
 /// The ways to sign in through a pinned host key, in the order they are
@@ -167,8 +383,138 @@ const SCRIPT: &str = r#"if [ -r /etc/os-release ]; then . /etc/os-release; fi; e
 /// its clock.
 struct Ran {
     output: std::process::Output,
+    /// What `ssh` itself wrote, in its own log: never a server's banner or
+    /// what ran on the computer, which are on `output`'s standard error.
+    log: String,
+    /// Whether UXDuck's askpass gave `ssh` the password: a file UXDuck's
+    /// askpass leaves, never anything a server says.
+    asked: bool,
     started_ns: i64,
     ended_ns: i64,
+}
+
+/// The folder under the companions folder where each `ssh` a check or a
+/// change runs gets a folder of its own ([`RunFiles`]).
+const RUNS: &str = "runs";
+
+/// The files one `ssh` for a check or a change is given, a key, a password
+/// for its prompt and its log, in a new folder of their own. The folder is
+/// removed when `ssh` has ended, and one a crash left is removed when
+/// UXDuck starts ([`sweep`]).
+struct RunFiles {
+    path: PathBuf,
+    dir: Option<tempfile::TempDir>,
+}
+
+impl RunFiles {
+    fn new(dir: &Path) -> Result<Self, String> {
+        let runs = dir.join(RUNS);
+        let made = create_private_dir(dir)
+            .and_then(|()| create_private_dir(&runs))
+            .and_then(|()| {
+                let mut builder = tempfile::Builder::new();
+                builder.prefix("ssh-");
+                #[cfg(unix)]
+                builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+                builder.tempdir_in(&runs)
+            });
+        let made = made.map_err(|e| format!("Cannot prepare the files ssh is given: {e}"))?;
+        Ok(Self {
+            path: made.path().to_owned(),
+            dir: Some(made),
+        })
+    }
+}
+
+impl Drop for RunFiles {
+    fn drop(&mut self) {
+        if let Some(dir) = self.dir.take()
+            && let Err(error) = dir.close()
+        {
+            tracing::warn!(%error, path = %self.path.display(), "cannot remove the files ssh was given, which may hold a password or a key");
+        }
+    }
+}
+
+/// Removes what a crash left of the files `ssh` was given under the
+/// companions folder `dir`: the run folders [`RunFiles`] makes, and from
+/// before them a computer's key or password file beside its known-hosts
+/// file. Only those exact names are removed, and only when the folder is
+/// this account's alone ([`private_dir_problem`]), so no other account can
+/// change what is in it between looking and removing. Otherwise nothing is
+/// removed, and the log says why.
+fn sweep(dir: &Path) {
+    let warn = |error: std::io::Error, path: &Path| {
+        tracing::warn!(%error, path = %path.display(), "cannot remove the files ssh was given, which may hold a password or a key");
+    };
+    if !dir.exists() {
+        return;
+    }
+    if let Some(why) = private_dir_problem(dir) {
+        tracing::warn!(path = %dir.display(), why, "not removing what a crash left of the files ssh was given, because the companions folder is not this account's alone");
+        return;
+    }
+    let runs = dir.join(RUNS);
+    if own_folder(&runs) {
+        for entry in std::fs::read_dir(&runs).into_iter().flatten().flatten() {
+            let run = entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+                && run_name(&entry.file_name());
+            if run && let Err(error) = std::fs::remove_dir_all(entry.path()) {
+                warn(error, &entry.path());
+            }
+        }
+    }
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let left =
+            entry.file_type().is_ok_and(|kind| !kind.is_dir()) && legacy_name(&entry.file_name());
+        if left && let Err(error) = std::fs::remove_file(entry.path()) {
+            warn(error, &entry.path());
+        }
+    }
+}
+
+/// Whether `path` is a folder of its own, not a link or a Windows junction
+/// to one elsewhere. One that is a link is logged.
+fn own_folder(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    let linked = meta.file_type().is_symlink();
+    // FILE_ATTRIBUTE_REPARSE_POINT: a junction or another link.
+    #[cfg(windows)]
+    let linked = linked || std::os::windows::fs::MetadataExt::file_attributes(&meta) & 0x400 != 0;
+    if linked {
+        tracing::warn!(path = %path.display(), "not removing the files ssh was given here, because the folder is a link");
+    }
+    meta.is_dir() && !linked
+}
+
+/// Whether `name` is a run folder [`RunFiles`] makes: `ssh-` and six
+/// letters or digits.
+fn run_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .and_then(|name| name.strip_prefix("ssh-"))
+        .is_some_and(|rest| rest.len() == 6 && rest.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+/// Whether `name` is a key or password file a check wrote before run
+/// folders: a computer's id, `cc` and twelve hex digits, with `.key` or
+/// `.askpass`.
+fn legacy_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .and_then(|name| {
+            name.strip_suffix(".key")
+                .or_else(|| name.strip_suffix(".askpass"))
+        })
+        .and_then(|id| id.strip_prefix("cc"))
+        .is_some_and(|hex| {
+            hex.len() == 12
+                && hex
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        })
 }
 
 fn wall_ns() -> i64 {
@@ -186,6 +532,7 @@ pub struct Host {
 impl Host {
     #[must_use]
     pub fn new(data_dir: &Path, engine: EngineHandle) -> Self {
+        sweep(&data_dir.join("companions"));
         Self {
             dir: data_dir.join("companions"),
             data_dir: data_dir.to_owned(),
@@ -207,21 +554,20 @@ impl Host {
         let engine = self.engine.clone();
         tokio::spawn(async move {
             let result = match saved {
-                Err(why) => Err(why),
-                Ok((key, own)) => {
-                    pinned(
-                        &dir,
-                        &computer,
-                        SignIn {
-                            pasted: key.as_deref(),
-                            own: Some(&own),
-                            password: None,
-                        },
-                        adapter,
-                        &input,
-                    )
-                    .await
-                }
+                Err(why) => Err(CheckFailure::from(why)),
+                Ok((key, own)) => pinned(
+                    &dir,
+                    &computer,
+                    SignIn {
+                        pasted: key.as_deref(),
+                        own: Some(&own),
+                        password: None,
+                    },
+                    adapter,
+                    &input,
+                )
+                .await
+                .map_err(CheckFailure::from),
             };
             let answer = CheckAnswer {
                 vehicle_id,
@@ -243,20 +589,20 @@ impl CompanionPort for Host {
             } => {
                 let dir = self.dir.clone();
                 let mut credentials = FileCredentials::new(&self.data_dir);
-                let key = computer.key.then(|| credentials.get(&computer.key_name()));
-                let own = own_key(&mut credentials);
+                let key = computer
+                    .key
+                    .then(|| credentials.get(&computer.key_name()))
+                    .flatten();
+                let own = own_key(&mut credentials, password.is_some());
+                let keys = check_keys(computer.key, key, own, password.is_some());
                 let engine = self.engine.clone();
                 tokio::spawn(async move {
-                    let result = match (key, own) {
-                        (Some(None), _) => Err(
-                            "Its private key is missing from this computer's credential store: remove the computer and add it again"
-                                .to_owned(),
-                        ),
-                        (_, Err(why)) => Err(why),
-                        (key, Ok(own)) => {
+                    let result = match keys {
+                        Err(failure) => Err(failure),
+                        Ok((pasted, own)) => {
                             let sign_in = SignIn {
-                                pasted: key.as_ref().and_then(Option::as_deref),
-                                own: Some(&own),
+                                pasted: pasted.as_deref(),
+                                own: own.as_ref(),
                                 password: password.as_ref().map(|p| p.0.as_str()),
                             };
                             check(&dir, None, &computer, sign_in).await
@@ -311,52 +657,136 @@ pub(crate) enum Way<'a> {
     Own(&'a OwnKey),
     /// The password, with UXDuck's own key added once signed in.
     Password(&'a OwnKey, &'a str),
+    /// The password alone, running nothing: what proves the password signs
+    /// in before UXDuck's key is added ([`proven`]).
+    PasswordOnly(&'a str),
 }
 
-/// Signs in to `computer` and reads what it runs: with the key the person
-/// gave it, else their own SSH config and agent and then UXDuck's own key,
-/// each alone so a server's limit on tries is not spent on keys it will
-/// refuse. `config` replaces the person's `~/.ssh/config`, for tests.
+/// Signs in to `computer` and reads what it runs: with its password when
+/// one was typed, to add UXDuck's own key, else the key the person gave it,
+/// else their own SSH config and agent and then UXDuck's own key, each alone
+/// so a server's limit on tries is not spent on keys it will refuse.
+/// `config` replaces the person's `~/.ssh/config`, for tests.
 pub(crate) async fn check(
     dir: &Path,
     config: Option<&Path>,
     computer: &CompanionComputer,
     sign_in: SignIn<'_>,
-) -> Result<Found, String> {
-    std::fs::create_dir_all(dir)
+) -> Result<Found, CheckFailure> {
+    if let Some(password) = sign_in.password
+        && let Some(problem) = password_problem(password)
+    {
+        return Err(CheckFailure {
+            problem,
+            kind: CheckProblem::Password,
+            detail: None,
+        });
+    }
+    create_private_dir(dir)
         .map_err(|e| format!("Cannot keep host keys in {}: {e}", dir.display()))?;
     let known_hosts = dir.join(format!("{}.known_hosts", computer.id));
+    // A typed password comes first, even for a computer with a key given
+    // for it: the person chose it, and it alone adds UXDuck's key (FB-268).
     let ways = match sign_in {
-        SignIn {
-            pasted: Some(key), ..
-        } => vec![Way::Pasted(key)],
         SignIn {
             own: Some(own),
             password: Some(password),
             ..
         } => vec![Way::Password(own, password)],
+        SignIn {
+            pasted: Some(key), ..
+        } => vec![Way::Pasted(key)],
         SignIn { own: Some(own), .. } => vec![Way::Person, Way::Own(own)],
         _ => vec![Way::Person],
     };
-    let mut output = None;
+    let mut last = None;
     for way in ways {
+        if let Way::Password(_, password) = way {
+            let probe = run(
+                dir,
+                config,
+                computer,
+                &known_hosts,
+                Way::PasswordOnly(password),
+                None,
+            )
+            .await?;
+            if !proven(&probe) {
+                return Err(unproven(computer, way, &probe));
+            }
+        }
         let tried = run(dir, config, computer, &known_hosts, way, None).await?;
-        let again = !tried.output.status.success()
-            && refused(&String::from_utf8_lossy(&tried.output.stderr));
-        output = Some(tried);
+        let again = !tried.output.status.success() && refused(&tried.log);
+        last = Some((way, tried));
         if !again {
             break;
         }
     }
-    let Some(output) = output else {
-        return Err("No way to sign in".to_owned());
+    let Some((way, output)) = last else {
+        return Err("No way to sign in".into());
     };
-    answer(computer, sign_in, &output)
+    answer(computer, sign_in, way, &output)
 }
 
-/// Whether `ssh` was refused the sign-in, rather than not reaching it.
-pub(crate) fn refused(stderr: &str) -> bool {
-    stderr.contains("Permission denied") || stderr.contains("Too many authentication failures")
+/// Whether a `ssh` that could sign in with the password alone
+/// ([`Way::PasswordOnly`]) did: it ended with status 0, so it signed in and
+/// ran its command, and UXDuck's askpass gave it the password. Nothing
+/// a server says is read (FB-268).
+fn proven(probe: &Ran) -> bool {
+    probe.output.status.success() && probe.asked
+}
+
+/// Why a check with the password stopped before adding UXDuck's key, when
+/// it was not [`proven`].
+fn unproven(computer: &CompanionComputer, way: Way<'_>, probe: &Ran) -> CheckFailure {
+    let host = &computer.host;
+    let status = probe.output.status.code();
+    if status == Some(0) {
+        return CheckFailure {
+            problem: format!(
+                "Signed in to {host} without its password, so UXDuck did not add its key. Check again without the password."
+            ),
+            kind: CheckProblem::Other,
+            detail: None,
+        };
+    }
+    if status == Some(255) || status.is_none() {
+        let pinned = computer.check.as_ref().and_then(|c| c.host_key.as_deref());
+        return check_failure(computer, pinned, way, &probe.log);
+    }
+    CheckFailure {
+        problem: format!(
+            "Signed in to {host} with the password, but it could not run a command there, so UXDuck did not add its key. Check that its user's shell is a POSIX shell such as sh or bash."
+        ),
+        kind: CheckProblem::Other,
+        detail: status
+            .map(|code| format!("The command UXDuck ran there ended with status {code}.")),
+    }
+}
+
+/// The most bytes of a password `ssh` reads from UXDuck's askpass: OpenSSH's
+/// `ssh_askpass` reads into 1,024 bytes and keeps one for its end.
+const ASKPASS_MAX: usize = 1023;
+
+/// Why `ssh` cannot be given `password` as typed, when it cannot: it stops
+/// reading a password at a line break or a NUL, and reads at most
+/// [`ASKPASS_MAX`] bytes of it, so it would sign in with another (FB-268).
+fn password_problem(password: &str) -> Option<String> {
+    if password.contains(['\r', '\n', '\0']) {
+        return Some("ssh ends a password at a line break or a NUL character, so UXDuck cannot pass this one to it as typed. Change the password, or add your own key to ssh-agent and check again.".to_owned());
+    }
+    (password.len() > ASKPASS_MAX).then(|| {
+        format!(
+            "ssh reads at most {ASKPASS_MAX} bytes of a password, and this one is {} bytes, so UXDuck cannot pass it to ssh as typed. Use a shorter password, or add your own key to ssh-agent and check again.",
+            password.len()
+        )
+    })
+}
+
+/// Whether `ssh` was refused the sign-in before anything ran on the
+/// computer ([`refusal`]), so trying another way is safe.
+pub(crate) fn refused(log: &str) -> bool {
+    refusal(log).is_some()
 }
 
 /// Reach networking and cameras only through the exact previously verified
@@ -394,17 +824,20 @@ async fn pinned(
     for way in pinned_ways(sign_in.pasted, sign_in.own) {
         let ran = run_adapter(dir, None, computer, &trusted, way, Some((adapter, input))).await?;
         let output = &ran.output;
-        if !output.status.success() && refused(&String::from_utf8_lossy(&output.stderr)) {
-            continue;
-        }
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
-                || stderr.contains("Host key verification failed")
-            {
+            if [ran.log.as_str(), &stderr].iter().any(|said| {
+                said.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+                    || said.contains("Host key verification failed")
+            }) {
                 return Err(format!(
                     "The companion's SSH host key no longer matches. No {what} were changed."
                 ));
+            }
+            // Only a refusal before signing in, when nothing ran, is tried
+            // again another way.
+            if refused(&ran.log) {
+                continue;
             }
             if adapter == Adapter::Cameras {
                 return Err(camera_failure(&stderr));
@@ -423,9 +856,9 @@ async fn pinned(
             if !confirmed.output.status.success() {
                 return Err("The routing change could not be confirmed. Automatic rollback starts after 90 seconds on the companion.".into());
             }
-            return answer(computer, sign_in, &confirmed);
+            return answer(computer, sign_in, way, &confirmed).map_err(|failure| failure.problem);
         }
-        return answer(computer, sign_in, &ran);
+        return answer(computer, sign_in, way, &ran).map_err(|failure| failure.problem);
     }
     Err(format!(
         "SSH could not sign in. Check the computer again before setting up its {what}."
@@ -581,6 +1014,7 @@ pub(crate) struct Ssh {
 /// `askpass_file`, which the caller removes when `ssh` has ended.
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "every choice a caller makes about one ssh, in one place"
 )]
 pub(crate) fn ssh(
@@ -619,12 +1053,24 @@ pub(crate) fn ssh(
             option(&mut args, "IdentityAgent=none");
             option(&mut args, "BatchMode=yes");
         }
-        Way::Password(own, password) => {
-            only(&mut args, &own.private)?;
-            write_private(askpass_file, password)?;
+        Way::Password(_, password) | Way::PasswordOnly(password) => {
+            // The password alone, as typed, by the password method alone:
+            // no key or other method is tried, so its status 0 means the
+            // password signed in (FB-268).
+            write_new(askpass_file, password.as_bytes())
+                .map_err(|e| format!("Cannot pass the password to ssh: {e}"))?;
             let exe = std::env::current_exe()
                 .map_err(|e| format!("Cannot find UXDuck to answer ssh's password prompt: {e}"))?;
+            option(&mut args, "PreferredAuthentications=password");
+            option(&mut args, "PubkeyAuthentication=no");
+            option(&mut args, "KbdInteractiveAuthentication=no");
+            option(&mut args, "GSSAPIAuthentication=no");
+            option(&mut args, "HostbasedAuthentication=no");
             option(&mut args, "IdentityAgent=none");
+            // A session the person's own ssh already opened would sign in
+            // without the password.
+            option(&mut args, "ControlMaster=no");
+            option(&mut args, "ControlPath=none");
             option(&mut args, "BatchMode=no");
             option(&mut args, "NumberOfPasswordPrompts=1");
             envs.push(("SSH_ASKPASS", exe.into()));
@@ -741,18 +1187,20 @@ async fn run_adapter(
     let network = adapter.map(|(_, input)| input);
     let cameras = matches!(adapter, Some((Adapter::Cameras, _)));
     let mut timeout = CHECK_TIMEOUT;
-    let key_file = dir.join(format!("{}.key", computer.id));
-    let askpass_file = dir.join(format!("{}.askpass", computer.id));
+    let files = RunFiles::new(dir)?;
+    let key_file = files.path.join("key");
+    let askpass_file = files.path.join("askpass");
+    let log_file = files.path.join("ssh.log");
     let theirs = if network.is_none() {
         their_known_hosts(config, computer).await
     } else {
         Vec::new()
     };
-    let mut script = SCRIPT.to_owned();
-    if let Way::Password(own, _) = way {
-        script.push_str("; ");
-        script.push_str(&add_key(&own.public));
-    }
+    let mut script = match way {
+        Way::PasswordOnly(_) => "exit 0".to_owned(),
+        Way::Password(own, _) => format!("{}; {SCRIPT}", add_key(&own.public)),
+        _ => SCRIPT.to_owned(),
+    };
     if network.is_some() {
         let script_python = include_str!("companions/network.py").replace('\'', "'\"'\"'");
         let input: serde_json::Value = serde_json::from_str(network.unwrap_or_default())
@@ -808,7 +1256,11 @@ async fn run_adapter(
         }
     };
     let mut command = tokio::process::Command::new("ssh");
+    // What `ssh` says about itself goes to its own log, apart from a
+    // server's banner and what runs on the computer (FB-268).
     command
+        .arg("-E")
+        .arg(&log_file)
         .args(&built.args)
         .envs(built.envs.iter().map(|(name, value)| (*name, value)))
         .stdin(if network.is_some() {
@@ -848,34 +1300,75 @@ async fn run_adapter(
         Ok(Err(error)) => Err(format!("Cannot run ssh: {error}")),
         Ok(Ok(output)) => Ok(Ran {
             output,
+            log: std::fs::read_to_string(&log_file).unwrap_or_default(),
+            asked: askpass_used(&askpass_file).exists(),
             started_ns,
             ended_ns,
         }),
     }
 }
 
-/// What a finished `ssh` says: the computer's system, or why not.
-fn answer(computer: &CompanionComputer, sign_in: SignIn<'_>, ran: &Ran) -> Result<Found, String> {
+/// What a finished `ssh`, signed in one `way`, says: the computer's
+/// system, or why not.
+fn answer(
+    computer: &CompanionComputer,
+    sign_in: SignIn<'_>,
+    way: Way<'_>,
+    ran: &Ran,
+) -> Result<Found, CheckFailure> {
     let output = &ran.output;
     let pinned = computer.check.as_ref().and_then(|c| c.host_key.as_deref());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        return Err(failure(&computer.host, pinned, &stderr));
+    if !output.status.success() && !signed_in(&ran.log) {
+        return Err(check_failure(computer, pinned, way, &ran.log));
     }
-    let (host_key, certified) = served_key(&stderr)
+    let (host_key, certified) = served_key(&ran.log)
         .ok_or_else(|| "Signed in, but ssh did not say which host key it was sent".to_owned())?;
     if let Some(pinned) = pinned
         && !certified
         && pinned != host_key
     {
-        return Err(changed(&computer.host, pinned, Some(&host_key)));
+        return Err(CheckFailure {
+            problem: changed(&computer.host, pinned, Some(&host_key)),
+            kind: CheckProblem::HostKey,
+            detail: None,
+        });
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // Signed in, so what failed ran on the computer, whose words are never
+    // shown: they may echo anything, a password included (FB-268).
+    let ended = output
+        .status
+        .code()
+        .map(|code| format!("The commands UXDuck ran there ended with status {code}."));
+    if matches!(way, Way::Password(..)) && !ran.asked {
+        return Err(CheckFailure {
+            problem: format!(
+                "Signed in to {} without its password, so UXDuck did not add its key. Check again without the password.",
+                computer.host
+            ),
+            kind: CheckProblem::Other,
+            detail: ended,
+        });
+    }
     if sign_in.password.is_some() && !stdout.lines().any(|l| l == "keyed=yes") {
-        return Err(format!(
-            "Signed in to {}, but could not add UXDuck's key to its ~/.ssh/authorized_keys",
-            computer.host
-        ));
+        return Err(CheckFailure {
+            problem: format!(
+                "Signed in to {} with the password, but could not add UXDuck's key to its ~/.ssh/authorized_keys. Check that the user UXDuck signs in as owns its home folder.",
+                computer.host
+            ),
+            kind: CheckProblem::Other,
+            detail: ended,
+        });
+    }
+    if !output.status.success() {
+        return Err(CheckFailure {
+            problem: format!(
+                "Signed in to {}, but the commands UXDuck runs there to read it failed. Check that its user's shell is a POSIX shell such as sh or bash.",
+                computer.host
+            ),
+            kind: CheckProblem::Other,
+            detail: ended,
+        });
     }
     let field = |name: &str| {
         stdout
@@ -989,20 +1482,25 @@ fn add_key(public: &str) -> String {
     )
 }
 
+/// Writes a key or a host key for `ssh` to read in a new file at `path`
+/// that only this computer's account may open, from the moment it exists
+/// (FB-268). A file already at `path` is removed, never opened, so neither
+/// its permissions nor whatever it links to play a part.
 pub(crate) fn write_private(path: &Path, key: &str) -> Result<(), String> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut text = key.trim().to_owned();
     text.push('\n');
-    std::io::Write::write_all(
-        &mut options
-            .open(path)
-            .map_err(|e| format!("Cannot write its key for ssh: {e}"))?,
-        text.as_bytes(),
-    )
-    .map_err(|e| format!("Cannot write its key for ssh: {e}"))
+    write_new(path, text.as_bytes()).map_err(|e| format!("Cannot write its key for ssh: {e}"))
+}
+
+/// [`write_private`]'s file, holding `bytes` exactly.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Err(error) = std::fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error);
+    }
+    let mut file = create_private(path)?;
+    std::io::Write::write_all(&mut file, bytes)
 }
 
 /// The known-hosts files the person's own `ssh` reads for this computer, as
@@ -1061,8 +1559,10 @@ fn changed(host: &str, pinned: &str, now: Option<&str>) -> String {
 /// Whether a terminal's `ssh` signed in, as its log says at
 /// `LogLevel=VERBOSE`.
 pub(crate) fn signed_in(log: &str) -> bool {
-    log.lines()
-        .any(|line| line.starts_with("Authenticated to "))
+    log.lines().any(|line| {
+        line.starts_with("Authenticated to ")
+            || line.starts_with("debug1: Authentication succeeded")
+    })
 }
 
 /// Why a terminal's `ssh` did not sign in, for people, from what it wrote
@@ -1093,39 +1593,261 @@ pub(crate) fn last_said(log: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Why ssh failed, for people.
-fn failure(host: &str, pinned: Option<&str>, stderr: &str) -> String {
-    if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
-        let now = stderr
-            .split_whitespace()
-            .find(|w| w.starts_with("SHA256:"))
-            .map(|w| w.trim_end_matches('.'));
-        return changed(host, pinned.unwrap_or("its first key"), now);
+/// The ways to sign in `ssh` knows by name, the only ones a check's detail
+/// names. A server may send any other name.
+const METHODS: [&str; 6] = [
+    "publickey",
+    "password",
+    "keyboard-interactive",
+    "hostbased",
+    "gssapi-with-mic",
+    "gssapi-keyex",
+];
+
+/// The last line in `ssh`'s log: its own last word, since it stops once it
+/// gives up, so nothing a server sends comes after it (FB-268).
+fn last_line(log: &str) -> &str {
+    log.lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or_default()
+}
+
+/// Whether `ssh` refused the computer's host key. A server can only add
+/// these words, never hide them, so they come before every other reading.
+fn host_key_failed(log: &str) -> bool {
+    log.lines().map(str::trim).any(|line| {
+        line == "Host key verification failed."
+            || line.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+    })
+}
+
+/// The ways to sign in the computer offered when it refused every one,
+/// from `ssh`'s last line, `user@host: Permission denied (publickey,password).`,
+/// without the ones `ssh` does not know by name. Empty when the computer
+/// ended the connection while UXDuck was signing in, as sshd does after too
+/// many tries. None when `ssh` signed in, refused the host key or ended for
+/// another reason: only Some says nothing ran on the computer.
+fn refusal(log: &str) -> Option<Vec<&'static str>> {
+    if signed_in(log) || host_key_failed(log) {
+        return None;
     }
-    if refused(stderr) {
+    let last = last_line(log);
+    if let Some(methods) = last
+        .split_once(": Permission denied (")
+        .filter(|(who, _)| !who.starts_with("debug"))
+        .and_then(|(_, rest)| rest.strip_suffix(")."))
+    {
+        let mut known = Vec::new();
+        for method in methods.split(',') {
+            if method.is_empty()
+                || !method
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "@._-".contains(c))
+            {
+                return None;
+            }
+            known.extend(METHODS.iter().find(|name| **name == method));
+        }
+        return Some(known);
+    }
+    let ended = [
+        "Disconnected from ",
+        "Connection closed by ",
+        "Connection reset by ",
+    ]
+    .iter()
+    .any(|said| last.starts_with(said));
+    let signing_in = log.lines().any(|line| {
+        line.trim()
+            .starts_with("debug1: Authentications that can continue: ")
+    });
+    (ended && signing_in).then(Vec::new)
+}
+
+/// Why `ssh` did not reach the computer at all, for people, from its last
+/// line.
+fn unreached(host: &str, log: &str) -> Option<String> {
+    let last = last_line(log);
+    if last.starts_with("ssh: Could not resolve hostname ") {
+        return Some(format!(
+            "{host} was not found: check its name, and that it is on this network"
+        ));
+    }
+    let why = last.strip_prefix("ssh: connect to host ")?;
+    if why.ends_with(": Connection refused") {
+        return Some(format!(
+            "{host} refused the connection: is SSH turned on, and is the port right?"
+        ));
+    }
+    [
+        "Connection timed out",
+        "Operation timed out",
+        "No route to host",
+        "Network is unreachable",
+        "Host is down",
+    ]
+    .iter()
+    .any(|said| why.ends_with(said))
+    .then(|| {
+        format!(
+            "{host} did not answer. Check that it is on, that it is on this network, and that its address is right."
+        )
+    })
+}
+
+/// The fingerprint `ssh` says a changed host key now has, when it is one.
+fn sent_fingerprint(log: &str) -> Option<&str> {
+    log.lines().map(str::trim).find_map(|line| {
+        let key = line.strip_suffix('.').unwrap_or(line);
+        let hash = key.strip_prefix("SHA256:")?;
+        (hash.len() == 43
+            && hash
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/'))
+        .then_some(key)
+    })
+}
+
+/// `text` from a local tool without any line that looks like part of a key.
+/// None when nothing is left.
+fn hidden(text: &str) -> Option<String> {
+    let keyish = |line: &str| {
+        line.contains("PRIVATE KEY")
+            || line.split_whitespace().any(|word| {
+                word.len() >= 40
+                    && word
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+                    && !word.starts_with("SHA256:")
+            })
+    };
+    let kept = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty() && !keyish(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!kept.is_empty()).then_some(kept)
+}
+
+/// Why a check that tried to sign in one `way` did not (FB-268): what
+/// failed and what to do, and the kind of problem, so the app offers a
+/// check with the password only where it helps. Both are UXDuck's own
+/// words, chosen by where `ssh`'s log ended, and only choose what UXDuck
+/// says: nothing from the log is kept, since a server can write there too.
+fn check_failure(
+    computer: &CompanionComputer,
+    pinned: Option<&str>,
+    way: Way<'_>,
+    log: &str,
+) -> CheckFailure {
+    let host = &computer.host;
+    let fail = |kind, problem: String, detail: Option<String>| CheckFailure {
+        problem,
+        kind,
+        detail,
+    };
+    let given = matches!(way, Way::Pasted(_));
+    if host_key_failed(log) {
+        return fail(
+            CheckProblem::HostKey,
+            changed(host, pinned.unwrap_or("its first key"), None),
+            None,
+        );
+    }
+    let Some(methods) = refusal(log) else {
+        let kind = if unreached(host, log).is_some() {
+            CheckProblem::Unreachable
+        } else {
+            CheckProblem::Other
+        };
+        return fail(kind, failure(host, pinned, log), None);
+    };
+    let lines = || log.lines().map(str::trim);
+    if lines().any(|line| {
+        line.starts_with("Bad permissions.")
+            || line.starts_with("Permissions 0")
+            || line.contains("UNPROTECTED PRIVATE KEY FILE")
+            || (line.starts_with("Load key ") && line.ends_with(": bad permissions"))
+    }) {
+        return fail(
+            if given { CheckProblem::GivenKey } else { CheckProblem::Key },
+            "ssh would not use the key UXDuck gave it, because other accounts on this computer could open the key's file.".to_owned(),
+            None,
+        );
+    }
+    if given && lines().any(|line| line.starts_with("Load key ")) {
+        return fail(
+            CheckProblem::GivenKey,
+            format!(
+                "ssh cannot read the private key you gave for {host}. Remove the computer and add it again with the whole key file and no passphrase."
+            ),
+            None,
+        );
+    }
+    let no_password = !methods.is_empty() && !methods.contains(&"password");
+    match way {
+        Way::Password(..) | Way::PasswordOnly(_) | Way::Person | Way::Own(_) if no_password => {
+            fail(
+                CheckProblem::PasswordOff,
+                if methods.contains(&"keyboard-interactive") {
+                    format!(
+                        "{host} takes passwords only through keyboard-interactive, which UXDuck does not use, so UXDuck cannot add its key with a password. Turn on PasswordAuthentication in its /etc/ssh/sshd_config and restart its SSH service, or add your own key to ssh-agent and check again."
+                    )
+                } else {
+                    format!(
+                        "{host} offered no password method when UXDuck tried to sign in, so UXDuck cannot add its key with a password. Turn on PasswordAuthentication in its /etc/ssh/sshd_config and restart its SSH service, or add your own key to ssh-agent and check again."
+                    )
+                },
+                None,
+            )
+        }
+        Way::Password(..) | Way::PasswordOnly(_) => fail(
+            CheckProblem::Password,
+            match &computer.user {
+                Some(user) => format!(
+                    "{host} refused the password for {user}. Check the password, and that {user} is a user on it."
+                ),
+                None => format!(
+                    "{host} refused the password. Check the password. The user it signs in as comes from your SSH config, else this computer's own user name, so if that is not a user on it, remove the computer and add it again with its user."
+                ),
+            },
+            None,
+        ),
+        Way::Pasted(_) => fail(
+            CheckProblem::GivenKey,
+            format!(
+                "{host} refused the private key you gave for it. Remove the computer and add it again with a key its user accepts, or with no key, so a check with its password can add UXDuck's own."
+            ),
+            None,
+        ),
+        Way::Person | Way::Own(_) => fail(CheckProblem::SignIn, failure(host, pinned, log), None),
+    }
+}
+
+/// Why ssh failed, for people, in UXDuck's own words (FB-268).
+fn failure(host: &str, pinned: Option<&str>, log: &str) -> String {
+    if log.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
+        return changed(
+            host,
+            pinned.unwrap_or("its first key"),
+            sent_fingerprint(log),
+        );
+    }
+    if host_key_failed(log) {
+        return changed(host, pinned.unwrap_or("its first key"), None);
+    }
+    if refused(log) {
         return format!(
             "{host} refused the sign-in: add your key to ssh-agent, or check once with its password so UXDuck adds its own key"
         );
     }
-    if stderr.contains("Could not resolve hostname") {
-        return format!("{host} was not found: check its name, and that it is on this network");
-    }
-    if stderr.contains("Connection refused") {
-        return format!("{host} refused the connection: is SSH turned on, and is the port right?");
-    }
-    let last = stderr
-        .lines()
-        .map(str::trim)
-        .rfind(|l| {
-            !l.is_empty()
-                && !l.starts_with("Warning: Permanently added")
-                && !l.starts_with("debug")
-                && !l.starts_with("OpenSSH_")
-                && !l.starts_with("Transferred:")
-                && !l.starts_with("Bytes per second")
-        })
-        .unwrap_or("ssh failed");
-    format!("Cannot reach {host}: {last}")
+    unreached(host, log).unwrap_or_else(|| {
+        format!(
+            "Cannot reach {host} over SSH. Run ssh to it in a terminal on this computer to see why."
+        )
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -1204,17 +1926,87 @@ mod tests {
 
     /// An sshd of this user's on a free port, with its own host key and
     /// one client key, run from a temporary folder.
+    /// A test's own sshd. The test holds its listening port for as long as
+    /// it lives and runs `sshd -i` for each connection, so no other test's
+    /// server can ever answer on it.
     struct Server {
         dir: tempfile::TempDir,
         port: u16,
-        child: std::process::Child,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        accepting: Option<std::thread::JoinHandle<()>>,
     }
 
     impl Drop for Server {
         fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(accepting) = self.accepting.take() {
+                let _ = accepting.join();
+            }
         }
+    }
+
+    /// Serves the sshd configuration in `dir` on `port`, or on a port the
+    /// system picks, and checks that the server answering there sends the
+    /// host key at `host_key`.
+    fn serve(dir: tempfile::TempDir, port: Option<u16>, host_key: &Path) -> Server {
+        use std::os::fd::OwnedFd;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
+            .expect("the test's sshd port is free");
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let config = dir.path().join("sshd_config");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let accepting = std::thread::spawn(move || {
+            let mut sessions: Vec<std::process::Child> = Vec::new();
+            while !stopped.load(Ordering::Relaxed) {
+                sessions.retain_mut(|session| session.try_wait().ok().flatten().is_none());
+                let Ok((stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                let output = OwnedFd::from(stream.try_clone().unwrap());
+                let session = std::process::Command::new(sshd())
+                    .args(["-i", "-e", "-f"])
+                    .arg(&config)
+                    .stdin(Stdio::from(OwnedFd::from(stream)))
+                    .stdout(Stdio::from(output))
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap();
+                sessions.push(session);
+            }
+            for mut session in sessions {
+                let _ = session.kill();
+                let _ = session.wait();
+            }
+        });
+        let server = Server {
+            dir,
+            port,
+            stop,
+            accepting: Some(accepting),
+        };
+        let scanned = std::process::Command::new("ssh-keyscan")
+            .args(["-T", "10", "-t", "ed25519", "-p"])
+            .arg(port.to_string())
+            .arg("127.0.0.1")
+            .stderr(Stdio::null())
+            .output()
+            .expect("ssh-keyscan is needed for the companion SSH tests");
+        let sent = String::from_utf8_lossy(&scanned.stdout)
+            .split_whitespace()
+            .nth(2)
+            .map(str::to_owned);
+        let own = std::fs::read_to_string(host_key.with_extension("pub")).unwrap();
+        assert_eq!(
+            sent.as_deref(),
+            own.split_whitespace().nth(1),
+            "the sshd on port {port} is this test's own"
+        );
+        server
     }
 
     fn keygen(path: &Path) {
@@ -1262,36 +2054,17 @@ mod tests {
         }
         keygen(&root.join("client"));
         std::fs::copy(root.join("client.pub"), root.join("authorized_keys")).unwrap();
-        let port = port.unwrap_or_else(|| {
-            std::net::TcpListener::bind("127.0.0.1:0")
-                .unwrap()
-                .local_addr()
-                .unwrap()
-                .port()
-        });
         std::fs::write(
             root.join("sshd_config"),
             format!(
-                "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nStrictModes no\nUsePAM no\n{extra}",
+                "HostKey {}\nAuthorizedKeysFile {}\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nStrictModes no\nUsePAM no\n{extra}",
                 root.join(host_key).display(),
                 root.join("authorized_keys").display(),
-                root.join("sshd.pid").display(),
             ),
         )
         .unwrap();
-        let child = std::process::Command::new(sshd())
-            .args(["-D", "-e", "-f"])
-            .arg(root.join("sshd_config"))
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        for _ in 0..100 {
-            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        Server { dir, port, child }
+        let host_key = root.join(host_key);
+        serve(dir, port, &host_key)
     }
 
     fn computer(server: &Server) -> CompanionComputer {
@@ -1343,6 +2116,8 @@ mod tests {
             uxduck: None,
             host_key: found.host_key,
             problem: None,
+            problem_kind: None,
+            detail: None,
             clock: None,
             reports_as: None,
             network: None,
@@ -1386,6 +2161,8 @@ mod tests {
             uxduck: None,
             host_key: found.host_key,
             problem: None,
+            problem_kind: None,
+            detail: None,
             clock: None,
             reports_as: None,
             network: None,
@@ -1452,6 +2229,8 @@ mod tests {
             uxduck: None,
             host_key: Some(pinned.clone()),
             problem: None,
+            problem_kind: None,
+            detail: None,
             clock: None,
             reports_as: None,
             network: None,
@@ -1469,7 +2248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_changed_host_key_is_refused_with_both_fingerprints() {
+    async fn a_changed_host_key_is_refused_with_the_pinned_fingerprint() {
         let keys = tempfile::tempdir().unwrap();
         let config = keys.path().join("ssh_config");
         std::fs::write(&config, "UserKnownHostsFile /dev/null\n").unwrap();
@@ -1492,6 +2271,8 @@ mod tests {
             uxduck: None,
             host_key: Some(pinned.clone()),
             problem: None,
+            problem_kind: None,
+            detail: None,
             clock: None,
             reports_as: None,
             network: None,
@@ -1508,14 +2289,16 @@ mod tests {
         )
         .await
         .unwrap_err();
+        assert_eq!(why.kind, CheckProblem::HostKey);
+        let why = why.problem;
         assert!(why.contains("host key changed"), "{why}");
         assert!(why.contains(&pinned), "{why}");
-        let now = why
-            .split_whitespace()
-            .filter(|w| w.starts_with("SHA256:"))
-            .nth(1)
-            .unwrap_or_else(|| panic!("no second fingerprint: {why}"));
-        assert_ne!(now.trim_end_matches('.'), pinned);
+        assert!(why.contains("now sends another."), "{why}");
+        assert_eq!(
+            why.matches("SHA256:").count(),
+            1,
+            "only the pinned fingerprint, never one read from ssh's log: {why}"
+        );
     }
 
     /// The person's agent and config are tried, and UXDuck's own key alone
@@ -1581,6 +2364,8 @@ mod tests {
             uxduck: None,
             host_key: found.host_key,
             problem: None,
+            problem_kind: None,
+            detail: None,
             clock: None,
             reports_as: None,
             network: None,
@@ -1633,8 +2418,10 @@ mod tests {
             output: std::process::Output {
                 status: std::os::unix::process::ExitStatusExt::from_raw(0),
                 stdout: stdout.as_bytes().to_vec(),
-                stderr: b"debug1: Server host key: ssh-ed25519 SHA256:abc\n".to_vec(),
+                stderr: Vec::new(),
             },
+            log: "debug1: Server host key: ssh-ed25519 SHA256:abc\n".to_owned(),
+            asked: false,
             started_ns,
             ended_ns,
         }
@@ -1662,7 +2449,13 @@ mod tests {
         let out = format!(
             "os=Debian GNU/Linux 13 (trixie)\narch=aarch64\nuxduck=\nclock={read}\nNTP=yes\nNTPSynchronized=no\ntimeservice=systemd-timesyncd\n"
         );
-        let found = answer(&computer, SignIn::default(), &ran(&out, (started, ended))).unwrap();
+        let found = answer(
+            &computer,
+            SignIn::default(),
+            Way::Person,
+            &ran(&out, (started, ended)),
+        )
+        .unwrap();
         assert_eq!(
             found.clock,
             Some(CompanionClock {
@@ -1677,7 +2470,13 @@ mod tests {
         // date that has no nanoseconds: the clock alone, with more doubt.
         let seconds = (started + 200_000_000) / 1_000_000_000;
         let out = format!("os=Alpine Linux v3.20\narch=x86_64\nclock={seconds}N\n");
-        let found = answer(&computer, SignIn::default(), &ran(&out, (started, ended))).unwrap();
+        let found = answer(
+            &computer,
+            SignIn::default(),
+            Way::Person,
+            &ran(&out, (started, ended)),
+        )
+        .unwrap();
         let clock = found.clock.unwrap();
         assert_eq!((clock.offset_ms, clock.within_ms), (300, 700));
         assert_eq!(
@@ -1688,6 +2487,7 @@ mod tests {
         let found = answer(
             &computer,
             SignIn::default(),
+            Way::Person,
             &ran("os=x\nclock=\n", (started, ended)),
         )
         .unwrap();
@@ -1764,6 +2564,981 @@ mod tests {
                 "ssh: Could not resolve hostname pi.local: nodename nor servname provided"
             )
             .contains("not found")
+        );
+    }
+
+    /// An sshd that takes passwords and refuses every one: running without
+    /// root, it cannot read the system's, so it refuses as for a wrong one.
+    /// It takes the public key `authorized` too, when given.
+    fn start_with_passwords(authorized: Option<&str>) -> Server {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        keygen(&root.join("host"));
+        std::fs::write(
+            root.join("sshd_config"),
+            format!(
+                "HostKey {}\nAuthorizedKeysFile {}\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\nStrictModes no\nUsePAM no\n",
+                root.join("host").display(),
+                authorized.map_or_else(
+                    || "none".to_owned(),
+                    |key| {
+                        let file = root.join("authorized_keys");
+                        std::fs::write(&file, key).unwrap();
+                        file.display().to_string()
+                    }
+                ),
+            ),
+        )
+        .unwrap();
+        let host_key = root.join("host");
+        serve(dir, None, &host_key)
+    }
+
+    fn quiet_config(keys: &Path) -> PathBuf {
+        let config = keys.join("ssh_config");
+        std::fs::write(&config, "UserKnownHostsFile /dev/null\n").unwrap();
+        config
+    }
+
+    fn made_key(dir: &Path, name: &str, passphrase: &str, kind: &str) -> String {
+        let path = dir.join(name);
+        let ok = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", kind, "-N", passphrase, "-C", "test", "-f"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "ssh-keygen failed");
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    fn keygen_public(dir: &Path, private: &str) -> String {
+        let path = dir.join("read");
+        write_private(&path, private).unwrap();
+        let out = std::process::Command::new("ssh-keygen")
+            .arg("-y")
+            .arg("-f")
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// FB-268: a password the computer refuses says so, for whom, and what
+    /// to check.
+    #[tokio::test]
+    async fn a_refused_password_says_for_whom_and_what_to_check() {
+        let server = start_with_passwords(None);
+        let keys = tempfile::tempdir().unwrap();
+        let config = quiet_config(keys.path());
+        let own = OwnKey {
+            private: made_key(keys.path(), "own", "", "ed25519"),
+            public: "ssh-ed25519 AAAA uxduck".into(),
+        };
+        let mut computer = computer(&server);
+        computer.key = false;
+        computer.user = Some("nobody-here".into());
+        let sign_in = SignIn {
+            own: Some(&own),
+            password: Some("wrong"),
+            ..SignIn::default()
+        };
+        let why = check(keys.path(), Some(&config), &computer, sign_in)
+            .await
+            .unwrap_err();
+        assert_eq!(why.kind, CheckProblem::Password, "{why:?}");
+        assert_eq!(
+            why.problem,
+            "127.0.0.1 refused the password for nobody-here. Check the password, and that nobody-here is a user on it."
+        );
+        assert_eq!(why.detail, None);
+    }
+
+    /// FB-268: a computer with password sign-in turned off says so, rather
+    /// than asking for the password again.
+    #[tokio::test]
+    async fn a_computer_that_takes_no_passwords_says_so() {
+        let server = start("host", None);
+        let keys = tempfile::tempdir().unwrap();
+        let config = quiet_config(keys.path());
+        let own = OwnKey {
+            private: made_key(keys.path(), "own", "", "ed25519"),
+            public: "ssh-ed25519 AAAA uxduck".into(),
+        };
+        let mut computer = computer(&server);
+        computer.key = false;
+        let sign_in = SignIn {
+            own: Some(&own),
+            password: Some("anything"),
+            ..SignIn::default()
+        };
+        let why = check(keys.path(), Some(&config), &computer, sign_in)
+            .await
+            .unwrap_err();
+        assert_eq!(why.kind, CheckProblem::PasswordOff, "{why:?}");
+        assert!(
+            why.problem
+                .contains("offered no password method when UXDuck tried to sign in")
+        );
+        assert!(why.problem.contains("PasswordAuthentication"));
+    }
+
+    /// FB-268: a key given for the computer that it refuses says to add the
+    /// computer again, since a check with a password would not change it.
+    #[tokio::test]
+    async fn a_refused_key_given_for_it_says_to_add_it_again() {
+        let server = start("host", None);
+        let keys = tempfile::tempdir().unwrap();
+        let config = quiet_config(keys.path());
+        let other = made_key(keys.path(), "other", "", "ed25519");
+        let why = check(
+            keys.path(),
+            Some(&config),
+            &computer(&server),
+            pasted(&other),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(why.kind, CheckProblem::GivenKey, "{why:?}");
+        assert!(
+            why.problem
+                .contains("refused the private key you gave for it")
+        );
+        assert!(why.problem.contains("add it again"));
+    }
+
+    /// FB-268: a computer that is not there reads as not answering, which a
+    /// password cannot help.
+    #[tokio::test]
+    async fn a_closed_port_reads_as_unreachable() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let keys = tempfile::tempdir().unwrap();
+        let config = quiet_config(keys.path());
+        let computer = CompanionComputer {
+            connectivity: None,
+            id: "ccclosed".into(),
+            name: "closed".into(),
+            host: "127.0.0.1".into(),
+            user: None,
+            port: Some(port),
+            role: CompanionRole::Report,
+            component_id: 191,
+            key: false,
+            check: None,
+        };
+        let why = check(keys.path(), Some(&config), &computer, SignIn::default())
+            .await
+            .unwrap_err();
+        assert_eq!(why.kind, CheckProblem::Unreachable, "{why:?}");
+        assert!(why.problem.contains("refused the connection"), "{why:?}");
+        assert_eq!(why.detail, None);
+    }
+
+    /// FB-268 review: a check with a password signs in with the password
+    /// alone, so a wrong one is refused even where UXDuck's own key would
+    /// sign in.
+    #[tokio::test]
+    async fn a_password_check_signs_in_with_the_password_alone() {
+        let keys = tempfile::tempdir().unwrap();
+        let config = quiet_config(keys.path());
+        let private = made_key(keys.path(), "own", "", "ed25519");
+        let public = std::fs::read_to_string(keys.path().join("own.pub")).unwrap();
+        let server = start_with_passwords(Some(&public));
+        let own = OwnKey {
+            private,
+            public: public.trim().to_owned(),
+        };
+        let mut computer = computer(&server);
+        computer.key = false;
+        let by_key = SignIn {
+            own: Some(&own),
+            ..SignIn::default()
+        };
+        if let Err(why) = check(keys.path(), Some(&config), &computer, by_key).await {
+            panic!("UXDuck's own key did not sign in: {why:?}");
+        }
+        let by_password = SignIn {
+            own: Some(&own),
+            password: Some("wrong"),
+            ..SignIn::default()
+        };
+        let why = check(keys.path(), Some(&config), &computer, by_password)
+            .await
+            .unwrap_err();
+        assert_eq!(why.kind, CheckProblem::Password, "{why:?}");
+    }
+
+    /// FB-268 review: once signed in, a command that failed on the computer
+    /// is never read as a refused password, and its words are not shown.
+    #[test]
+    fn a_failure_after_signing_in_is_not_a_sign_in_problem() {
+        let computer = CompanionComputer {
+            id: "c".into(),
+            name: "pi".into(),
+            host: "pi".into(),
+            user: None,
+            port: None,
+            role: CompanionRole::Report,
+            component_id: 192,
+            key: false,
+            check: None,
+            connectivity: None,
+        };
+        let own = OwnKey {
+            private: String::new(),
+            public: "ssh-ed25519 AAAA uxduck".into(),
+        };
+        let mut ran = ran("", (0, 0));
+        ran.output.status = std::os::unix::process::ExitStatusExt::from_raw(1 << 8);
+        ran.output.stderr =
+            b"sh: 1: cannot create /home/pi/.ssh/authorized_keys: Permission denied (secret).\n"
+                .to_vec();
+        ran.log
+            .push_str("Authenticated to pi ([10.0.0.2]:22) using \"password\".\n");
+        ran.asked = true;
+        let with_password = SignIn {
+            own: Some(&own),
+            password: Some("secret"),
+            ..SignIn::default()
+        };
+        let Err(why) = answer(
+            &computer,
+            with_password,
+            Way::Password(&own, "secret"),
+            &ran,
+        ) else {
+            panic!("a failed check was read");
+        };
+        assert_eq!(why.kind, CheckProblem::Other, "{why:?}");
+        assert!(
+            why.problem.contains("could not add UXDuck's key"),
+            "{why:?}"
+        );
+        let detail = why.detail.unwrap();
+        assert_eq!(detail, "The commands UXDuck ran there ended with status 1.");
+        let Err(why) = answer(&computer, SignIn::default(), Way::Person, &ran) else {
+            panic!("a failed check was read");
+        };
+        assert_eq!(why.kind, CheckProblem::Other, "{why:?}");
+        assert!(why.problem.contains("POSIX shell"), "{why:?}");
+    }
+
+    /// FB-268 delta review: a check's problem and detail are UXDuck's own
+    /// words and values it checked, never a server's words, and only ssh's
+    /// own last line says the sign-in was refused.
+    #[test]
+    fn a_servers_words_never_reach_a_check_failure() {
+        let computer = CompanionComputer {
+            connectivity: None,
+            id: "cc0123456789ab".into(),
+            name: "pi".into(),
+            host: "pi".into(),
+            user: Some("pi".into()),
+            port: None,
+            role: CompanionRole::Report,
+            component_id: 191,
+            key: false,
+            check: None,
+        };
+        let own = OwnKey {
+            private: String::new(),
+            public: String::new(),
+        };
+        let log = "OpenSSH_9.6p1\nWelcome, hunter2\ndebug1: Remote: hunter2\nReceived disconnect from 10.0.0.2 port 22:2: hunter2\nLoad key \"/k\": hunter2\nBad permissions. Try removing permissions for user: hunter2; rm on file /k.\npi@pi: Permission denied (publickey,password,hunter2).\n";
+        let echoed = "SHA256:hunter2hunter2hunter2hunter2hunter2hunter2h";
+        let forged = format!(
+            "OpenSSH_9.6p1\nReceived disconnect from 10.0.0.2 port 22:2: hunter2\nWARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n{echoed}\nHost key verification failed.\n"
+        );
+        for log in [log, forged.as_str()] {
+            for way in [
+                Way::Person,
+                Way::Own(&own),
+                Way::Pasted("k"),
+                Way::Password(&own, "hunter2"),
+                Way::PasswordOnly("hunter2"),
+            ] {
+                let why = check_failure(&computer, None, way, log);
+                let shown = format!("{} {:?}", why.problem, why.detail);
+                assert!(!shown.contains("hunter2"), "{shown}");
+                assert_eq!(why.detail, None);
+            }
+        }
+        let why = check_failure(&computer, None, Way::Password(&own, "hunter2"), log);
+        assert_eq!(why.kind, CheckProblem::Key, "{why:?}");
+        let why = check_failure(&computer, Some("SHA256:pinned"), Way::Person, &forged);
+        assert_eq!(why.kind, CheckProblem::HostKey);
+        assert_eq!(why.problem, changed("pi", "SHA256:pinned", None));
+        assert!(refused("pi@pi: Permission denied (password).\n"));
+        assert!(!refused("bash: /home/pi/.ssh: Permission denied\n"));
+        assert!(!refused(
+            "pi@pi: Permission denied (password).\ndebug1: Exit status 1\n"
+        ));
+        assert!(!refused(
+            "pi@pi: Permission denied (password).\nDisconnected from 10.0.0.2 port 22\n"
+        ));
+        assert!(refused(
+            "debug1: Authentications that can continue: publickey,password\nDisconnected from 10.0.0.2 port 22\n"
+        ));
+        assert!(!refused(
+            "pi@pi: Permission denied (password).\nAuthenticated to pi ([10.0.0.2]:22) using \"publickey\".\npi@pi: Permission denied (password).\n"
+        ));
+        assert!(!refused(
+            "Host key verification failed.\npi@pi: Permission denied (password).\n"
+        ));
+        assert!(!refused("debug1: pi@pi: Permission denied (password).\n"));
+        assert!(!refused("pi@pi: Permission denied (pass word).\n"));
+        assert_eq!(
+            refusal("pi@pi: Permission denied (publickey,custom-way).\n"),
+            Some(vec!["publickey"])
+        );
+        assert_eq!(
+            failure(
+                "pi",
+                None,
+                "Received disconnect from 10.0.0.2 port 22:2: hunter2\n"
+            ),
+            "Cannot reach pi over SSH. Run ssh to it in a terminal on this computer to see why."
+        );
+    }
+
+    /// FB-268 delta review: a password ssh cannot be given as typed is
+    /// refused before ssh runs, saying why.
+    #[test]
+    fn a_password_ssh_would_cut_short_is_refused() {
+        for password in ["a\nb", "a\rb", "a\0b"] {
+            assert!(
+                password_problem(password).is_some_and(|why| why.contains("line break")),
+                "{password:?}"
+            );
+        }
+        assert_eq!(password_problem(&"p".repeat(ASKPASS_MAX)), None);
+        assert_eq!(password_problem(" pass word "), None);
+        let long = password_problem(&"p".repeat(ASKPASS_MAX + 1)).unwrap();
+        assert!(long.contains("1023 bytes"), "{long}");
+        assert!(long.contains("1024 bytes"), "{long}");
+        assert!(!long.contains(';'));
+    }
+
+    /// FB-268 review: a check with the password signs in by the password
+    /// method alone, never through a session the person's own ssh opened,
+    /// so its status 0 means the password signed in.
+    #[test]
+    fn a_password_check_opens_its_own_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = OwnKey {
+            private: String::new(),
+            public: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ uxduck".into(),
+        };
+        let computer = CompanionComputer {
+            connectivity: None,
+            id: "cc0123456789ab".into(),
+            name: "pi".into(),
+            host: "pi".into(),
+            user: None,
+            port: None,
+            role: CompanionRole::Report,
+            component_id: 191,
+            key: false,
+            check: None,
+        };
+        for (at, way) in [Way::Password(&own, "pw"), Way::PasswordOnly("pw")]
+            .into_iter()
+            .enumerate()
+        {
+            let built = ssh(
+                &dir.path().join(format!("key{at}")),
+                &dir.path().join(format!("askpass{at}")),
+                None,
+                &computer,
+                way,
+                HostKeys::Pinned(&dir.path().join("known_hosts")),
+                Session::Batch,
+                Some("exit 0"),
+            )
+            .unwrap();
+            let args: Vec<String> = built
+                .args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            for option in [
+                "PreferredAuthentications=password",
+                "PubkeyAuthentication=no",
+                "KbdInteractiveAuthentication=no",
+                "GSSAPIAuthentication=no",
+                "HostbasedAuthentication=no",
+                "IdentityAgent=none",
+                "ControlMaster=no",
+                "ControlPath=none",
+            ] {
+                assert!(args.iter().any(|arg| arg == option), "{option}: {args:?}");
+            }
+            assert!(!args.iter().any(|arg| arg.contains("keyboard-interactive")));
+        }
+    }
+
+    /// FB-268 review: only ssh's exit status and UXDuck's own askpass prove
+    /// the password signed in. Lines in ssh's log saying so, which a server
+    /// can write, prove nothing.
+    #[test]
+    fn a_forged_success_line_never_proves_the_password() {
+        let computer = CompanionComputer {
+            connectivity: None,
+            id: "cc0123456789ab".into(),
+            name: "pi".into(),
+            host: "pi".into(),
+            user: Some("pi".into()),
+            port: None,
+            role: CompanionRole::Report,
+            component_id: 191,
+            key: false,
+            check: None,
+        };
+        let own = OwnKey {
+            private: String::new(),
+            public: String::new(),
+        };
+        let probe = |status: i32, asked: bool| {
+            let mut probe = ran("", (0, 0));
+            probe.output.status = std::os::unix::process::ExitStatusExt::from_raw(status << 8);
+            probe.log = "Authenticated to pi ([10.0.0.2]:22) using \"password\".\ndebug1: Authentication succeeded (password).\npi@pi: Permission denied (password).\n".to_owned();
+            probe.asked = asked;
+            probe
+        };
+        let way = Way::Password(&own, "pw");
+        let forged = probe(255, true);
+        assert!(!proven(&forged));
+        assert_ne!(unproven(&computer, way, &forged).kind, CheckProblem::SignIn);
+        let mut refused = probe(255, true);
+        refused.log = "pi@pi: Permission denied (password).\n".to_owned();
+        assert_eq!(
+            unproven(&computer, way, &refused).kind,
+            CheckProblem::Password
+        );
+        let without = probe(0, false);
+        assert!(!proven(&without));
+        assert!(
+            unproven(&computer, way, &without)
+                .problem
+                .contains("without its password")
+        );
+        let shell = probe(127, true);
+        assert!(!proven(&shell));
+        assert!(
+            unproven(&computer, way, &shell)
+                .problem
+                .contains("POSIX shell")
+        );
+        assert!(proven(&probe(0, true)));
+    }
+
+    /// FB-268 delta review: a check with the password that signed in some
+    /// other way adds no key and says so.
+    #[test]
+    fn a_password_check_that_signed_in_without_it_adds_nothing() {
+        let computer = CompanionComputer {
+            connectivity: None,
+            id: "cc0123456789ab".into(),
+            name: "pi".into(),
+            host: "pi".into(),
+            user: None,
+            port: None,
+            role: CompanionRole::Report,
+            component_id: 191,
+            key: false,
+            check: None,
+        };
+        let own = OwnKey {
+            private: String::new(),
+            public: "ssh-ed25519 AAAA uxduck".into(),
+        };
+        let mut ran = ran("keyed=yes\n", (0, 0));
+        ran.log
+            .push_str("Authenticated to pi ([10.0.0.2]:22) using \"publickey\".\n");
+        let sign_in = SignIn {
+            own: Some(&own),
+            password: Some("pw"),
+            ..SignIn::default()
+        };
+        let Err(why) = answer(&computer, sign_in, Way::Password(&own, "pw"), &ran) else {
+            panic!("a key was taken as added");
+        };
+        assert!(
+            why.problem.contains("without its password"),
+            "{}",
+            why.problem
+        );
+    }
+
+    /// FB-268 review: the files ssh is given go in a folder of their own
+    /// that is removed when it ends, and what a crash left is removed when
+    /// UXDuck starts.
+    #[test]
+    fn no_password_or_key_is_left_behind() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let old = dir.path().join(RUNS).join("ssh-a1B2c3");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("askpass"), "pw").unwrap();
+        std::fs::create_dir_all(dir.path().join(RUNS).join("kept")).unwrap();
+        std::fs::write(dir.path().join(RUNS).join("ssh-a1B2c3d"), "kept").unwrap();
+        std::fs::write(dir.path().join("cc0123456789ab.askpass"), "pw").unwrap();
+        std::fs::write(dir.path().join("cc0123456789ab.key"), "k").unwrap();
+        std::fs::write(dir.path().join("cc0123456789ab.known_hosts"), "h").unwrap();
+        std::fs::write(dir.path().join("ccnothex00000.key"), "kept").unwrap();
+        std::fs::write(dir.path().join("notes.key"), "kept").unwrap();
+        assert_eq!(private_dir_problem(dir.path()), None);
+        sweep(dir.path());
+        let names = |dir: &Path| {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            names(dir.path()),
+            [
+                "cc0123456789ab.known_hosts",
+                "ccnothex00000.key",
+                "notes.key",
+                RUNS
+            ]
+        );
+        assert_eq!(names(&dir.path().join(RUNS)), ["kept", "ssh-a1B2c3d"]);
+        let run = RunFiles::new(dir.path()).unwrap();
+        let path = run.path.clone();
+        write_new(&path.join("askpass"), b" pass word \n").unwrap();
+        assert_eq!(
+            std::fs::read(path.join("askpass")).unwrap(),
+            b" pass word \n"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "a run's folder is this account's alone"
+        );
+        drop(run);
+        assert!(!path.exists());
+        assert_eq!(names(&dir.path().join(RUNS)), ["kept", "ssh-a1B2c3d"]);
+    }
+
+    /// FB-268 review: the sweep removes nothing from a companions folder
+    /// another account may open or change, since what is in it could change
+    /// between looking and removing.
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_leaves_a_folder_others_may_change() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let companions = dir.path().join("companions");
+        std::fs::create_dir_all(companions.join(RUNS).join("ssh-a1B2c3")).unwrap();
+        std::fs::write(companions.join("cc0123456789ab.key"), "k").unwrap();
+        std::fs::set_permissions(&companions, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            private_dir_problem(&companions).is_some_and(|why| why.contains("755")),
+            "{:?}",
+            private_dir_problem(&companions)
+        );
+        sweep(&companions);
+        assert!(companions.join(RUNS).join("ssh-a1B2c3").exists());
+        assert!(companions.join("cc0123456789ab.key").exists());
+        std::fs::set_permissions(&companions, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(private_dir_problem(&companions), None);
+        sweep(&companions);
+        assert!(!companions.join(RUNS).join("ssh-a1B2c3").exists());
+        assert!(!companions.join("cc0123456789ab.key").exists());
+        let made = dir.path().join("made").join("companions");
+        create_private_dir(&made).unwrap();
+        assert_eq!(private_dir_problem(&made), None);
+    }
+
+    /// FB-268 delta review: the sweep removes nothing through a link, for
+    /// the companions folder or its runs folder.
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_never_follows_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("ssh-a1B2c3")).unwrap();
+        std::fs::write(elsewhere.join("cc0123456789ab.key"), "kept").unwrap();
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+        sweep(&linked);
+        assert!(elsewhere.join("cc0123456789ab.key").exists());
+        assert!(elsewhere.join("ssh-a1B2c3").exists());
+        let companions = dir.path().join("companions");
+        create_private_dir(&companions).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, companions.join(RUNS)).unwrap();
+        std::fs::write(companions.join("cc0123456789ab.askpass"), "pw").unwrap();
+        sweep(&companions);
+        assert!(elsewhere.join("ssh-a1B2c3").exists());
+        assert!(!companions.join("cc0123456789ab.askpass").exists());
+    }
+
+    /// FB-268 review: a key is written to a new file, never through a link
+    /// or a file already at its path.
+    #[cfg(unix)]
+    #[test]
+    fn a_key_is_never_written_through_a_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "kept").unwrap();
+        let path = dir.path().join("cc.key");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        write_private(&path, " key \n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "key\n");
+    }
+
+    /// FB-268 review: a stored own key whose public half is whole but whose
+    /// private seed is damaged is refused, and a check with the password
+    /// replaces it.
+    #[test]
+    fn a_damaged_private_seed_is_refused_and_replaced() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let data = tempfile::tempdir().unwrap();
+        let mut credentials = FileCredentials::new(data.path());
+        let first = own_key(&mut credentials, false).unwrap();
+        let body: String = first
+            .private
+            .lines()
+            .filter(|line| !line.starts_with("-----"))
+            .collect();
+        let mut bytes = b64.decode(body).unwrap();
+        let blob = b64.decode(first.public.split(' ').nth(1).unwrap()).unwrap();
+        let key = &blob[blob.len() - 32..];
+        let at: Vec<usize> = bytes
+            .windows(32)
+            .enumerate()
+            .filter(|(_, window)| *window == key)
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            at.len(),
+            3,
+            "the public key, its copy and the secret's half"
+        );
+        bytes[at[2] - 32] ^= 1;
+        let damaged = format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+            b64.encode(&bytes)
+        );
+        uxduck_engine::runtime::Credentials::set(&mut credentials, OWN_KEY, &damaged).unwrap();
+        let Err(why) = own_key(&mut credentials, false) else {
+            panic!("a key with a damaged seed was used");
+        };
+        assert_eq!(why.kind, CheckProblem::Key);
+        assert!(why.problem.contains("cannot be read"), "{}", why.problem);
+        let new = own_key(&mut credentials, true).unwrap();
+        assert_ne!(new.public, first.public);
+        assert_eq!(own_key(&mut credentials, false).unwrap().public, new.public);
+    }
+
+    /// FB-268: UXDuck's own key is made once and its public line is read
+    /// from its text, with no file and no ssh-keygen, the same line
+    /// ssh-keygen gives.
+    #[test]
+    fn the_own_key_is_read_from_its_text() {
+        let data = tempfile::tempdir().unwrap();
+        let mut credentials = FileCredentials::new(data.path());
+        let first = own_key(&mut credentials, false).unwrap();
+        let again = own_key(&mut credentials, false).unwrap();
+        assert_eq!(first.private, again.private);
+        assert_eq!(first.public, again.public);
+        let read = keygen_public(data.path(), &first.private);
+        assert_eq!(first.public, format!("{read} uxduck"));
+        assert!(first.public.starts_with("ssh-ed25519 "));
+    }
+
+    /// FB-268: the public line read from a key's text is the one ssh-keygen
+    /// reads, for each kind of key, and a passphrase is noticed.
+    #[test]
+    fn public_lines_match_ssh_keygen() {
+        let dir = tempfile::tempdir().unwrap();
+        for kind in ["ed25519", "ecdsa", "rsa"] {
+            let private = made_key(dir.path(), kind, "", kind);
+            let (public, passphrase) = uxduck_engine::companions::openssh_public(&private).unwrap();
+            assert_eq!(public, keygen_public(dir.path(), &private), "{kind}");
+            assert!(!passphrase);
+        }
+        let locked = made_key(dir.path(), "locked", "a passphrase", "ed25519");
+        let (_, passphrase) = uxduck_engine::companions::openssh_public(&locked).unwrap();
+        assert!(passphrase);
+        let cut = &locked[..locked.len() / 2];
+        assert!(uxduck_engine::companions::openssh_public(cut).is_err());
+        assert!(
+            uxduck_engine::companions::openssh_public(&locked.replace("b3Bl", "b3Bm")).is_err()
+        );
+        let own = made_key(dir.path(), "own", "", "ed25519");
+        let read = own_public(&own).ok().unwrap();
+        assert_eq!(
+            read.public,
+            format!("{} uxduck", keygen_public(dir.path(), &own))
+        );
+        assert_eq!(
+            keygen_public(dir.path(), &read.private),
+            keygen_public(dir.path(), &own)
+        );
+        assert_eq!(
+            own_public(&read.private).ok().unwrap().private,
+            read.private,
+            "written as ssh-keygen writes it"
+        );
+        assert_eq!(
+            own_public(&locked).err().as_deref(),
+            Some("it has a passphrase")
+        );
+        let rsa = made_key(dir.path(), "rsa2", "", "rsa");
+        assert_eq!(
+            own_public(&rsa).err().as_deref(),
+            Some("it is not the Ed25519 key UXDuck makes")
+        );
+        assert!(own_public(cut).is_err());
+        let squashed = own.replacen("-----\n", "-----", 1).replace('\n', "\r\n");
+        assert_ne!(squashed, own);
+        let rewritten = own_public(&squashed).ok().unwrap();
+        assert_eq!(
+            rewritten.private, read.private,
+            "a key ssh would read differently is rewritten"
+        );
+    }
+
+    /// FB-268 review: UXDuck's own key is written out with the comment
+    /// "uxduck", whatever comment it was stored with, since OpenSSH refuses
+    /// a comment holding a NUL.
+    #[test]
+    fn the_own_key_is_written_with_its_own_comment() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let dir = tempfile::tempdir().unwrap();
+        let own = own_public(&made_key(dir.path(), "own", "", "ed25519"))
+            .ok()
+            .unwrap();
+        let decode = |private: &str| {
+            b64.decode(
+                private
+                    .lines()
+                    .filter(|line| !line.starts_with("-----"))
+                    .collect::<String>(),
+            )
+            .unwrap()
+        };
+        let bytes = decode(&own.private);
+        let public = b64.decode(own.public.split(' ').nth(1).unwrap()).unwrap();
+        // The magic, cipher, KDF, its options, the key count and the public
+        // blob, then the private half's length: its check number follows,
+        // then the key type, the public key and the 64-byte secret.
+        let check_at = 15 + 8 + 8 + 4 + 4 + 4 + public.len() + 4;
+        let check = u32::from_be_bytes(bytes[check_at..check_at + 4].try_into().unwrap());
+        let secret_at = check_at + 8 + 4 + 11 + 4 + 32 + 4;
+        let secret = &bytes[secret_at..secret_at + 64];
+        let armored = |bytes: &[u8]| {
+            format!(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+                b64.encode(bytes)
+            )
+        };
+        assert_eq!(openssh_ed25519(&public, check, secret, b"uxduck"), bytes);
+        let nul = armored(&openssh_ed25519(&public, check, secret, b"a\0b"));
+        assert!(decode(&nul).windows(3).any(|window| window == b"a\0b"));
+        let read = own_public(&nul).ok().unwrap();
+        assert_eq!(read.private, own.private);
+        assert_eq!(read.public, own.public);
+        assert!(
+            !decode(&read.private)
+                .windows(3)
+                .any(|window| window == b"a\0b")
+        );
+        assert_eq!(
+            keygen_public(dir.path(), &read.private),
+            keygen_public(dir.path(), &own.private)
+        );
+    }
+
+    /// FB-268: a stored own key that cannot be read says so and how to
+    /// replace it, and a check with a password replaces it.
+    #[test]
+    fn a_damaged_own_key_says_so_and_a_password_check_replaces_it() {
+        let data = tempfile::tempdir().unwrap();
+        let mut credentials = FileCredentials::new(data.path());
+        uxduck_engine::runtime::Credentials::set(
+            &mut credentials,
+            OWN_KEY,
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nnot a key\n-----END OPENSSH PRIVATE KEY-----",
+        )
+        .unwrap();
+        let Err(why) = own_key(&mut credentials, false) else {
+            panic!("a damaged key was used");
+        };
+        assert_eq!(why.kind, CheckProblem::Key);
+        assert!(why.problem.contains("cannot be read"), "{}", why.problem);
+        assert!(why.problem.contains("Check with the computer's password"));
+        let new = own_key(&mut credentials, true).unwrap();
+        assert_eq!(
+            credentials.get(OWN_KEY).as_deref(),
+            Some(new.private.as_str())
+        );
+        assert_eq!(own_key(&mut credentials, false).unwrap().public, new.public);
+    }
+
+    /// FB-268: a credential store that cannot be read says so with its
+    /// reason, and is never overwritten with a new key.
+    #[test]
+    fn an_unreadable_credential_store_says_so_and_is_kept() {
+        let data = tempfile::tempdir().unwrap();
+        let file = data.path().join("credentials.json");
+        std::fs::write(&file, "{ broken").unwrap();
+        let mut credentials = FileCredentials::new(data.path());
+        let Err(why) = own_key(&mut credentials, true) else {
+            panic!("a key was kept in a broken store");
+        };
+        assert_eq!(why.kind, CheckProblem::Key);
+        assert!(why.problem.contains("cannot keep its SSH key"));
+        assert!(why.detail.unwrap().contains("credentials.json"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{ broken");
+    }
+
+    /// FB-268: a key given for the computer signs in alone, so a problem
+    /// with UXDuck's own key stops only a check that needs it.
+    #[test]
+    fn a_given_key_checks_without_uxducks_own() {
+        let broken = || Err(CheckFailure::from("own key broken"));
+        let own = || {
+            Ok(OwnKey {
+                private: "own".into(),
+                public: "ssh-ed25519 AAAA uxduck".into(),
+            })
+        };
+        let given = Some("given".to_owned());
+        let (key, mine) = check_keys(true, given.clone(), broken(), false).unwrap();
+        assert_eq!(key.as_deref(), Some("given"));
+        assert!(mine.is_none());
+        assert_eq!(
+            check_keys(true, given.clone(), broken(), true)
+                .err()
+                .unwrap()
+                .problem,
+            "own key broken"
+        );
+        assert_eq!(
+            check_keys(false, None, broken(), false)
+                .err()
+                .unwrap()
+                .problem,
+            "own key broken"
+        );
+        let (key, mine) = check_keys(true, given, own(), true).unwrap();
+        assert_eq!(key.as_deref(), Some("given"));
+        assert!(mine.is_some());
+        let missing = check_keys(true, None, own(), false).err().unwrap();
+        assert_eq!(missing.kind, CheckProblem::GivenKey);
+        assert!(missing.problem.contains("add it again"));
+    }
+
+    /// FB-268: each failure names its kind and what to do.
+    #[test]
+    fn check_failures_name_their_kind() {
+        let computer = CompanionComputer {
+            connectivity: None,
+            id: "cc".into(),
+            name: "pi".into(),
+            host: "pi.local".into(),
+            user: Some("pi".into()),
+            port: None,
+            role: CompanionRole::Report,
+            component_id: 191,
+            key: false,
+            check: None,
+        };
+        let own = OwnKey {
+            private: String::new(),
+            public: String::new(),
+        };
+        let kind = |way, stderr: &str| check_failure(&computer, None, way, stderr).kind;
+        let changed = "@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\nThe fingerprint for the ED25519 key sent by the remote host is\nSHA256:new.\nHost key verification failed.\n";
+        assert_eq!(kind(Way::Person, changed), CheckProblem::HostKey);
+        assert_eq!(
+            kind(
+                Way::Own(&own),
+                "ssh: connect to host pi.local port 22: No route to host\n"
+            ),
+            CheckProblem::Unreachable
+        );
+        assert_eq!(
+            kind(
+                Way::Person,
+                "ssh: connect to host pi.local port 22: Connection timed out\n"
+            ),
+            CheckProblem::Unreachable
+        );
+        assert_eq!(
+            kind(
+                Way::Own(&own),
+                "debug1: Next authentication method: publickey\npi@pi.local: Permission denied (publickey,password).\n"
+            ),
+            CheckProblem::SignIn
+        );
+        assert_eq!(
+            kind(
+                Way::Person,
+                "debug1: connect to address ::1 port 22: Connection refused\ndebug1: Connecting to pi.local [127.0.0.1] port 22.\npi@pi.local: Permission denied (publickey).\n"
+            ),
+            CheckProblem::PasswordOff
+        );
+        let interactive = check_failure(
+            &computer,
+            None,
+            Way::Password(&own, "x"),
+            "pi@pi.local: Permission denied (publickey,keyboard-interactive).\n",
+        );
+        assert_eq!(interactive.kind, CheckProblem::PasswordOff);
+        assert!(
+            interactive
+                .problem
+                .contains("takes passwords only through keyboard-interactive")
+        );
+        assert_eq!(
+            kind(
+                Way::Password(&own, "x"),
+                "pi@pi.local: Permission denied (publickey,password).\n"
+            ),
+            CheckProblem::Password
+        );
+        assert_eq!(
+            kind(
+                Way::Password(&own, "x"),
+                "pi@pi.local: Permission denied (publickey).\n"
+            ),
+            CheckProblem::PasswordOff
+        );
+        let windows = "Bad permissions. Try removing permissions for user: BUILTIN\\Users (S-1-5-32-545) on file C:/Users/pi/.uxduck/companions/cc.key.\nLoad key \"C:/Users/pi/.uxduck/companions/cc.key\": bad permissions\npi@pi.local: Permission denied (publickey).\n";
+        let failure = check_failure(&computer, None, Way::Own(&own), windows);
+        assert_eq!(failure.kind, CheckProblem::Key);
+        assert!(failure.problem.contains("other accounts on this computer"));
+        assert_eq!(failure.detail, None);
+        assert_eq!(
+            kind(
+                Way::Pasted("k"),
+                "Load key \"/k\": invalid format\npi@pi.local: Permission denied (publickey).\n"
+            ),
+            CheckProblem::GivenKey
         );
     }
 }

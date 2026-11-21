@@ -46,6 +46,17 @@ impl From<&c::CompanionComputer> for dto::CompanionComputer {
                 uxduck: check.uxduck.clone(),
                 host_key: check.host_key.clone(),
                 problem: check.problem.clone(),
+                problem_kind: check.problem_kind.map(|kind| match kind {
+                    c::CheckProblem::SignIn => dto::CheckProblem::SignIn,
+                    c::CheckProblem::Password => dto::CheckProblem::Password,
+                    c::CheckProblem::PasswordOff => dto::CheckProblem::PasswordOff,
+                    c::CheckProblem::Key => dto::CheckProblem::Key,
+                    c::CheckProblem::GivenKey => dto::CheckProblem::GivenKey,
+                    c::CheckProblem::HostKey => dto::CheckProblem::HostKey,
+                    c::CheckProblem::Unreachable => dto::CheckProblem::Unreachable,
+                    c::CheckProblem::Other => dto::CheckProblem::Other,
+                }),
+                detail: check.detail.clone(),
                 cameras: check.cameras.as_ref().map(Into::into),
                 clock: check.clock.as_ref().map(|clock| dto::CompanionClock {
                     offset_ms: clock.offset_ms,

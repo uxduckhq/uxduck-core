@@ -33,6 +33,30 @@ pub enum CheckState {
     Failed,
 }
 
+/// What a failed check ran into (FB-268), so the app offers what helps:
+/// a check with the password only when signing in is what failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheckProblem {
+    /// The computer refused every key offered: a check with its password
+    /// adds UXDuck's own.
+    SignIn,
+    /// The computer refused the password: a wrong password, or no such user.
+    Password,
+    /// The computer takes no passwords over SSH.
+    PasswordOff,
+    /// UXDuck's own key cannot be used. A check with the password replaces it.
+    Key,
+    /// The private key the person gave for this computer cannot be used.
+    GivenKey,
+    /// Its host key is not the one pinned.
+    HostKey,
+    /// Not found, not answering, or not running SSH.
+    Unreachable,
+    /// Anything else, said in the problem's own words.
+    Other,
+}
+
 /// What the last check found, or why it could not.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +79,14 @@ pub struct CompanionCheck {
     /// Why it failed, for people.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// What kind of problem it was, when it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem_kind: Option<CheckProblem>,
+    /// What `ssh` or `ssh-keygen` said when it failed, without their debug
+    /// lines, shown under the problem for whoever needs it. Never a key or
+    /// a password, which neither prints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// Its clock as the check read it (S356); absent when it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock: Option<CompanionClock>,

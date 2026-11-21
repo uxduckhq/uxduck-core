@@ -847,6 +847,8 @@ mod tests {
                 uxduck: None,
                 host_key: Some(PINNED.into()),
                 problem: None,
+                problem_kind: None,
+                detail: None,
                 clock: None,
                 reports_as: None,
                 network: None,

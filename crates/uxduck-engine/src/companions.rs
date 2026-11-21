@@ -15,7 +15,8 @@ use uxduck_contracts::dto::companion_cameras::ComputerCamerasParams;
 use uxduck_contracts::dto::vehicle::Vehicle as VehicleDto;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_core::domain::companion::{
-    self, CheckState, CompanionCheck, CompanionClock, CompanionComputer, CompanionRole,
+    self, CheckProblem, CheckState, CompanionCheck, CompanionClock, CompanionComputer,
+    CompanionRole,
 };
 use uxduck_core::domain::companion_cameras::{self, CompanionCameras};
 use uxduck_core::domain::vehicle::Vehicle;
@@ -72,7 +73,109 @@ pub trait CompanionPort: Send {
 pub struct CheckAnswer {
     pub vehicle_id: String,
     pub computer_id: String,
-    pub result: Result<Found, String>,
+    pub result: Result<Found, CheckFailure>,
+}
+
+/// Why a check failed (FB-268): for people, what kind of problem it was, so
+/// the app offers what helps, and what `ssh` said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckFailure {
+    pub problem: String,
+    pub kind: CheckProblem,
+    pub detail: Option<String>,
+}
+
+impl From<String> for CheckFailure {
+    fn from(problem: String) -> Self {
+        Self {
+            problem,
+            kind: CheckProblem::Other,
+            detail: None,
+        }
+    }
+}
+
+impl From<&str> for CheckFailure {
+    fn from(problem: &str) -> Self {
+        problem.to_owned().into()
+    }
+}
+
+/// The public line of an OpenSSH private key, `<type> <base64>`, read from
+/// the key's own text, where it is kept in the clear even when the private
+/// part has a passphrase, and whether it has one (FB-268). Nothing is
+/// written to a file and no `ssh-keygen` runs. Why not, when it cannot be
+/// read.
+///
+/// # Errors
+///
+/// When the text is not one whole OpenSSH private key.
+pub fn openssh_public(private: &str) -> Result<(String, bool), String> {
+    use base64::Engine as _;
+    fn field<'a>(rest: &mut &'a [u8]) -> Option<&'a [u8]> {
+        let (length, after) = rest.split_first_chunk::<4>()?;
+        let (value, after) =
+            after.split_at_checked(usize::try_from(u32::from_be_bytes(*length)).ok()?)?;
+        *rest = after;
+        Some(value)
+    }
+    let damaged = || "its text is damaged or cut short".to_owned();
+    let body: String = private
+        .trim()
+        .strip_prefix("-----BEGIN OPENSSH PRIVATE KEY-----")
+        .and_then(|rest| rest.strip_suffix("-----END OPENSSH PRIVATE KEY-----"))
+        .ok_or_else(|| "it is not an OpenSSH private key".to_owned())?
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .map_err(|_| damaged())?;
+    let mut rest = bytes
+        .strip_prefix(b"openssh-key-v1\0")
+        .ok_or_else(damaged)?;
+    let cipher = field(&mut rest).ok_or_else(damaged)?;
+    field(&mut rest).ok_or_else(damaged)?;
+    field(&mut rest).ok_or_else(damaged)?;
+    let (count, after) = rest.split_first_chunk::<4>().ok_or_else(damaged)?;
+    if u32::from_be_bytes(*count) != 1 {
+        return Err("it holds more than one key".to_owned());
+    }
+    rest = after;
+    let public = field(&mut rest).ok_or_else(damaged)?;
+    let kind = field(&mut &public[..])
+        .and_then(|kind| std::str::from_utf8(kind).ok())
+        .filter(|kind| !kind.is_empty() && kind.is_ascii())
+        .ok_or_else(damaged)?;
+    Ok((
+        format!(
+            "{kind} {}",
+            base64::engine::general_purpose::STANDARD.encode(public)
+        ),
+        cipher != b"none",
+    ))
+}
+
+/// Why a private key someone pastes for a computer cannot be used by a
+/// check, which runs `ssh` with no one to type a passphrase (FB-268).
+fn pasted_key_problem(key: &str) -> Option<String> {
+    if key.starts_with("PuTTY-User-Key-File") {
+        return Some("That is a PuTTY key, which ssh cannot read. Open it in PuTTYgen, choose Conversions, Export OpenSSH key, and paste the file it saves.".into());
+    }
+    if !key.starts_with("-----BEGIN") || !key.contains("PRIVATE KEY-----") {
+        return Some(
+            "That is not a private key: paste the whole file, from -----BEGIN to -----END".into(),
+        );
+    }
+    let passphrase = "That key has a passphrase, and a check has no one to type it. Add the key to ssh-agent and add the computer without one, or paste a key with no passphrase.";
+    if key.contains("ENCRYPTED") {
+        return Some(passphrase.into());
+    }
+    // Text this cannot read is left for `ssh` to judge, and a check that
+    // it refuses says so.
+    openssh_public(key)
+        .is_ok_and(|(_, locked)| locked)
+        .then(|| passphrase.into())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -219,6 +322,8 @@ impl Engine {
                     check.state = CheckState::Failed;
                     check.at_us = self.clock.now_us();
                     check.problem = Some("UXDuck restarted before the computer answered. Check it, or read its networks or cameras again, to see what completed.".into());
+                    check.problem_kind = Some(CheckProblem::Other);
+                    check.detail = None;
                 }
             }
             self.save_companions(None, vehicle);
@@ -338,13 +443,8 @@ impl Engine {
             .private_key
             .map(|k| k.trim().to_owned())
             .filter(|k| !k.is_empty());
-        if key
-            .as_deref()
-            .is_some_and(|k| !k.starts_with("-----BEGIN") || !k.contains("PRIVATE KEY-----"))
-        {
-            return Err(invalid(
-                "That is not a private key: paste the whole file, from -----BEGIN to -----END",
-            ));
+        if let Some(problem) = key.as_deref().and_then(pasted_key_problem) {
+            return Err(invalid(problem));
         }
         let computer = CompanionComputer {
             connectivity: None,
@@ -501,6 +601,8 @@ impl Engine {
         {
             check.state = CheckState::Checking;
             check.problem = None;
+            check.problem_kind = None;
+            check.detail = None;
             check.at_us = self.clock.now_us();
         }
         let vehicle = self.save_companions(Some(connection), vehicle);
@@ -589,6 +691,8 @@ impl Engine {
         if let Some(check) = &mut computer.check {
             check.state = CheckState::Checking;
             check.problem = None;
+            check.problem_kind = None;
+            check.detail = None;
             check.at_us = self.clock.now_us();
         }
         let vehicle = self.save_companions(Some(connection), vehicle);
@@ -630,6 +734,8 @@ impl Engine {
             uxduck: None,
             host_key: last.as_ref().and_then(|c| c.host_key.clone()),
             problem: None,
+            problem_kind: None,
+            detail: None,
             clock: None,
             reports_as: last.as_ref().and_then(|c| c.reports_as),
             network: last.as_ref().and_then(|c| c.network.clone()),
@@ -689,17 +795,21 @@ impl Engine {
                 cameras: found.cameras.or(cameras),
                 host_key: found.host_key.or(pinned),
                 problem: None,
+                problem_kind: None,
+                detail: None,
                 clock: found.clock,
                 reports_as: found.reports_as.or(reports_as),
             },
-            Err(problem) => CompanionCheck {
+            Err(failure) => CompanionCheck {
                 state: CheckState::Failed,
                 at_us,
                 os: None,
                 arch: None,
                 uxduck: None,
                 host_key: pinned,
-                problem: Some(problem),
+                problem: Some(failure.problem),
+                problem_kind: Some(failure.kind),
+                detail: failure.detail,
                 clock: None,
                 reports_as,
                 network,
@@ -710,12 +820,16 @@ impl Engine {
             if waiting.is_some() {
                 check.state = CheckState::Checking;
                 check.problem = None;
+                check.problem_kind = None;
+                check.detail = None;
             } else if stopped {
                 check.state = CheckState::Failed;
                 check.problem = Some(
                     "The vehicle armed before the change started, so nothing changed. Disarm it to try again."
                         .into(),
                 );
+                check.problem_kind = Some(CheckProblem::Other);
+                check.detail = None;
             }
         }
         companion::take_reported_id(&mut vehicle.companions, &answer.computer_id);

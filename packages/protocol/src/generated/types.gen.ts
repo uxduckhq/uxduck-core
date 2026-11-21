@@ -2796,6 +2796,12 @@ export type CheckPlugin = {
 };
 
 /**
+ * What a failed `computer/check` ran into, so a client offers what helps:
+ * a check with the password only when signing in is what failed (FB-268).
+ */
+export type CheckProblem = 'sign-in' | 'password' | 'password-off' | 'key' | 'given-key' | 'host-key' | 'unreachable' | 'other';
+
+/**
  * A check as it stood when a command was refused for it or sent past it.
  */
 export type CheckRef = {
@@ -4891,6 +4897,12 @@ export type CompanionCheck = {
      */
     clock?: CompanionClock | null;
     /**
+     * More on why it failed, in UXDuck's own words and values it checked,
+     * such as the ways to sign in the computer offered. Never words a
+     * server sent, a key or a password.
+     */
+    detail?: string | null;
+    /**
      * Its host key's fingerprint, pinned on the first check.
      */
     hostKey?: string | null;
@@ -4903,6 +4915,11 @@ export type CompanionCheck = {
      * Why it failed, for people.
      */
     problem?: string | null;
+    /**
+     * What kind of problem it was, when it failed. Absent from a daemon
+     * before FB-268.
+     */
+    problemKind?: CheckProblem | null;
     /**
      * The onboard computer id its running `uxduck companion` or
      * `uxduck forward --onboard` was given (S372). The computer takes it

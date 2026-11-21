@@ -16,6 +16,8 @@ uxduck-terrain.workspace = true
 uxduck-media.workspace = true
 md-5.workspace = true
 base64.workspace = true
+# Checking UXDuck's own SSH key whole: the public key its seed makes (FB-268).
+aws-lc-rs.workspace = true
 # Pictures attached to a chat, shown to the AI model as JPEGs (FB-248).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 jiff.workspace = true
@@ -71,9 +73,14 @@ oxc = { version = "0.156", features = ["transformer", "codegen", "semantic"], op
 
 # Keeping the system and display awake on Windows (SetThreadExecutionState).
 # Pausing a simulation suspends its build's threads (Toolhelp, SuspendThread).
+# Key and credential files for ssh and the credential store that only this
+# account may open, made with those permissions (FB-268).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
   "Win32_System_Power",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Threading",

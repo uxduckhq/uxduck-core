@@ -144,15 +144,22 @@ impl FileCredentials {
             .map_err(|e| format!("cannot migrate {}: {e}", self.path.display()))
     }
 
+    /// Writes the store to a new file of its own with a name no one else
+    /// chose, readable only by this account from the moment it exists, and
+    /// then puts it in place of the old one in one step (FB-268).
     fn save(&self, all: &BTreeMap<String, String>) -> std::io::Result<()> {
-        let temp = self.path.with_extension("json.tmp");
-        std::fs::write(&temp, serde_json::to_vec_pretty(all).unwrap_or_default())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
-        }
-        std::fs::rename(temp, &self.path)
+        let dir = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let mut temp = tempfile::Builder::new()
+            .prefix("credentials.json.")
+            .suffix(".tmp")
+            .make_in(dir, create_private)?;
+        std::io::Write::write_all(
+            temp.as_file_mut(),
+            &serde_json::to_vec_pretty(all).unwrap_or_default(),
+        )?;
+        temp.as_file().sync_all()?;
+        temp.persist(&self.path).map_err(|error| error.error)?;
+        Ok(())
     }
 }
 
@@ -188,6 +195,372 @@ impl Credentials for FileCredentials {
     fn has(&self, name: &str) -> bool {
         self.get(name).is_some()
     }
+}
+
+/// Makes a new file at `path` that only the account UXDuck runs as may
+/// open: `0600`, or on Windows permissions of its own and none from its
+/// folder, given as the file is made. A file already at `path` is never
+/// opened: making it fails. For the credential store and for the keys and
+/// passwords `ssh` is given (FB-268), which Windows' OpenSSH refuses when
+/// any other account may open them.
+pub(crate) fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        create_private_windows(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(path)
+    }
+}
+
+/// Makes the folder `path` when it is missing, with its parents, so that
+/// only the account UXDuck runs as may open or change it: `0700`, or on
+/// Windows a protected list granting this account alone, which what is
+/// made in it inherits. A folder already there is left as it is. For the
+/// companions folder, where `ssh` is given keys and passwords (FB-268).
+pub(crate) fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(windows)]
+    let made = create_private_dir_windows(path);
+    #[cfg(not(windows))]
+    let made = {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(path)
+    };
+    match made {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        made => made,
+    }
+}
+
+/// Why `path` is not a folder only this account may open or change, when
+/// it is not: it must be a folder itself, not a link, owned by this
+/// account and `0700`, or on Windows owned by this account with a protected
+/// list granting this account alone. What is in such a folder cannot be
+/// changed by another account between looking at it and removing it.
+pub(crate) fn private_dir_problem(path: &Path) -> Option<String> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) => return Some(format!("it cannot be read: {error}")),
+    };
+    if meta.file_type().is_symlink() {
+        return Some("it is a link".to_owned());
+    }
+    if !meta.is_dir() {
+        return Some("it is not a folder".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if meta.uid() != rustix::process::geteuid().as_raw() {
+            return Some("another account owns it".to_owned());
+        }
+        let mode = meta.mode() & 0o777;
+        if mode != 0o700 {
+            return Some(format!("other accounts may open it: its mode is {mode:o}"));
+        }
+        None
+    }
+    #[cfg(windows)]
+    {
+        // FILE_ATTRIBUTE_REPARSE_POINT: a junction or another link.
+        if std::os::windows::fs::MetadataExt::file_attributes(&meta) & 0x400 != 0 {
+            return Some("it is a junction or another link".to_owned());
+        }
+        private_dir_problem_windows(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Some("UXDuck cannot check who may open folders on this system".to_owned())
+    }
+}
+
+/// [`create_private`] on Windows: `CreateFileW` with `CREATE_NEW` and a
+/// protected list granting full control to this process's account alone.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "making a file with permissions is a plain Win32 call"
+)]
+fn create_private_windows(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::FromRawHandle as _;
+    use windows_sys::Win32::Foundation::{
+        GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, LocalFree,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+    // Full control for this account alone, and none inherited from the folder.
+    let attributes = private_attributes_windows("")?;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: a path ending in a zero and the descriptor made above, which
+    // stays valid until it is freed once the file is made. Others may read
+    // and replace the file while it is open, as the credential store's
+    // rename needs, but only this account may open it.
+    let (file, error) = unsafe {
+        let file = CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            &raw const attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        );
+        let error = std::io::Error::last_os_error();
+        LocalFree(attributes.lpSecurityDescriptor);
+        (file, error)
+    };
+    if file == INVALID_HANDLE_VALUE {
+        return Err(error);
+    }
+    // SAFETY: a handle CreateFileW just opened, owned by the File from now on.
+    Ok(unsafe { std::fs::File::from_raw_handle(file) })
+}
+
+/// [`create_private_dir`] on Windows: `CreateDirectoryW` with a protected
+/// list granting full control to this process's account alone, which what
+/// is made in the folder inherits.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "making a folder with permissions is a plain Win32 call"
+)]
+fn create_private_dir_windows(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+    let attributes = private_attributes_windows("OICI")?;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: a path ending in a zero and the descriptor made above, freed
+    // once the folder is made.
+    let (made, error) = unsafe {
+        let made = CreateDirectoryW(wide.as_ptr(), &raw const attributes);
+        let error = std::io::Error::last_os_error();
+        LocalFree(attributes.lpSecurityDescriptor);
+        (made, error)
+    };
+    if made == 0 {
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// The account this process runs as: its token's `TOKEN_USER` record, whose
+/// SID lives in the same buffer.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "reading this process's account is a plain Win32 call"
+)]
+fn account_windows() -> std::io::Result<Vec<u64>> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenUser};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the pseudo-handle of this process, and a handle to fill in.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut size = 0u32;
+    // SAFETY: asks only for the size of the account's record.
+    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &raw mut size) };
+    let mut record = vec![0u64; (size as usize).div_ceil(8)];
+    // SAFETY: `record` holds `size` bytes, aligned for a TOKEN_USER.
+    let read = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            record.as_mut_ptr().cast(),
+            size,
+            &raw mut size,
+        )
+    };
+    let error = std::io::Error::last_os_error();
+    // SAFETY: the token opened above, closed once.
+    unsafe { CloseHandle(token) };
+    if read == 0 {
+        return Err(error);
+    }
+    Ok(record)
+}
+
+/// Security attributes owned by this process's account and granting it
+/// alone full control, with the ACE flags `inherit` (`OICI` for a folder
+/// whose contents inherit it). Free `lpSecurityDescriptor` with `LocalFree`.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "a security descriptor from SDDL is a plain Win32 call"
+)]
+fn private_attributes_windows(
+    inherit: &str,
+) -> std::io::Result<windows_sys::Win32::Security::SECURITY_ATTRIBUTES> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_USER};
+    let record = account_windows()?;
+    // SAFETY: GetTokenInformation wrote a TOKEN_USER at the start of `record`.
+    let account = unsafe { &*record.as_ptr().cast::<TOKEN_USER>() }.User.Sid;
+    let mut text: *mut u16 = std::ptr::null_mut();
+    // SAFETY: a valid SID from the token, and a string for Windows to allocate.
+    if unsafe { ConvertSidToStringSidW(account, &raw mut text) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: Windows wrote a string ending in a zero at `text`, freed once.
+    let sid = unsafe {
+        let mut length = 0;
+        while *text.add(length) != 0 {
+            length += 1;
+        }
+        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
+        LocalFree(text.cast());
+        sid
+    };
+    let sddl: Vec<u16> = format!("O:{sid}D:P(A;{inherit};FA;;;{sid})")
+        .encode_utf16()
+        .chain([0])
+        .collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: a string ending in a zero, and a descriptor for Windows to allocate.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &raw mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: 0,
+    })
+}
+
+/// [`private_dir_problem`] on Windows: the folder, opened without following
+/// a link, is owned by this process's account, its list does not take
+/// entries from its parent, and it holds one entry, allowing this account.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "reading a folder's owner and permissions is a plain Win32 call"
+)]
+fn private_dir_problem_windows(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+        GetSecurityDescriptorControl, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        SE_DACL_PROTECTED, TOKEN_USER,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
+    };
+    let record = match account_windows() {
+        Ok(record) => record,
+        Err(error) => return Some(format!("UXDuck cannot read its own account: {error}")),
+    };
+    // SAFETY: GetTokenInformation wrote a TOKEN_USER at the start of `record`.
+    let account = unsafe { &*record.as_ptr().cast::<TOKEN_USER>() }.User.Sid;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: a path ending in a zero. The folder itself is opened, never
+    // what a link leads to, only to read its permissions.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            READ_CONTROL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Some(format!(
+            "it cannot be opened: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut list: *mut ACL = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: a handle opened above with READ_CONTROL, closed once, and
+    // places for Windows to point into the descriptor it allocates.
+    let read = unsafe {
+        let read = GetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &raw mut owner,
+            std::ptr::null_mut(),
+            &raw mut list,
+            std::ptr::null_mut(),
+            &raw mut descriptor,
+        );
+        CloseHandle(handle);
+        read
+    };
+    if read != 0 {
+        return Some(format!(
+            "its permissions cannot be read: {}",
+            std::io::Error::from_raw_os_error(i32::try_from(read).unwrap_or(i32::MAX))
+        ));
+    }
+    // SAFETY: the owner and list point into `descriptor`, valid until it is
+    // freed once below, and the one entry read is an ACCESS_ALLOWED_ACE
+    // when its type is 0 (ACCESS_ALLOWED_ACE_TYPE).
+    let why = unsafe {
+        'check: {
+            if EqualSid(owner, account) == 0 {
+                break 'check Some("another account owns it");
+            }
+            let mut control = 0u16;
+            let mut revision = 0u32;
+            if GetSecurityDescriptorControl(descriptor, &raw mut control, &raw mut revision) == 0
+                || control & SE_DACL_PROTECTED == 0
+            {
+                break 'check Some("it takes permissions from its parent folder");
+            }
+            if list.is_null() || (*list).AceCount != 1 {
+                break 'check Some("other accounts may open it");
+            }
+            let mut entry: *mut core::ffi::c_void = std::ptr::null_mut();
+            if GetAce(list, 0, &raw mut entry) == 0 {
+                break 'check Some("its permissions cannot be read");
+            }
+            let entry = &*entry.cast::<ACCESS_ALLOWED_ACE>();
+            if entry.Header.AceType != 0
+                || EqualSid((&raw const entry.SidStart).cast_mut().cast(), account) == 0
+            {
+                break 'check Some("other accounts may open it");
+            }
+            None
+        }
+    };
+    // SAFETY: the descriptor GetSecurityInfo allocated, freed once.
+    unsafe { LocalFree(descriptor) };
+    why.map(str::to_owned)
 }
 
 fn fingerprint(token: &str) -> String {
@@ -282,6 +655,38 @@ mod tests {
         }
         store.set("openai.key", "").unwrap();
         assert!(!store.has("openai.key"));
+    }
+
+    /// The store is written to a new file of its own before it replaces
+    /// the old one, so a file someone left at a name UXDuck used to write
+    /// first is never written through (FB-268).
+    #[cfg(unix)]
+    #[test]
+    fn the_store_is_written_to_a_new_private_file_and_nothing_else() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::write(&elsewhere, "untouched").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.path().join("credentials.json.tmp")).unwrap();
+        let mut store = FileCredentials::new(dir.path());
+        store.set("openai.key", "sk-1").unwrap();
+        store.set("openai.key", "sk-2").unwrap();
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "untouched");
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["credentials.json", "credentials.json.tmp", "elsewhere"]
+        );
+        let mode = std::fs::metadata(dir.path().join("credentials.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(create_private(&dir.path().join("credentials.json")).is_err());
     }
 
     #[test]

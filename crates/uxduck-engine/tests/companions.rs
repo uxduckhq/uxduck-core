@@ -1055,3 +1055,123 @@ fn a_change_waits_for_a_background_read_and_refuses_while_another_change_runs() 
         "a waiting read still goes while armed"
     );
 }
+
+/// The text of an OpenSSH private key whose header names \`cipher\`, which
+/// is all UXDuck reads to tell whether it has a passphrase (FB-268).
+fn openssh_text(cipher: &str) -> String {
+    use base64::Engine as _;
+    let field = |bytes: &[u8]| {
+        [
+            &u32::try_from(bytes.len()).unwrap().to_be_bytes()[..],
+            bytes,
+        ]
+        .concat()
+    };
+    let public = [field(b"ssh-ed25519"), field(&[7; 32])].concat();
+    let kdf: &[u8] = if cipher == "none" { b"none" } else { b"bcrypt" };
+    let body = [
+        b"openssh-key-v1\0".to_vec(),
+        field(cipher.as_bytes()),
+        field(kdf),
+        field(b""),
+        1u32.to_be_bytes().to_vec(),
+        field(&public),
+        field(&[0; 64]),
+    ]
+    .concat();
+    format!(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+        base64::engine::general_purpose::STANDARD.encode(body)
+    )
+}
+
+/// FB-268: a key a check cannot use is refused when it is added, with what
+/// to do: one with a passphrase, which a check has no one to type, and a
+/// `PuTTY` key, which ssh cannot read.
+#[test]
+fn keys_a_check_cannot_use_are_refused_with_what_to_do() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let add = |engine: &mut Engine, ui: &mut Client, key: &str| {
+        refused(
+            engine,
+            ui,
+            "computer/add",
+            json!({ "vehicleId": "v", "host": "pi.local", "privateKey": key }),
+        )
+    };
+    for locked in [
+        openssh_text("aes256-ctr"),
+        "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00\n\nAAAA\n-----END RSA PRIVATE KEY-----".to_owned(),
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----".to_owned(),
+    ] {
+        let why = add(&mut engine, &mut ui, &locked);
+        assert!(why.contains("has a passphrase"), "{why}");
+        assert!(why.contains("ssh-agent"), "{why}");
+        assert!(!why.contains(';'), "{why}");
+    }
+    let why = add(
+        &mut engine,
+        &mut ui,
+        "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\n",
+    );
+    assert!(why.contains("PuTTYgen"), "{why}");
+    assert!(keys.0.lock().unwrap().is_empty(), "nothing was kept");
+
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({ "vehicleId": "v", "host": "pi.local", "privateKey": openssh_text("none") }),
+    );
+    assert_eq!(vehicle["companions"][0]["key"], true);
+}
+
+/// FB-268: a failed check keeps what kind of problem it was and what ssh
+/// said, and the next check clears both.
+#[test]
+fn a_failed_check_keeps_its_kind_and_what_ssh_said() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    engine.set_companions(Box::new(Ssh::default()));
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({ "vehicleId": "v", "host": "pi.local", "user": "uxduck" }),
+    );
+    let id = vehicle["companions"][0]["id"].as_str().unwrap().to_owned();
+    engine.companion_checked(CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.clone(),
+        result: Err(uxduck_engine::companions::CheckFailure {
+            problem: "pi.local refused the password for uxduck.".into(),
+            kind: uxduck_core::domain::companion::CheckProblem::Password,
+            detail: Some("uxduck@pi.local: Permission denied (publickey,password).".into()),
+        }),
+    });
+    let wire = serde_json::to_value(uxduck_contracts::dto::companion::CompanionComputer::from(
+        &engine.state().vehicles["v"].companions[0],
+    ))
+    .unwrap();
+    assert_eq!(wire["check"]["state"], "failed");
+    assert_eq!(wire["check"]["problemKind"], "password");
+    assert_eq!(
+        wire["check"]["detail"],
+        "uxduck@pi.local: Permission denied (publickey,password)."
+    );
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/check",
+        json!({ "vehicleId": "v", "computerId": id }),
+    );
+    let check = &vehicle["companions"][0]["check"];
+    assert_eq!(check["state"], "checking");
+    assert!(check.get("problemKind").is_none());
+    assert!(check.get("detail").is_none());
+}
