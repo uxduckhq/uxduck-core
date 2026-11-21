@@ -194,3 +194,43 @@ pub struct DisplayReplyParams {
     pub request_id: String,
     pub settings: String,
 }
+
+/// Local tool activity. Independent of analytics, with no arguments or results.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolActivityCall {
+    pub id: String,
+    pub session_id: String,
+    pub client_id: String,
+    pub source: crate::dto::analytics::ToolTraceSource,
+    pub method: String,
+    pub status: ToolActivityStatus,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub started_us: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub duration_us: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub approval_wait_us: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolActivityStatus {
+    Running,
+    WaitingForApproval,
+    Completed,
+    Failed,
+    Cancelled,
+    Disconnected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolActivityResult {
+    pub calls: Vec<ToolActivityCall>,
+    /// Completed records evicted by the local memory budget. Active calls stay.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub discarded: u64,
+    /// The memory budget for recent completed records, not a call-count cap.
+    pub retained_bytes: u32,
+}

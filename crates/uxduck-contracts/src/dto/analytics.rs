@@ -589,6 +589,34 @@ pub enum CommandOutcome {
     Interrupted,
 }
 
+/// Metadata shared by tool traces from both engine hosts. IDs are random,
+/// ephemeral, and never conversation, request, vehicle or account identifiers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolTraceContext {
+    pub tool_connection_id: String,
+    pub tool_session_id: String,
+    pub tool_source: ToolTraceSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_build: Option<String>,
+    pub runtime: String,
+    pub client: String,
+    pub server_version: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolTraceSource {
+    ExternalMcp,
+    UxduckAgent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolInterruption {
+    Cancelled,
+    Disconnected,
+}
+
 /// What the daemon sends about itself, from its outbox.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(
@@ -681,32 +709,64 @@ pub enum DaemonEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_write_tokens: Option<u64>,
     },
-    /// An agent outside UXDuck connected, as `uxduck mcp` connects Claude
-    /// Code, Codex or Cursor (ADR-0016): the name it gave, as a token.
-    McpConnected {
-        client: String,
+    ToolSessionStarted {
+        #[serde(flatten)]
+        context: ToolTraceContext,
     },
-    /// A tool call from such a connection was answered: which tool and how
-    /// it went, never its arguments or its result. A connection's first 200
-    /// are sent, and `mcp_session` counts them all.
-    McpToolCalled {
-        client: String,
-        /// The API method the tool calls, such as `vehicle/list`.
+    ToolCallStarted {
+        #[serde(flatten)]
+        context: ToolTraceContext,
+        call_id: String,
+        sequence: u64,
+        method: String,
+    },
+    /// Every answered tool call, without arguments, results or free text.
+    ToolCallFinished {
+        #[serde(flatten)]
+        context: ToolTraceContext,
+        call_id: String,
+        sequence: u64,
         method: String,
         ok: bool,
-        /// A failed call's error kind, such as `capability-denied`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
-        /// From the request to its answer, a person's approval included.
-        ms: u64,
+        duration_us: u64,
+        approval_wait_us: u64,
+        execution_us: u64,
     },
-    /// Such a connection closed: how long it was open and what it did.
-    McpSession {
-        client: String,
-        ms: u64,
-        /// Tool calls answered, and how many of them failed.
-        tools: u32,
-        tool_errors: u32,
+    /// A client cancellation or lost connection is separate from a tool error.
+    ToolApprovalChanged {
+        #[serde(flatten)]
+        context: ToolTraceContext,
+        call_id: String,
+        sequence: u64,
+        method: String,
+        waiting: bool,
+        duration_us: u64,
+        approval_wait_us: u64,
+        execution_us: u64,
+    },
+    ToolCallInterrupted {
+        #[serde(flatten)]
+        context: ToolTraceContext,
+        call_id: String,
+        sequence: u64,
+        method: String,
+        reason: ToolInterruption,
+        duration_us: u64,
+        approval_wait_us: u64,
+        execution_us: u64,
+    },
+    ToolSessionEnded {
+        #[serde(flatten)]
+        context: ToolTraceContext,
+        duration_us: u64,
+        reason: String,
+        started: u64,
+        completed: u64,
+        errors: u64,
+        cancelled: u64,
+        disconnected: u64,
     },
     ApprovalResolved {
         decision: ApprovalDecision,

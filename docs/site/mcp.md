@@ -127,7 +127,13 @@ Only the title and text are sent, with UXDuck's version, your platform, the MCP 
 
 Your MCP client shows the call like any other tool call. With `uxduck mcp --all-tools`, its per-tool rules can deny `feedback_file`.
 
-With **Settings › Privacy › Share usage analytics** on, UXDuck also counts that an MCP client connected, which tools it called, whether each call failed and how long it took. It never counts a tool's arguments or results.
+## Tool activity and privacy
+
+Open **Settings › Agents and tools › View all tool activity** to see recent calls, or **View activity** beside a connected client. Activity shows sessions, readable and technical tool names, start times, approval waits, duration and outcomes. It stays on this engine and works with analytics off. Older completed records leave the in-memory history when its memory budget fills, and Activity says how many were discarded. Restarting the engine clears this history.
+
+With **Settings › Privacy › Share usage analytics** on, UXDuck sends metadata for every dispatched API tool call, including starts, approvals, completions, cancellations and disconnects. There is no 200-call cutoff. Tool traces exclude prompts, arguments, results, locations and raw error text. Turning analytics off clears queued tool traces and stops future captures. Browser delivery is best effort and can lose pending events when a page closes.
+
+Web records its built-in UXDuck AI tools. External MCP runs through the installed native engine, which also records built-in AI tools. A built-in AI turn shares one tracing session across its tool rounds. External MCP sessions follow the client connection and rotate after 30 idle minutes. These are diagnostic sessions, not copies of your conversations.
 
 ## Choose a simulation's starting place
 

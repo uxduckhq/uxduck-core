@@ -232,18 +232,47 @@ impl Engine {
             result: None,
             error: None,
         };
-        self.add_item(
+        let id = self.add_item(
             actor,
             thread_id,
             ItemKind::ToolCall,
             ItemStatus::InProgress,
             String::new(),
             Some(tool_call),
-        )
+        );
+        if self
+            .connections
+            .get(&agent)
+            .is_some_and(|c| c.transport == uxduck_contracts::dto::trace::Transport::Internal)
+        {
+            self.tool_started(
+                agent,
+                uxduck_contracts::dto::trace::RequestId::String(id.clone()),
+                method,
+            );
+        }
+        id
     }
 
     /// Records the receipt of a tool call.
     pub fn agent_tool_finish(&mut self, agent: ConnectionId, item_id: &str, outcome: ToolOutcome) {
+        if self
+            .connections
+            .get(&agent)
+            .is_some_and(|c| c.transport == uxduck_contracts::dto::trace::Transport::Internal)
+        {
+            let error = match &outcome {
+                ToolOutcome::Error(text) => {
+                    Some(serde_json::from_str(text).unwrap_or(serde_json::Value::Null))
+                }
+                ToolOutcome::Result(_) => None,
+            };
+            self.tool_finished(
+                agent,
+                &uxduck_contracts::dto::trace::RequestId::String(item_id.into()),
+                error.as_ref(),
+            );
+        }
         self.finish_item(Some(agent), item_id, |item| {
             let failed = matches!(outcome, ToolOutcome::Error(_));
             if let Some(call) = item.tool_call.as_mut() {
@@ -357,6 +386,24 @@ impl Engine {
             .map(|item| item.id.clone())
             .collect();
         for id in open {
+            let agents: Vec<_> = self
+                .connections
+                .iter()
+                .filter(|(_, c)| c.transport == uxduck_contracts::dto::trace::Transport::Internal)
+                .map(|(id, _)| *id)
+                .collect();
+            for agent in agents {
+                let request = uxduck_contracts::dto::trace::RequestId::String(id.clone());
+                if status == ItemStatus::Cancelled {
+                    self.tool_interrupted(
+                        agent,
+                        &request,
+                        uxduck_contracts::dto::analytics::ToolInterruption::Cancelled,
+                    );
+                } else {
+                    self.tool_finished(agent, &request, Some(&serde_json::Value::Null));
+                }
+            }
             let text = self.streaming.remove(&id);
             self.finish_item(None, &id, |item| {
                 item.status = if item.kind == ItemKind::UserMessage {

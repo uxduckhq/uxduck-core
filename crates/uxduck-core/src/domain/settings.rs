@@ -164,9 +164,9 @@ pub struct Settings {
     /// daemon keeps no install id and sends no events (ADR-0016 O15).
     #[serde(default = "on")]
     pub usage_analytics: bool,
-    /// Conversations may be kept to improve the agent (S29): on until
-    /// switched off. Each chat can also say no.
-    #[serde(default = "on")]
+    /// Opt-in retention of hosted chats for improving UXDuck AI (S29).
+    /// Off by default and independent of saving chats to the person's account.
+    #[serde(default)]
     pub share_conversations: bool,
     /// Flight data is shared only when this is on, flight by flight.
     #[serde(default)]
@@ -474,7 +474,7 @@ impl Default for Settings {
             shell_path: None,
             launch_action: LaunchAction::default(),
             usage_analytics: true,
-            share_conversations: true,
+            share_conversations: false,
             share_flight_data: false,
             video_ports: Vec::new(),
             video_recording: crate::domain::video::RecordPolicy::default(),
@@ -595,6 +595,33 @@ const fn traffic_alert_m() -> u32 {
 /// 300 m up or down (S174).
 const fn traffic_alert_up_m() -> u32 {
     300
+}
+
+#[cfg(test)]
+mod conversation_sharing_tests {
+    use super::Settings;
+
+    #[test]
+    fn new_and_missing_choices_do_not_share_chats_for_improvement() {
+        assert!(!Settings::default().share_conversations);
+        let mut saved = serde_json::to_value(Settings::default()).unwrap();
+        saved.as_object_mut().unwrap().remove("shareConversations");
+        let restored: Settings = serde_json::from_value(saved).unwrap();
+        assert!(!restored.share_conversations);
+    }
+
+    #[test]
+    fn explicit_saved_choices_survive_restart() {
+        for share in [true, false] {
+            let settings = Settings {
+                share_conversations: share,
+                ..Settings::default()
+            };
+            let restored: Settings =
+                serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+            assert_eq!(restored.share_conversations, share);
+        }
+    }
 }
 
 #[cfg(test)]

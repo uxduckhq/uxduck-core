@@ -106,6 +106,10 @@ pub(crate) fn handle(
             ErrorKind::MethodNotFound,
             "removed with the account's computers (ADR-0048)",
         )),
+        ClientRequest::ClientActivity(_) => {
+            require_operator()?;
+            to_value(&engine.activity_snapshot())
+        }
         ClientRequest::TraceSubscribe(_) => {
             require_operator()?;
             engine.tracers.insert(connection);
@@ -376,6 +380,10 @@ pub(crate) fn handle(
         ClientRequest::JournalImport(params) => {
             crate::import::handle(engine, connection, params, operator)
         }
+        ClientRequest::AccountToolCredits(_) if !operator => Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "only an operator client may manage tool metadata credits",
+        )),
         ClientRequest::AccountSetEnvironment(_) if !operator => Err(ApiError::new(
             ErrorKind::CapabilityDenied,
             "only an operator client may change the daemon's server",
@@ -393,6 +401,7 @@ pub(crate) fn handle(
         | ClientRequest::AccountSetName(_)
         | ClientRequest::AccountSetSource(_)
         | ClientRequest::AccountSessions(_)
+        | ClientRequest::AccountToolCredits(_)
         | ClientRequest::AccountSignOutSession(_)
         | ClientRequest::AccountSignOutOthers(_)
         | ClientRequest::AccountRequestDeletion(_)
@@ -1621,6 +1630,11 @@ pub(crate) fn notify(
 ) {
     match notification {
         ClientNotification::Cancel(params) => {
+            engine.tool_interrupted(
+                connection,
+                &params.id,
+                uxduck_contracts::dto::analytics::ToolInterruption::Cancelled,
+            );
             engine.cancel_approval(connection, &json!(params.id));
             engine.cancel_place_area(connection, &json!(params.id));
             engine.stop_looks(connection, Some(&json!(params.id)));
@@ -1628,9 +1642,6 @@ pub(crate) fn notify(
             if let Some(client) = engine.connections.get_mut(&connection) {
                 client.pending.remove(&params.id);
                 client.private_requests.remove(&params.id);
-                if let Some(outside) = client.outside.as_mut() {
-                    outside.calling.remove(&params.id);
-                }
             }
         }
     }
@@ -1780,6 +1791,9 @@ fn initialize(
     }
     if outside {
         engine.mcp_connected(connection, &params.client_info.name);
+    }
+    if kind == ClientKind::Agent {
+        engine.tool_session_connected(connection);
     }
     engine.window_admitted(kind.into());
     // A reloaded window takes back the controllers it held.

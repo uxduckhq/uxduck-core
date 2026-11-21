@@ -67,6 +67,8 @@ impl Credentials for AccountCredentials {
 pub enum Output {
     /// Hosted inference only; tools stay inside the capability-checked engine.
     Agent(crate::agent::Output),
+    /// Content-free tool activity, sent only by the hosting page after consent.
+    ToolTrace(serde_json::Value),
     /// A JSON-RPC frame for one of the page's connections.
     Post { connection: u32, text: String },
     /// A line for the journal in the browser's storage.
@@ -236,6 +238,7 @@ pub enum Order {
 /// What the engine's ports asked for, done after each engine call.
 #[derive(Debug)]
 enum Call {
+    ToolTrace(serde_json::Value),
     Open(Link),
     Close(String),
     Command(CommandOrder),
@@ -271,6 +274,38 @@ fn push(queue: &Queue, call: Call) {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push_back(call);
+}
+
+/// Only the engine's tool traces cross this port. Existing browser analytics
+/// remain owned by the page so flight and engagement totals are not duplicated.
+struct ToolAnalytics(Queue);
+impl uxduck_engine::runtime::AnalyticsPort for ToolAnalytics {
+    fn track(&mut self, event: uxduck_contracts::dto::analytics::AnalyticsEvent, _: &str) {
+        use uxduck_contracts::dto::analytics::{AnalyticsEvent, DaemonEvent};
+        if matches!(
+            event,
+            AnalyticsEvent::Daemon(
+                DaemonEvent::ToolSessionStarted { .. }
+                    | DaemonEvent::ToolSessionEnded { .. }
+                    | DaemonEvent::ToolCallStarted { .. }
+                    | DaemonEvent::ToolCallFinished { .. }
+                    | DaemonEvent::ToolCallInterrupted { .. }
+                    | DaemonEvent::ToolApprovalChanged { .. }
+            )
+        ) && let Ok(value) = serde_json::to_value(event)
+        {
+            push(&self.0, Call::ToolTrace(value));
+        }
+    }
+    fn alias(&mut self, _: &str) {}
+    fn set_enabled(&mut self, enabled: bool) {
+        if !enabled {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|call| !matches!(call, Call::ToolTrace(_)));
+        }
+    }
 }
 
 /// The engine's journal: handed to the worker as lines, and read for the
@@ -760,7 +795,7 @@ impl Browser {
                 port: None,
             },
         };
-        let engine = Engine::new(
+        let mut engine = Engine::new(
             config,
             engine_clock,
             random,
@@ -770,6 +805,8 @@ impl Browser {
                 sessions: vec![],
             },
         );
+        engine.set_tool_tracing_allowed(false);
+        engine.set_analytics(Box::new(ToolAnalytics(queue.clone())));
         let mut browser = Self {
             engine,
             agents: crate::agent::Runtime::default(),
@@ -1542,6 +1579,17 @@ impl Browser {
 
     /// The worker's beat, every 100 ms: timeouts, presence and telemetry,
     /// and approvals that ran out.
+    pub fn set_tool_tracing_allowed(&mut self, allowed: bool) -> Vec<Output> {
+        self.engine.set_tool_tracing_allowed(allowed);
+        if !allowed {
+            self.queue
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|call| !matches!(call, Call::ToolTrace(_)));
+        }
+        self.drain()
+    }
+
     pub fn tick(&mut self) -> Vec<Output> {
         let now = self.clock.now_us();
         self.last_tick_gap_ms = self
@@ -1717,6 +1765,7 @@ impl Browser {
                     );
                 }
             }
+            Call::ToolTrace(event) => outputs.push(Output::ToolTrace(event)),
             Call::Journal(write) => outputs.push(Output::Journal(write)),
             Call::Turn(turn) => {
                 let account = self

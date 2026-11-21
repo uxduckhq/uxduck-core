@@ -92,6 +92,8 @@ pub mod runtime;
 pub mod schema;
 pub mod search;
 mod setup;
+mod tool_activity;
+mod tool_tracing;
 /// Installing firmware (S189): the port UXDuck Desktop gives the engine.
 pub mod firmware {
     pub use crate::setup::{
@@ -275,12 +277,6 @@ impl Admitted {
 struct OutsideAgent {
     /// The name it declared, as a token, for analytics and its reports.
     client: String,
-    connected_us: u64,
-    /// The method of each tool call not answered yet.
-    calling: HashMap<RequestId, &'static str>,
-    /// Tool calls answered, and how many of them failed.
-    tools: u32,
-    tool_errors: u32,
     /// Reports it filed with `feedback/file`, and how often it added to them.
     filed: Vec<String>,
     added: usize,
@@ -315,6 +311,7 @@ struct Connection {
     seen: u64,
     /// Set when it is admitted as an agent outside UXDuck.
     outside: Option<OutsideAgent>,
+    tool_session: Option<tool_tracing::ToolSession>,
 }
 
 impl Connection {
@@ -422,6 +419,8 @@ pub struct Engine {
     plugin_host: Box<dyn runtime::PluginPort>,
     /// Product analytics; nothing until the composition root sets it.
     analytics: Box<dyn runtime::AnalyticsPort>,
+    tool_tracing_allowed: bool,
+    tool_activity: tool_activity::Activity,
     analytics_internal: bool,
     /// Bounded, transient browser task outcomes, drained once across windows.
     engagement: Vec<uxduck_contracts::dto::analytics::AppEvent>,
@@ -666,6 +665,8 @@ impl Engine {
             panic: false,
             plugin_host: ports.plugins,
             analytics: Box::new(runtime::NoAnalytics),
+            tool_tracing_allowed: true,
+            tool_activity: tool_activity::Activity::default(),
             analytics_internal: false,
             feedback: Box::new(feedback::NoFeedback),
             awaiting_feedback: BTreeMap::new(),
@@ -821,6 +822,7 @@ impl Engine {
                 focused: false,
                 seen: 0,
                 outside: None,
+                tool_session: None,
             },
         );
         id
@@ -877,6 +879,8 @@ impl Engine {
     }
 
     pub fn disconnect(&mut self, id: ConnectionId) {
+        self.activity_closed(id);
+        self.tool_session_closed(id, "disconnected");
         // A motor it held stops (S188).
         self.spins_disconnected(id);
         self.disconnect_places(id);
@@ -900,7 +904,6 @@ impl Engine {
         self.tray_watchers.remove(&id);
         self.app_update.watchers.remove(&id);
         self.messages.forget(id);
-        self.mcp_closed(id);
         self.connections.remove(&id);
         self.tracers.remove(&id);
         self.telemetry_subscribers.remove(&id);
@@ -926,16 +929,16 @@ impl Engine {
             if trace::private_method(parsed.method.as_deref()) {
                 connection.private_requests.insert(request_id.clone());
             }
-            if let Some(outside) = connection.outside.as_mut()
-                && let Some(method) = parsed.method.as_deref().and_then(|method| {
-                    uxduck_contracts::rpc::ClientRequest::METHODS
-                        .iter()
-                        .find(|known| **known == method)
-                })
-            {
-                outside.calling.insert(request_id.clone(), method);
-            }
             connection.pending.insert(request_id, now);
+        }
+        if parsed.kind == FrameKind::Request
+            && self
+                .connections
+                .get(&id)
+                .is_some_and(|c| c.outside.is_some())
+            && let (Some(request), Some(method)) = (parsed.id.clone(), parsed.method.as_deref())
+        {
+            self.tool_started(id, request, method);
         }
         self.tap(id, TraceDirection::In, &parsed, text.len(), None);
         if let Some(reply) = rpc::router::dispatch(self, id, text) {
@@ -1128,8 +1131,13 @@ impl Engine {
             }
             _ => None,
         };
-        if let (Some(request_id), Some(latency)) = (&parsed.id, latency) {
-            self.mcp_answered(id, request_id, frame, latency);
+        if let (Some(request_id), Some(_)) = (&parsed.id, latency)
+            && self
+                .connections
+                .get(&id)
+                .is_some_and(|c| c.outside.is_some())
+        {
+            self.tool_finished(id, request_id, frame.get("error"));
         }
         self.tap(id, TraceDirection::Out, &parsed, text.len(), latency);
         if let Some(connection) = self.connections.get(&id) {

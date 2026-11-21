@@ -87,6 +87,7 @@ mod web {
         /// `(json)`: a request to the account's sync, answered with
         /// `synced` (S16).
         sync: Function,
+        tool_trace: Function,
     }
 
     #[wasm_bindgen]
@@ -119,6 +120,7 @@ mod web {
             store: Function,
             agent: Function,
             sync: Function,
+            tool_trace: Function,
         ) -> Result<WebDaemon, JsError> {
             let mut kept = crate::logs::Logs::new(crate::logs::CAP);
             for pair in logs.iter() {
@@ -150,9 +152,16 @@ mod web {
                 store,
                 agent,
                 sync,
+                tool_trace,
             };
             daemon.hand(outputs);
             Ok(daemon)
+        }
+
+        #[wasm_bindgen(js_name = setToolTracingAllowed)]
+        pub fn set_tool_tracing_allowed(&mut self, allowed: bool) {
+            let outputs = self.browser.set_tool_tracing_allowed(allowed);
+            self.hand(outputs);
         }
 
         /// A page connects; returns its connection number.
@@ -303,6 +312,9 @@ mod web {
             let this = JsValue::NULL;
             for output in outputs {
                 let _ = match output {
+                    Output::ToolTrace(event) => self
+                        .tool_trace
+                        .call1(&JsValue::NULL, &JsValue::from_str(&event.to_string())),
                     Output::Sync(request) => self.sync.call1(
                         &this,
                         &JsValue::from(serde_json::to_string(&request).unwrap_or_default()),

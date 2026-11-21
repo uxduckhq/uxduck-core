@@ -718,6 +718,9 @@ fn check(name: &str) {
         ("result", "client_displayPull") => {
             round_trip::<uxduck_contracts::dto::client::DisplaySnapshot>(name, &json);
         }
+        ("result", "client_activity") => {
+            round_trip::<uxduck_contracts::dto::client::ToolActivityResult>(name, &json);
+        }
         ("result", "client_list") => {
             round_trip::<uxduck_contracts::dto::client::ClientListResult>(name, &json);
         }
@@ -777,6 +780,9 @@ fn check(name: &str) {
             | "account_signOutOthers",
         ) => {
             round_trip::<uxduck_contracts::dto::account::AccountState>(name, &json);
+        }
+        ("result", "account_toolCredits") => {
+            round_trip::<uxduck_contracts::dto::account::ToolCreditState>(name, &json);
         }
         ("result", "account_sessions") => {
             round_trip::<uxduck_contracts::dto::account::AccountSessions>(name, &json);

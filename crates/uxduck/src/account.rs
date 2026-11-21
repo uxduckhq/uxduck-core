@@ -535,6 +535,28 @@ impl Account {
                     .terms_version = Some(version);
                 Ok(json!({}))
             }
+            AccountAction::ToolCredits(params) => {
+                let token = session.signed_in()?;
+                let answer = client
+                    .post(format!("{api}/v1/me/tool-credits"))
+                    .bearer_auth(&token)
+                    .json(&params)
+                    .send()
+                    .await
+                    .map_err(|_| unreachable())?;
+                let answer = refused_or(answer).await?;
+                let value = answer
+                    .json::<Value>()
+                    .await
+                    .map_err(|_| unreadable_reply())?;
+                if self.token().as_deref() != Some(token.as_str()) {
+                    return Err(ApiError::new(
+                        ErrorKind::InvalidValue,
+                        "The signed-in account changed. Refresh your credits.",
+                    ));
+                }
+                Ok(value)
+            }
             AccountAction::SetSource { source, other } => {
                 let token = session.signed_in()?;
                 let mut body = json!({ "source": source });

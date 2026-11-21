@@ -244,3 +244,55 @@ pub struct AccountSession {
 pub struct AccountSessionParams {
     pub id: String,
 }
+
+/// An explicit account program action. Only operator clients may call it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolCreditParams {
+    pub action: ToolCreditAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_id: Option<String>,
+    #[serde(default)]
+    pub observations: Vec<ToolCreditObservation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolCreditAction {
+    Status,
+    Join,
+    Claim,
+    Leave,
+    Contribute,
+}
+
+/// Only completed call metadata, never a local client id, arguments or results.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolCreditObservation {
+    pub id: String,
+    pub session_id: String,
+    pub method: String,
+    pub source: crate::dto::analytics::ToolTraceSource,
+    pub status: crate::dto::client::ToolActivityStatus,
+    pub runtime: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub duration_us: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub approval_wait_us: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCreditState {
+    pub active: bool,
+    pub version: String,
+    pub enrollment_id: Option<String>,
+    pub monthly_usd: f64,
+    pub granted_usd: f64,
+    pub available_usd: f64,
+    pub starter_remaining_usd: f64,
+    pub claimed_month: Option<String>,
+}

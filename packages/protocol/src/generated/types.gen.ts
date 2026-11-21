@@ -3428,6 +3428,9 @@ export type ClientRequest = {
     method: 'client/list';
     params: Empty;
 } | {
+    method: 'client/activity';
+    params: Empty;
+} | {
     method: 'client/displayRegister';
     params: DisplayRegisterParams;
 } | {
@@ -4027,6 +4030,9 @@ export type ClientRequest = {
 } | {
     method: 'account/sessions';
     params: Empty;
+} | {
+    method: 'account/toolCredits';
+    params: ToolCreditParams;
 } | {
     method: 'account/signOutSession';
     params: AccountSessionParams;
@@ -15645,7 +15651,8 @@ export type Settings = {
      */
     saveFlights?: boolean;
     /**
-     * Whether conversations may be kept to improve the agent.
+     * Whether hosted chats may be kept to improve UXDuck AI. Off by default,
+     * independent of saving chats to the person's account.
      */
     shareConversations: boolean;
     /**
@@ -18576,6 +18583,35 @@ export type Tile = {
 export type Tone = 'muted' | 'warning';
 
 /**
+ * Local tool activity. Independent of analytics, with no arguments or results.
+ */
+export type ToolActivityCall = {
+    approvalWaitUs: number;
+    clientId: string;
+    durationUs: number;
+    id: string;
+    method: string;
+    sessionId: string;
+    source: ToolTraceSource;
+    startedUs: number;
+    status: ToolActivityStatus;
+};
+
+export type ToolActivityResult = {
+    calls: Array<ToolActivityCall>;
+    /**
+     * Completed records evicted by the local memory budget. Active calls stay.
+     */
+    discarded: number;
+    /**
+     * The memory budget for recent completed records, not a call-count cap.
+     */
+    retainedBytes: number;
+};
+
+export type ToolActivityStatus = 'running' | 'waiting-for-approval' | 'completed' | 'failed' | 'cancelled' | 'disconnected';
+
+/**
  * A tool call and its receipt.
  */
 export type ToolCall = {
@@ -18590,6 +18626,43 @@ export type ToolCall = {
     method: string;
     params: unknown;
     result?: unknown;
+};
+
+export type ToolCreditAction = 'status' | 'join' | 'claim' | 'leave' | 'contribute';
+
+/**
+ * Only completed call metadata, never a local client id, arguments or results.
+ */
+export type ToolCreditObservation = {
+    approvalWaitUs: number;
+    durationUs: number;
+    id: string;
+    method: string;
+    runtime: string;
+    sessionId: string;
+    source: ToolTraceSource;
+    status: ToolActivityStatus;
+};
+
+/**
+ * An explicit account program action. Only operator clients may call it.
+ */
+export type ToolCreditParams = {
+    action: ToolCreditAction;
+    enrollmentId?: string | null;
+    observations?: Array<ToolCreditObservation>;
+    version?: string | null;
+};
+
+export type ToolCreditState = {
+    active: boolean;
+    availableUsd: number;
+    claimedMonth?: string | null;
+    enrollmentId?: string | null;
+    grantedUsd: number;
+    monthlyUsd: number;
+    starterRemainingUsd: number;
+    version: string;
 };
 
 /**
@@ -18609,6 +18682,8 @@ export type ToolSearchParams = {
 export type ToolSearchResult = {
     tools: Array<FoundTool>;
 };
+
+export type ToolTraceSource = 'external_mcp' | 'uxduck_agent';
 
 /**
  * How components on the link group into vehicles.

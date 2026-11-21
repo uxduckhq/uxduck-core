@@ -343,6 +343,10 @@ impl Engine {
         self.places.turns.insert(connection, thread_id.to_owned());
     }
 
+    pub(crate) fn agent_thread(&self, connection: ConnectionId) -> Option<&str> {
+        self.places.turns.get(&connection).map(String::as_str)
+    }
+
     pub(crate) fn disconnect_places(&mut self, connection: ConnectionId) {
         self.places.turns.remove(&connection);
         self.places.pending.retain(|_, (c, _)| *c != connection);

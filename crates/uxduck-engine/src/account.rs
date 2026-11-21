@@ -73,6 +73,7 @@ pub enum AccountAction {
     },
     /// Where the account is signed in (S114): an `AccountSessions`.
     Sessions,
+    ToolCredits(uxduck_contracts::dto::account::ToolCreditParams),
     /// Signs out one session; this computer's own signs out as `SignOut`
     /// does, its watch links first.
     SignOutSession {
@@ -215,6 +216,7 @@ fn action_of(engine: &Engine, request: ClientRequest) -> Result<AccountAction, A
             other: p.other,
         },
         ClientRequest::AccountSessions(_) => AccountAction::Sessions,
+        ClientRequest::AccountToolCredits(p) => AccountAction::ToolCredits(p),
         ClientRequest::AccountSignOutSession(p) => AccountAction::SignOutSession {
             id: p.id.trim().to_owned(),
             device: (!engine.state.sync.device_id.is_empty())

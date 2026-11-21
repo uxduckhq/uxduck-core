@@ -111,7 +111,8 @@ pub struct Settings {
     pub launch_action: Option<LaunchAction>,
     /// Usage analytics (Settings > Data): on until switched off.
     pub usage_analytics: bool,
-    /// Whether conversations may be kept to improve the agent.
+    /// Whether hosted chats may be kept to improve UXDuck AI. Off by default,
+    /// independent of saving chats to the person's account.
     pub share_conversations: bool,
     /// Whether flight data may be shared, flight by flight.
     pub share_flight_data: bool,

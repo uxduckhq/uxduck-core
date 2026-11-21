@@ -37,6 +37,14 @@ async fn setup_with_verification(
     setup_scenarios(old_status, delayed, hold_verify, false).await
 }
 
+async fn tool_credits_reply(headers: HeaderMap, Json(body): Json<Value>) -> Json<Value> {
+    assert_eq!(headers["authorization"], "Bearer old-session");
+    assert_eq!(body["action"], "join");
+    assert_eq!(body["version"], "2026-11-20");
+    assert_eq!(body["observations"], json!([]));
+    Json(json!({ "active": true, "availableUsd": 1.0 }))
+}
+
 fn test_api(
     old_status: StatusCode,
     delayed: bool,
@@ -54,6 +62,7 @@ fn test_api(
     let session_release = release.clone();
     let sign_out_log = signed_out.clone();
     Router::new()
+        .route("/v1/me/tool-credits", post(tool_credits_reply))
         .route(
             "/v1/me",
             get(move |headers: HeaderMap| {
@@ -588,4 +597,23 @@ fn a_hosted_model_whose_budget_pays_for_no_frame_is_told_so_and_others_get_their
     let older: MeSession =
         serde_json::from_value(serde_json::json!({ "signedSession": { "token": "t" } })).unwrap();
     assert!(older.hosted_image_frames.is_empty());
+}
+
+#[tokio::test]
+async fn tool_credits_use_the_native_account_without_exposing_its_token() {
+    let test = setup(StatusCode::OK, false).await;
+    let result = test
+        .account
+        .act(AccountAction::ToolCredits(
+            uxduck_contracts::dto::account::ToolCreditParams {
+                action: uxduck_contracts::dto::account::ToolCreditAction::Join,
+                version: Some("2026-11-20".into()),
+                enrollment_id: None,
+                observations: vec![],
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result, json!({ "active": true, "availableUsd": 1.0 }));
+    assert!(!result.to_string().contains("old-session"));
 }

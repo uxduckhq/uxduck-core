@@ -312,6 +312,7 @@ impl Engine {
             None => self.approval_words(request, capability, &preflight),
         };
         let item_id = self.waiting_tool_call(connection, &method_of(request));
+        self.tool_approval(connection, &request_id, item_id.as_deref(), true);
         let approval = Approval {
             id: format!("ap{}", &self.random.token()[..16]),
             client_id: record.clone(),
@@ -472,14 +473,18 @@ impl Engine {
 
     /// The chat tool call an in-app agent on `connection` is waiting on for
     /// `method`: recorded just before the call, still in progress. The
-    /// newest wins, in case an earlier call to the same method was left open.
+    /// newest in this connection's current chat wins, in case an earlier call
+    /// to the same method was left open. Timestamps and per-chat indices can
+    /// tie across chats, so neither can identify the connection's current turn.
     fn waiting_tool_call(&self, connection: ConnectionId, method: &str) -> Option<String> {
         let client_id = &self.connections.get(&connection)?.client_id;
+        let thread_id = self.agent_thread(connection)?;
         self.state
             .items
             .values()
             .filter(|item| {
                 item.kind == ItemKind::ToolCall
+                    && item.thread_id == thread_id
                     && item.status == ItemStatus::InProgress
                     && self.turns.contains_key(&item.thread_id)
                     && item
@@ -1093,6 +1098,7 @@ impl Engine {
         let dto = ApprovalDto::from(&approval);
         let listed: Vec<String> = approval.preflight.iter().map(|c| c.id.clone()).collect();
         let record = approval.client_id.clone();
+        let trace_item = approval.item_id.clone();
         self.commit_as(daemon(), Change::ApprovalUpserted { approval });
         self.track(DaemonEvent::ApprovalResolved {
             decision: match (state, remember) {
@@ -1110,6 +1116,12 @@ impl Engine {
         let Some(held) = self.held.remove(id) else {
             return;
         };
+        self.tool_approval(
+            held.connection,
+            &held.request_id,
+            trace_item.as_deref(),
+            false,
+        );
         if state != ApprovalState::Allowed {
             let message = match &held.request {
                 ClientRequest::VideoFrame(params) if state == ApprovalState::Denied => {

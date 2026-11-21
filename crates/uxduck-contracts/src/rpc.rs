@@ -449,6 +449,9 @@ pub enum ClientRequest {
     /// connections. Operators only. Result: `ClientListResult`.
     #[serde(rename = "client/list")]
     ClientList(Empty),
+    /// Recent and active local tool calls, independent of analytics. Operators only. Result: `ToolActivityResult`.
+    #[serde(rename = "client/activity")]
+    ClientActivity(Empty),
     /// Announces a UI that can answer a display-settings pull. Needs `read`. Result: `Empty`.
     #[serde(rename = "client/displayRegister")]
     ClientDisplayRegister(DisplayRegisterParams),
@@ -1493,6 +1496,9 @@ pub enum ClientRequest {
     /// this one marked. Needs `read`. Result: `AccountSessions`.
     #[serde(rename = "account/sessions")]
     AccountSessions(Empty),
+    /// Tool metadata credit program. Operator only. Result: `ToolCreditState`.
+    #[serde(rename = "account/toolCredits")]
+    AccountToolCredits(crate::dto::account::ToolCreditParams),
     /// Signs out one of the account's sessions; this computer's own forgets
     /// its token. Needs `config`. Result: `AccountState`.
     #[serde(rename = "account/signOutSession")]
@@ -2405,7 +2411,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 417] = [
+    pub const METHODS: [&'static str; 419] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2476,6 +2482,7 @@ impl ClientRequest {
         "notification/acknowledge",
         "notification/dismiss",
         "client/list",
+        "client/activity",
         "client/displayRegister",
         "client/displayList",
         "client/displayPull",
@@ -2757,6 +2764,7 @@ impl ClientRequest {
         "account/setName",
         "account/setSource",
         "account/sessions",
+        "account/toolCredits",
         "account/signOutSession",
         "account/signOutOthers",
         "account/requestDeletion",

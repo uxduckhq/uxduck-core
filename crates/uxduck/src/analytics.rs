@@ -168,7 +168,7 @@ impl Outbox {
     /// Forgets the install id and everything queued.
     fn forget(&self) -> rusqlite::Result<()> {
         self.db
-            .execute_batch("DELETE FROM events; DELETE FROM meta WHERE key = 'install_id';")
+            .execute_batch("DELETE FROM events; DELETE FROM meta WHERE key IN ('install_id', 'dropped_events', 'ingestion_failures', 'retry_attempts', 'rejected_events', 'delivered_events', 'last_success_us');")
     }
 
     fn push(&self, now_us: u64, body: &str) -> rusqlite::Result<()> {
@@ -178,13 +178,79 @@ impl Outbox {
             "INSERT INTO events (created_us, body) VALUES (?1, ?2)",
             params![now, body],
         )?;
-        self.db
+        let expired = self
+            .db
             .execute("DELETE FROM events WHERE created_us < ?1", params![oldest])?;
-        self.db.execute(
+        let overflow = self.db.execute(
             "DELETE FROM events WHERE id <= (SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?1)",
             params![MAX_EVENTS],
         )?;
+        if expired + overflow > 0 {
+            self.add_count("dropped_events", (expired + overflow) as u64)?;
+            tracing::warn!(
+                expired,
+                overflow,
+                "analytics: events exceeded the seven-day or 10,000-event outbox budget"
+            );
+        }
         Ok(())
+    }
+
+    fn count(&self, key: &str) -> u64 {
+        self.db
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    }
+    fn add_count(&self, key: &str, count: u64) -> rusqlite::Result<()> {
+        self.db.execute("INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + CAST(excluded.value AS INTEGER) AS TEXT)", params![key, count.to_string()])?;
+        Ok(())
+    }
+    fn delivery_health(&self, now: u64) -> rusqlite::Result<Map<String, Value>> {
+        let (queued, oldest): (i64, Option<i64>) =
+            self.db
+                .query_row("SELECT count(*), min(created_us) FROM events", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?;
+        let mut properties = Map::new();
+        for name in [
+            "dropped_events",
+            "ingestion_failures",
+            "retry_attempts",
+            "rejected_events",
+            "delivered_events",
+        ] {
+            properties.insert(name.into(), json!(self.count(name)));
+        }
+        properties.insert("queue_events".into(), json!(queued));
+        properties.insert(
+            "oldest_event_age_ms".into(),
+            json!(
+                oldest
+                    .and_then(|at| u64::try_from(at).ok())
+                    .map_or(0, |at| now.saturating_sub(at) / 1000)
+            ),
+        );
+        let last = self.count("last_success_us");
+        properties.insert(
+            "last_success_age_ms".into(),
+            if last == 0 {
+                Value::Null
+            } else {
+                json!(now.saturating_sub(last) / 1000)
+            },
+        );
+        properties.insert("sender".into(), json!("native_outbox"));
+        properties.insert("runtime".into(), json!("native"));
+        properties.insert("server_version".into(), json!(env!("CARGO_PKG_VERSION")));
+        properties.insert("is_internal".into(), json!(self.internal()));
+        properties.insert("$geoip_disable".into(), json!(true));
+        Ok(properties)
     }
 
     /// The oldest events, up to `limit`, with the last one's id.
@@ -198,10 +264,19 @@ impl Outbox {
             })?
             .collect::<Result<_, _>>()?;
         let last = rows.last().map(|(id, _)| *id);
-        let events = rows
-            .into_iter()
-            .filter_map(|(_, body)| serde_json::from_str(&body).ok())
-            .collect();
+        let mut events = Vec::new();
+        for (id, body) in rows {
+            if let Ok(event) = serde_json::from_str(&body) {
+                events.push(event);
+            } else {
+                self.db
+                    .execute("DELETE FROM events WHERE id = ?1", params![id])?;
+                self.add_count("dropped_events", 1)?;
+                tracing::warn!(
+                    "analytics: an unreadable queued event was removed and recorded as lost"
+                );
+            }
+        }
         Ok((events, last))
     }
 
@@ -350,6 +425,7 @@ struct Task {
     shared_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     client: Option<reqwest::Client>,
     session: Session,
+    queue_write_failures: u64,
 }
 
 async fn run(
@@ -381,6 +457,7 @@ async fn run(
         shared_enabled: enabled,
         client,
         session: Session::default(),
+        queue_write_failures: 0,
     };
     let mut failures = 0usize;
     loop {
@@ -414,6 +491,14 @@ async fn run(
             Ok(()) => failures = 0,
             Err(error) => {
                 failures += 1;
+                if task
+                    .shared_enabled
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    && let Some(outbox) = &task.outbox
+                {
+                    let _ = outbox.add_count("ingestion_failures", 1);
+                    let _ = outbox.add_count("retry_attempts", 1);
+                }
                 tracing::debug!(%error, failures, "analytics: will try again");
             }
         }
@@ -428,6 +513,9 @@ impl Task {
         match message {
             Message::ResetSession => self.session = Session::default(),
             Message::Enabled(on) => {
+                if !on {
+                    self.queue_write_failures = 0;
+                }
                 self.session = Session::default();
                 self.enabled = on;
                 self.shared_enabled
@@ -499,12 +587,21 @@ impl Task {
         };
         let now_us = now_us();
         properties.insert("session_schema".into(), json!(1));
-        if let Some(id) = self.session.observe(name, &properties, surface, now_us) {
+        if let Some(id) = properties
+            .get("tool_session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            properties.insert("$session_id".into(), json!(id));
+            properties.insert("session_scope".into(), json!("tool_session"));
+            properties.insert("$geoip_disable".into(), json!(true));
+        } else if let Some(id) = self.session.observe(name, &properties, surface, now_us) {
             properties.insert("$session_id".into(), json!(id));
             properties.insert("session_scope".into(), json!("installation"));
         }
         let body = event_body(name, properties, install_id, surface, now_us);
         if let Err(error) = outbox.push(now_us, &body) {
+            self.queue_write_failures += 1;
             tracing::warn!(%error, "analytics: an event could not be queued");
         }
     }
@@ -518,14 +615,39 @@ impl Task {
             let Some(outbox) = &self.outbox else {
                 return Ok(());
             };
-            if !self.enabled {
+            if !self.enabled
+                || !self
+                    .shared_enabled
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 return Ok(());
             }
-            let (events, last) = outbox.batch(BATCH).map_err(|e| e.to_string())?;
+            let (mut events, last) = outbox.batch(BATCH).map_err(|e| e.to_string())?;
             let Some(last) = last else {
                 return Ok(());
             };
             if !events.is_empty() {
+                let count = events.len();
+                let now = now_us();
+                let mut health = outbox.delivery_health(now).map_err(|e| e.to_string())?;
+                health.insert("analytics_internal".into(), json!(self.config.internal));
+                health.insert("batch_events".into(), json!(count));
+                health.insert(
+                    "queue_write_failures".into(),
+                    json!(self.queue_write_failures),
+                );
+                if let Some(id) = outbox.install_id() {
+                    events.push(
+                        serde_json::from_str(&event_body(
+                            "telemetry_delivery",
+                            health,
+                            id,
+                            "daemon",
+                            now,
+                        ))
+                        .map_err(|e| e.to_string())?,
+                    );
+                }
                 let body = json!({
                     "api_key": key,
                     "batch": events,
@@ -543,10 +665,22 @@ impl Task {
                 if status.is_server_error() || status.as_u16() == 429 {
                     return Err(format!("PostHog answered {status}"));
                 }
-                if status.is_success() {
-                    tracing::debug!(events = events.len(), "analytics: sent");
-                } else {
-                    tracing::warn!(%status, "analytics: PostHog refused a batch; it is dropped");
+                if let Some(outbox) = self.outbox.as_ref() {
+                    if status.is_success() {
+                        outbox
+                            .add_count("delivered_events", count as u64)
+                            .map_err(|e| e.to_string())?;
+                        outbox.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_success_us', ?1)", params![now_us().to_string()]).map_err(|e| e.to_string())?;
+                        tracing::debug!(events = count, "analytics: sent");
+                    } else {
+                        outbox
+                            .add_count("ingestion_failures", 1)
+                            .map_err(|e| e.to_string())?;
+                        outbox
+                            .add_count("rejected_events", count as u64)
+                            .map_err(|e| e.to_string())?;
+                        tracing::warn!(%status, "analytics: PostHog refused a batch, recorded as rejected");
+                    }
                 }
             }
             if let Some(outbox) = &self.outbox {
@@ -749,6 +883,24 @@ mod tests {
             .unwrap();
         assert_eq!(count, MAX_EVENTS);
         assert_eq!(outbox.batch(1).unwrap().0, vec![json!({"n": 5})]);
+        let health = outbox.delivery_health(now + 250_000).unwrap();
+        assert_eq!(health["queue_events"], MAX_EVENTS);
+        assert_eq!(health["dropped_events"], 5);
+        assert_eq!(health["oldest_event_age_ms"], 250);
+        outbox.forget().unwrap();
+        assert_eq!(outbox.delivery_health(now).unwrap()["dropped_events"], 0);
+    }
+
+    #[test]
+    fn corrupt_queued_events_are_counted_once_as_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = Outbox::open(&dir.path().join("analytics.db")).unwrap();
+        outbox.push(1, "broken JSON").unwrap();
+        outbox.push(2, "{\"event\":\"tool_call_started\"}").unwrap();
+        assert_eq!(outbox.batch(10).unwrap().0.len(), 1);
+        assert_eq!(outbox.count("dropped_events"), 1);
+        assert_eq!(outbox.batch(10).unwrap().0.len(), 1);
+        assert_eq!(outbox.count("dropped_events"), 1);
     }
 
     #[test]
@@ -766,6 +918,7 @@ mod tests {
             shared_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             client: None,
             session: Session::default(),
+            queue_write_failures: 0,
         };
         task.handle(Message::Enabled(true));
         task.queue("app_opened", Map::new(), "desktop");
@@ -805,6 +958,7 @@ mod tests {
             shared_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             client: None,
             session: Session::default(),
+            queue_write_failures: 0,
         };
         task.handle(Message::Enabled(true));
         task.queue("before_sign_in", Map::new(), "daemon");
@@ -847,6 +1001,7 @@ mod tests {
             shared_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             client: None,
             session: Session::default(),
+            queue_write_failures: 0,
         };
         task.handle(Message::Internal(true));
         assert!(task.outbox.as_ref().unwrap().is_empty());
