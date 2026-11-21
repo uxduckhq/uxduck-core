@@ -12,51 +12,62 @@ const MIB: u64 = 1024 * 1024;
 
 /// Holds the previous CPU reading, without which use cannot be told.
 pub struct Sampler {
-    system: System,
-    disks: Disks,
-    components: Components,
+    system: Option<System>,
+    disks: Option<Disks>,
+    components: Option<Components>,
 }
 
 impl Default for Sampler {
     fn default() -> Self {
-        let mut system = System::new();
-        system.refresh_cpu_usage();
+        let mut system = System::new().ok();
+        if let Some(system) = &mut system {
+            system.refresh_cpu_usage();
+        }
         Self {
             system,
-            disks: Disks::new_with_refreshed_list(),
-            components: Components::new_with_refreshed_list(),
+            disks: Disks::new_with_refreshed_list().ok(),
+            components: Components::new_with_refreshed_list().ok(),
         }
     }
 }
 
 impl Sampler {
     pub fn sample(&mut self) -> ComputerStatus {
-        self.system.refresh_cpu_usage();
-        self.system.refresh_memory();
-        self.disks.refresh(true);
-        self.components.refresh(true);
-        let cores: Vec<f32> = self
-            .system
-            .cpus()
-            .iter()
-            .map(sysinfo::Cpu::cpu_usage)
-            .collect();
+        let (cores, memory): (Vec<f32>, (u64, u64)) = match &mut self.system {
+            Some(system) => {
+                system.refresh_cpu_usage();
+                system.refresh_memory();
+                (
+                    system.cpus().iter().map(sysinfo::Cpu::usage).collect(),
+                    (system.used_memory(), system.total_memory()),
+                )
+            }
+            None => (Vec::new(), (0, 0)),
+        };
+        if let Some(disks) = &mut self.disks {
+            disks.refresh(true);
+        }
+        if let Some(components) = &mut self.components {
+            components.refresh(true);
+        }
         let temperatures: Vec<(&str, f32)> = self
             .components
             .iter()
+            .flat_map(|components| components.iter())
             .filter_map(|c| Some((c.label(), c.temperature()?)))
             .collect();
         let disks: Vec<(&Path, u64, u64)> = self
             .disks
             .iter()
+            .flat_map(|disks| disks.iter())
             .map(|d| (d.mount_point(), d.total_space(), d.available_space()))
             .collect();
         status_of(
             &cores,
             &temperatures,
-            (self.system.used_memory(), self.system.total_memory()),
+            memory,
             &disks,
-            System::uptime(),
+            System::uptime().unwrap_or(0),
         )
     }
 }

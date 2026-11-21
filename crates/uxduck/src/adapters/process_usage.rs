@@ -12,7 +12,6 @@ struct ProcessSample {
     memory: u64,
 }
 
-#[derive(Default)]
 struct Sampler {
     system: System,
     previous: Option<Instant>,
@@ -68,6 +67,16 @@ fn usage(
 }
 
 impl Sampler {
+    fn new() -> Result<Self, sysinfo::Error> {
+        Ok(Self {
+            system: System::new()?,
+            previous: None,
+            samples: HashMap::new(),
+            guards: HashSet::new(),
+            reading: None,
+        })
+    }
+
     fn read(&mut self, guard_pids: &[u32]) -> Option<CoreProcessUsage> {
         let now = Instant::now();
         let guards: HashSet<_> = guard_pids.iter().copied().map(Pid::from_u32).collect();
@@ -165,9 +174,10 @@ impl Sampler {
 }
 
 pub fn snapshot(guard_pids: &[u32]) -> Option<CoreProcessUsage> {
-    static SAMPLER: OnceLock<Mutex<Sampler>> = OnceLock::new();
+    static SAMPLER: OnceLock<Option<Mutex<Sampler>>> = OnceLock::new();
     SAMPLER
-        .get_or_init(|| Mutex::new(Sampler::default()))
+        .get_or_init(|| Sampler::new().ok().map(Mutex::new))
+        .as_ref()?
         .lock()
         .ok()?
         .read(guard_pids)
@@ -178,7 +188,7 @@ mod tests {
     use super::*;
     #[test]
     fn first_sample_has_memory_but_no_invented_cpu_and_immediate_reads_are_cached() {
-        let mut sampler = Sampler::default();
+        let mut sampler = Sampler::new().expect("native process list");
         let first = sampler.read(&[]).expect("native self process");
         assert!(first.resident_bytes > 0);
         assert!(first.cpu_core_count.is_some_and(|count| count > 0));
@@ -195,7 +205,7 @@ mod tests {
     }
     #[test]
     fn later_sample_reports_the_actual_interval_without_dividing_by_core_count() {
-        let mut sampler = Sampler::default();
+        let mut sampler = Sampler::new().expect("native process list");
         sampler.read(&[]).expect("native self process");
         sampler.previous = Instant::now().checked_sub(Duration::from_secs(3));
         let next = sampler.read(&[]).expect("second self sample");
@@ -324,7 +334,7 @@ mod tests {
                 .spawn()
                 .expect("unrelated helper"),
         );
-        let mut sampler = Sampler::default();
+        let mut sampler = Sampler::new().expect("native process list");
         let first = sampler.read(&[owned.0.id()]).expect("process sample");
         let sim = first.simulations.expect("owned process is readable");
         assert_eq!(sim.count, 1);

@@ -1175,7 +1175,8 @@ fn close_windows(installed: &Path, data_dir: &Path, grace: Duration) -> Result<(
             }
         })
     };
-    let mut system = System::new();
+    let mut system =
+        System::new().map_err(|error| format!("Cannot list running processes: {error}"))?;
     let deadline = std::time::Instant::now() + grace;
     loop {
         system.refresh_processes_specifics(

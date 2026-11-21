@@ -62,7 +62,7 @@ semver = "1"
 # Canonical paths without Windows' `\\?\` prefix: Electron started from one failed to load its page.
 dunce = "1"
 # Process CPU time and memory for `cargo xtask perf` (S24).
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40.4", default-features = false, features = ["system"] }
 mavio = { version = "0.5.10", default-features = false, features = ["std", "dlct-ardupilotmega"] }
 rusqlite = { version = "0.43", features = ["bundled"] }
 schemars = "1"
