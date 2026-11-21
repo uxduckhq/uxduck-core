@@ -111,6 +111,9 @@ struct Choices {
     /// Added folders looked through with all their subfolders, by path.
     #[serde(default)]
     deep: Vec<String>,
+    /// Added folders whose flights join the Logbook's main list, by path.
+    #[serde(default)]
+    logbook: Vec<String>,
 }
 
 /// One file as last looked through.
@@ -602,6 +605,7 @@ impl Found {
             .into_iter()
             .map(|(id, name, path)| FlightFolder {
                 on: !choices.off.contains(&id),
+                logbook: true,
                 exists: path.is_dir(),
                 path: path.display().to_string(),
                 id,
@@ -635,6 +639,7 @@ impl Found {
                 path: added.clone(),
                 added: true,
                 deep: choices.deep.contains(added),
+                logbook: choices.logbook.contains(added),
                 walk: walk.filter(|_| choices.deep.contains(added)),
                 place: place_of_folder(added),
                 ..FlightFolder::default()
@@ -1042,6 +1047,7 @@ impl Found {
             choices.added.retain(|p| *p != params.id);
             choices.off.retain(|p| *p != params.id);
             choices.deep.retain(|p| *p != params.id);
+            choices.logbook.retain(|p| *p != params.id);
         } else {
             if !known && !choices.added.contains(&params.id) {
                 if !Path::new(&params.id).is_dir() {
@@ -1064,6 +1070,20 @@ impl Found {
                     choices.deep.push(params.id.clone());
                 }
                 Some(false) => choices.deep.retain(|p| *p != params.id),
+                _ => {}
+            }
+            match params.logbook {
+                Some(true) if known => {
+                    let name = known_folders()
+                        .into_iter()
+                        .find(|(id, _, _)| *id == params.id)
+                        .map_or_else(String::new, |(_, name, _)| name);
+                    return Err(format!("{name}'s flights are always in the Logbook."));
+                }
+                Some(true) if !choices.logbook.contains(&params.id) => {
+                    choices.logbook.push(params.id.clone());
+                }
+                Some(false) => choices.logbook.retain(|p| *p != params.id),
                 _ => {}
             }
         }
@@ -1140,6 +1160,7 @@ mod tests {
                 on: Some(true),
                 remove: false,
                 deep: None,
+                logbook: None,
             })
             .unwrap();
         assert!(changed.folders.iter().any(|f| f.added && f.path == path));
@@ -1169,6 +1190,7 @@ mod tests {
                 on: Some(false),
                 remove: false,
                 deep: None,
+                logbook: None,
             })
             .unwrap();
         assert!(off.flights.iter().all(|f| f.folder != path));
@@ -1179,6 +1201,7 @@ mod tests {
                     on: Some(true),
                     remove: false,
                     deep: None,
+                    logbook: None,
                 })
                 .is_err()
         );
@@ -1283,6 +1306,7 @@ mod tests {
                 on: Some(true),
                 remove: false,
                 deep: None,
+                logbook: None,
             })
             .unwrap();
         let mut flights: Vec<(String, u8)> = settled(&found, &path)
@@ -1343,6 +1367,7 @@ mod tests {
             on: Some(true),
             remove: false,
             deep,
+            logbook: None,
         };
         found.change(&added(None)).unwrap();
         let shallow = settled(&found, &path);
@@ -1373,8 +1398,48 @@ mod tests {
                     on: None,
                     remove: false,
                     deep: Some(true),
+                    logbook: None,
                 })
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn an_added_folders_logbook_choice_is_kept_forgotten_and_refused_for_an_app() {
+        let data = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let path = logs.path().display().to_string();
+        let set = |found: &Found, id: &str, logbook: Option<bool>| {
+            found.change(&FlightFolderParams {
+                id: id.to_owned(),
+                logbook,
+                ..FlightFolderParams::default()
+            })
+        };
+        let found = Found::new(data.path());
+        set(&found, &path, None).unwrap();
+        assert!(!folder(&found, &path).logbook);
+        set(&found, &path, Some(true)).unwrap();
+        assert!(folder(&found, &path).logbook);
+        assert!(folder(&Found::new(data.path()), &path).logbook);
+        set(&found, &path, Some(false)).unwrap();
+        assert!(!folder(&found, &path).logbook);
+        set(&found, &path, Some(true)).unwrap();
+        found
+            .change(&FlightFolderParams {
+                id: path.clone(),
+                remove: true,
+                ..FlightFolderParams::default()
+            })
+            .unwrap();
+        set(&found, &path, None).unwrap();
+        assert!(!folder(&found, &path).logbook);
+        let known = known_folders();
+        let (id, name, _) = &known[0];
+        assert!(folder(&found, id).logbook);
+        assert_eq!(
+            set(&found, id, Some(true)).unwrap_err(),
+            format!("{name}'s flights are always in the Logbook.")
         );
     }
 
@@ -1395,6 +1460,7 @@ mod tests {
                 on: Some(true),
                 remove: false,
                 deep,
+                logbook: None,
             })
             .unwrap();
     }

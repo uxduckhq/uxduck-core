@@ -7894,6 +7894,12 @@ export type Flight = {
      * Its camera video goes to the account with it (ADR-0046 B11).
      */
     syncVideo?: boolean;
+    /**
+     * The vehicle's MAVLink system ID, so a client can match this flight to
+     * the same vehicle's flight in another app's log. Absent when UXDuck no
+     * longer knows it.
+     */
+    systemId?: number | null;
     vehicleId: string;
     vehicleName: string;
     vehicleType: string;
@@ -8012,6 +8018,12 @@ export type FlightFolder = {
      */
     id: string;
     /**
+     * Its flights join the Logbook's main list (All). The known apps'
+     * folders always join, an added folder's flights do when the person
+     * chose it.
+     */
+    logbook?: boolean;
+    /**
      * "QGroundControl", "Mission Planner", or the folder's name.
      */
     name: string;
@@ -8070,6 +8082,11 @@ export type FlightFolderParams = {
      * A folder's id from `flights/found`, or a path to add.
      */
     id: string;
+    /**
+     * Shows an added folder's flights in the Logbook's main list (true) or
+     * under Where only (false).
+     */
+    logbook?: boolean | null;
     on?: boolean | null;
     /**
      * Removes a folder the person added.

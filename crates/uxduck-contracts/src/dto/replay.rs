@@ -321,6 +321,11 @@ pub struct FlightFolder {
     /// keep them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deep: bool,
+    /// Its flights join the Logbook's main list (All). The known apps'
+    /// folders always join, an added folder's flights do when the person
+    /// chose it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub logbook: bool,
     /// Only from UXDuck 0.17 and earlier, whose look through a whole tree
     /// stopped at 250,000 entries and set this. A tree is read whole now,
     /// however large (see `walk`), and this is never set.
@@ -536,6 +541,10 @@ pub struct FlightFolderParams {
     /// level only (false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep: Option<bool>,
+    /// Shows an added folder's flights in the Logbook's main list (true) or
+    /// under Where only (false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logbook: Option<bool>,
 }
 
 /// `replay/speed`: how fast the clock runs.

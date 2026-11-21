@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "77941d016520bb922b9a14b35b6eed0df6995151",
+  "sourceCommit": "02222c32fe3848b29e231e729a45d259533fac63",
   "licenseReady": true,
   "files": [
     {
@@ -1982,6 +1982,11 @@
     {
       "path": "crates/uxduck-contracts/fixtures/flights_folder.request.json",
       "sha256": "f1d86ba320c922862d0bf52eb2e38ed7cfcbca7019e1ddc22be8dc91ea4f5948",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-contracts/fixtures/flights_folder.request.logbook.json",
+      "sha256": "daa37619830e070c118ee1dff2cdc11e68634cd0f72a3ad485620a34cfb68973",
       "executable": false
     },
     {
@@ -6061,7 +6066,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/flight.rs",
-      "sha256": "866d871b2de58263d4521ad2b5d880514c758eb30170fb9b0826f9be6f921aac",
+      "sha256": "03d917ed62ec17b878d1bcff2515e28f824c92a367d704d37c7e129c25d002bb",
       "executable": false
     },
     {
@@ -6196,7 +6201,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/replay.rs",
-      "sha256": "6bbf617ad63b16389c0cf4221f855929d898f8f6d298ce1d0698cbc65f343512",
+      "sha256": "40ab9c2d0de589bac6a78b2e10ddd0d36f5ceca408127c7a15449eaddc090a5e",
       "executable": false
     },
     {
@@ -6446,7 +6451,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/flight.rs",
-      "sha256": "1ee5b20b202cffc4c8cf859b5820e86922d2b41a3db0d3c6390438a3c7efdc93",
+      "sha256": "cbdea8fdc2692f71e0d268ddfe4a375bd1bd4ec3c6bdb88affc0a7a122d1b16c",
       "executable": false
     },
     {
@@ -6836,7 +6841,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/flight_time.rs",
-      "sha256": "d9de5a1cc764924a5154b5dd85eb6d737cdc32e6d61dc0fb9c8824c3848691ec",
+      "sha256": "b8fb09c31bc7a1f6bafc223ae960b936552389d0203fef4f0ac98c0fae414fc2",
       "executable": false
     },
     {
@@ -7236,7 +7241,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/replay.rs",
-      "sha256": "b8a10bbe6a23ff61c27d1a4d54628db1b4576a61a031b28df760b956ce557c16",
+      "sha256": "31b8c5c42fd6e37084a50bf2c678188ba604467123966436337dbdf8db95d8a7",
       "executable": false
     },
     {
@@ -8356,7 +8361,7 @@
     },
     {
       "path": "crates/uxduck/src/adapters/host.rs",
-      "sha256": "b5915daecda8c7a5c66de5fbed210a8a4a2552bb8df8d5f7da9c4e6947a753fe",
+      "sha256": "c0c1e84dedfe39d50ef2126c9d50b884fc1d00a8d5532437412aa5532adda0b2",
       "executable": false
     },
     {
@@ -8831,7 +8836,7 @@
     },
     {
       "path": "crates/uxduck/src/found_flights.rs",
-      "sha256": "5fc77dd443305157fffc1dd4dc1ba711ff67924e553086dbdedd13cd0dea6f90",
+      "sha256": "7233bd13f240da81fce0fc30be0b5f02aa637dc85e9ded0b1cc4363aa8e9e574",
       "executable": false
     },
     {
@@ -9431,7 +9436,7 @@
     },
     {
       "path": "packages/protocol/src/generated/types.gen.ts",
-      "sha256": "e944c127a2c2f1fba50eaf1d9f0e0fb25a8456e688051b6208bd28364c378304",
+      "sha256": "1015b4d89414d6967008c024c42e5bf399e031c122885ce93a50470819c84a2f",
       "executable": false
     },
     {

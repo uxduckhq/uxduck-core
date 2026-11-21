@@ -4069,6 +4069,7 @@ impl Engine {
                 copies: Vec::new(),
                 id: id.clone(),
                 vehicle_id: identity.original_id.clone(),
+                system_id: vehicle.map(|v| v.system_id),
                 vehicle_name: identity.name.clone(),
                 vehicle_type: vehicle.map(|v| v.vehicle_type.clone()).unwrap_or_default(),
                 name: None,

@@ -102,6 +102,10 @@ pub struct FlightOperator {
 pub struct Flight {
     pub id: String,
     pub vehicle_id: String,
+    /// The vehicle's MAVLink system ID when it armed, absent for entries
+    /// recorded before UXDuck kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_id: Option<u8>,
     /// The vehicle's name and type when it flew.
     pub vehicle_name: String,
     pub vehicle_type: String,

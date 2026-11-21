@@ -36,6 +36,11 @@ pub struct FlightOperator {
 pub struct Flight {
     pub id: String,
     pub vehicle_id: String,
+    /// The vehicle's MAVLink system ID, so a client can match this flight to
+    /// the same vehicle's flight in another app's log. Absent when UXDuck no
+    /// longer knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_id: Option<u8>,
     pub vehicle_name: String,
     pub vehicle_type: String,
     /// A person's name for it (`flight/rename`); absent, clients name it
@@ -583,6 +588,7 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
         Self {
             id: f.id.clone(),
             vehicle_id: f.vehicle_id.clone(),
+            system_id: f.system_id,
             vehicle_name: f.vehicle_name.clone(),
             vehicle_type: f.vehicle_type.clone(),
             name: f.name.clone(),

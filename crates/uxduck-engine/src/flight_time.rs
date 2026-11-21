@@ -344,6 +344,7 @@ impl Engine {
             copies: Vec::new(),
             id: format!("fl{}", &self.random.token()[..16]),
             vehicle_id: vehicle.id.clone(),
+            system_id: Some(vehicle.system_id),
             vehicle_name: vehicle.name.clone(),
             vehicle_type: vehicle.vehicle_type.clone(),
             name: None,
@@ -709,6 +710,9 @@ impl Engine {
 
     fn flight_dto(&self, flight: &Flight) -> uxduck_contracts::dto::flight::Flight {
         let mut dto: uxduck_contracts::dto::flight::Flight = flight.into();
+        dto.system_id = dto
+            .system_id
+            .or_else(|| self.vehicle(&flight.vehicle_id).map(|v| v.system_id));
         dto.replay_available = self
             .flight_replay_read(flight, None)
             .and_then(|read| self.system.replay_available(&read));

@@ -616,6 +616,7 @@ impl System for Host {
                     on: Some(true),
                     remove: false,
                     deep: deep.then_some(true),
+                    logbook: None,
                 })?;
         }
         self.offload
