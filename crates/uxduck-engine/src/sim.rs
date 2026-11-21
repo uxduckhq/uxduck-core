@@ -228,10 +228,16 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
         return Err(invalid(format!("a jet flies the {JET_FRAME} frame")));
     }
     // Frame names are the build's own, such as `+`, `octa-quad` or
-    // `X:@ROMFS/models/Callisto.json`: short, with no spaces.
-    let frame_ok = frame
-        .as_deref()
-        .is_none_or(|f| !f.is_empty() && f.len() <= 100 && !f.contains(char::is_whitespace));
+    // `X:@ROMFS/models/Callisto.json`: short, with no spaces. After a `:`
+    // comes the physics model it flies, which may be a file of the
+    // person's own anywhere on this computer, as `X:/path/my quad.json`.
+    let frame_ok = frame.as_deref().is_none_or(|f| {
+        let (name, model) = f.split_once(':').map_or((f, None), |(n, m)| (n, Some(m)));
+        !name.is_empty()
+            && name.len() <= 100
+            && !name.contains(char::is_whitespace)
+            && model.is_none_or(|model| !model.trim().is_empty())
+    });
     if !frame_ok {
         return Err(invalid("a frame is one of the build's frame names"));
     }
@@ -349,6 +355,7 @@ pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> Result<LinkKin
     })
 }
 
+#[allow(clippy::too_many_lines, reason = "one arm per simulation request")]
 pub(crate) fn handle(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -405,6 +412,24 @@ pub(crate) fn handle(
         ClientRequest::SimInspect(params) => {
             require(Capability::Read)?;
             to_value(&engine.system.sim_inspect(&params.path).map_err(invalid)?)
+        }
+        ClientRequest::SimInspectModel(params) => {
+            require(Capability::Read)?;
+            if !engine
+                .state
+                .settings
+                .physics_models
+                .iter()
+                .any(|model| model.path == params.path)
+            {
+                return Err(invalid("This physics model is not in your saved models"));
+            }
+            to_value(
+                &engine
+                    .system
+                    .sim_inspect_model(&params.path)
+                    .map_err(invalid)?,
+            )
         }
         ClientRequest::SimOwnBuild(params) => {
             require(Capability::Read)?;

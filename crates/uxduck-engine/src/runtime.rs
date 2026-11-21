@@ -1210,6 +1210,20 @@ pub trait System: Send {
         )
     }
 
+    /// Whether a physics model file of a person's own can be read and is a
+    /// JSON object, as a simulation starting with it reads it.
+    ///
+    /// # Errors
+    /// When this host has no own simulators, or cannot read the file or it
+    /// is not a JSON object.
+    fn sim_inspect_model(
+        &self,
+        path: &str,
+    ) -> Result<uxduck_contracts::dto::sim::SimInspectModelResult, String> {
+        let _ = path;
+        Err("This UXDuck cannot read your own physics models. Use UXDuck Desktop for them.".into())
+    }
+
     /// Which ArduPilot program a selected native executable is, read from
     /// its file without running it.
     /// # Errors

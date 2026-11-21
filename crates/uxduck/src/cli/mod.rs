@@ -739,7 +739,9 @@ pub enum SimCommand {
         )]
         at: String,
         /// The build's frame, such as ArduPilot's `X` or `quadplane-tilt`,
-        /// or PX4's `quadx` (see `uxduck sim builds`).
+        /// or PX4's `quadx` (see `uxduck sim builds`). An ArduPilot
+        /// multicopter, plane or VTOL frame can fly a JSON physics model of
+        /// your own after a colon: `X:/full/path/quad.json`.
         #[arg(long)]
         frame: Option<String>,
         /// Times real time, 1 to 10.

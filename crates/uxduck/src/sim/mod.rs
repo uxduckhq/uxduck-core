@@ -20,8 +20,8 @@ use uxduck_contracts::dto::link::{
     SimVehicle as SimVehicleDto,
 };
 use uxduck_contracts::dto::sim::{
-    CatalogueBuild, SimBinary, SimFramesParams, SimFramesResult, SimInspectResult,
-    SimOwnBuildResult,
+    CatalogueBuild, SimBinary, SimFramesParams, SimFramesResult, SimInspectModelResult,
+    SimInspectResult, SimOwnBuildResult,
 };
 use uxduck_core::domain::link::{
     ArdupilotGimbal, JET_FRAME, Link, LinkKind, SimAutopilot, SimVehicle,
@@ -38,6 +38,9 @@ pub const BUILD_FILE: &str = "build.json";
 /// For a build older than its embedded frame table, the table shipped
 /// beside it, with its default parameter files under `defaults/`.
 const FRAME_TABLE: &str = "vehicleinfo.json";
+/// A physics model file of the person's own, copied beside the simulator's
+/// other files. No `-`, which `ArduPlane` would read as a variant.
+const OWN_PHYSICS: &str = "uxduck_own_physics.json";
 
 /// SITL's first TCP port; each instance adds 10 (`--instance`).
 pub const BASE_PORT: u16 = 5760;
@@ -567,6 +570,7 @@ impl Simulators {
             .ok_or_else(|| missing(autopilot, vehicle))
     }
 
+    #[allow(clippy::too_many_lines, reason = "one launch, told in order")]
     fn launch_inner(&self, link: &Link) -> Result<(Running, Endpoint), String> {
         let LinkKind::Simulator {
             vehicle,
@@ -615,7 +619,13 @@ impl Simulators {
             }
             return self.launch_px4(link, &build, &frame, instance);
         }
-        let launcher = launcher_base(&build, &frame);
+        // A physics model file of the person's own flies a listed frame
+        // with the file's values, as `X:/path/quad.json`.
+        let own_model = frame
+            .split_once(':')
+            .filter(|(_, file)| !file.starts_with('@'));
+        let listed = own_model.map_or(frame.as_str(), |(listed, _)| listed);
+        let launcher = launcher_base(&build, listed);
         if !build.frames.contains(&frame) && !frame.contains(':') && launcher.is_none() {
             return Err(format!("{} has no frame {frame}", build.program));
         }
@@ -627,8 +637,8 @@ impl Simulators {
         } else {
             wanted
         };
-        if !frame.contains(':')
-            && ardupilot_vehicle(&build.program, launcher.unwrap_or(&frame))
+        if !listed.contains(':')
+            && ardupilot_vehicle(&build.program, launcher.unwrap_or(listed))
                 .is_some_and(|flies| flies != flies_as)
         {
             return Err(format!("{frame} is not a {} frame", vehicle_name(vehicle)));
@@ -640,8 +650,15 @@ impl Simulators {
         let directory = self.data_dir.join("simulators").join(&link.id);
         std::fs::create_dir_all(&directory)
             .map_err(|e| format!("cannot make {}: {e}", directory.display()))?;
-        let (model, defaults) = model_and_defaults(&build, &frame, launcher);
-        let model = profiles::with_physics(&directory, &build.program, &frame, model)?;
+        let (model, defaults) = model_and_defaults(
+            &build,
+            listed,
+            launcher.or(own_model.map(|(listed, _)| listed)),
+        );
+        let model = match own_model {
+            Some((_, file)) => own_physics(&directory, &build.program, listed, &model, file)?,
+            None => profiles::with_physics(&directory, &build.program, &frame, model)?,
+        };
         let mut args = local_only_args(Path::new(&build.path), allow_network)?;
         args.extend([
             format!("--model={model}"),
@@ -663,7 +680,7 @@ impl Simulators {
         let defaults = profiles::with_defaults(
             &directory,
             &build.program,
-            &frame,
+            listed,
             defaults,
             profiles::Extras {
                 traffic,
@@ -1704,7 +1721,8 @@ fn launcher_base<'a>(build: &SimBinary, frame: &'a str) -> Option<&'a str> {
 /// `sim_vehicle.py` does, a frame the table gives a physics model of its
 /// own runs that: `freestyle` is `X:@ROMFS/models/freestyle.json`, which
 /// SITL also finds the frame's defaults by. SITL finds defaults by the
-/// exact name only, so a plane on a launcher is given its listed frame's.
+/// exact name only, so a plane on a launcher, or a frame flying a physics
+/// model file of the person's own, is given its listed frame's (`launcher`).
 fn model_and_defaults(
     build: &SimBinary,
     frame: &str,
@@ -1739,6 +1757,79 @@ fn model_and_defaults(
             .and_then(|table| shipped_defaults(table, folder, &build.program, frame)),
     };
     (model, defaults)
+}
+
+/// The physics model a frame flies when the person gives a file of their
+/// own, as `X:/path/quad.json`: copied into the simulator's working
+/// directory under UXDuck's name, since `ArduPlane` reads its variants from
+/// anywhere in the model's text and a path holding `-ice` or `-3d` would
+/// change how it flies. Only ArduPilot's multicopter, plane and VTOL
+/// physics read one. A name with no path is SITL's own, from the models
+/// built into it, as SITL takes it.
+fn own_physics(
+    directory: &Path,
+    program: &str,
+    listed: &str,
+    model: &str,
+    file: &str,
+) -> Result<String, String> {
+    if !Path::new(file).is_absolute() {
+        return Ok(format!("{listed}:{file}"));
+    }
+    if program != "arducopter" && program != "arduplane" {
+        return Err(format!(
+            "{program} has no physics that reads a model file. ArduPilot's multicopter, plane and VTOL physics do"
+        ));
+    }
+    if model.contains(':') {
+        return Err(format!(
+            "{listed} already flies its own physics model. Choose the frame it is built on, such as X, for yours"
+        ));
+    }
+    let (text, _) = read_physics_model(file)?;
+    let path = directory.join(OWN_PHYSICS);
+    std::fs::write(&path, &text)
+        .map_err(|error| format!("cannot write the physics model {}: {error}", path.display()))?;
+    Ok(format!("{model}:{OWN_PHYSICS}"))
+}
+
+/// A physics model file of the person's own, and the values it sets, read
+/// as a simulation starting with it reads it.
+fn read_physics_model(file: &str) -> Result<(Vec<u8>, serde_json::Map<String, Value>), String> {
+    let cannot_read =
+        |error: std::io::Error| format!("Can't read the physics model {file}: {error}");
+    if !std::fs::metadata(file).map_err(cannot_read)?.is_file() {
+        return Err(format!("{file} is not a regular file"));
+    }
+    let text = std::fs::read(file).map_err(cannot_read)?;
+    let mut json = text.clone();
+    // AP_JSON::load_json blanks everything from each '#' to a CR or LF.
+    for line in json.split_mut(|byte| matches!(byte, b'\r' | b'\n')) {
+        if let Some(start) = line.iter().position(|&byte| byte == b'#') {
+            line[start..].fill(b' ');
+        }
+    }
+    let values = serde_json::from_slice(&json)
+        .map_err(|error| format!("{file} is not a JSON physics model: {error}"))?;
+    Ok((text, values))
+}
+
+/// Whether a physics model of the person's own, saved by its full path,
+/// can be read and is a JSON object, without starting anything.
+///
+/// # Errors
+/// When the path is not a full one, or the file cannot be read or is not
+/// a JSON object.
+pub fn inspect_model(file: &str) -> Result<SimInspectModelResult, String> {
+    if !Path::new(file).is_absolute() {
+        return Err(format!(
+            "{file} is not a full path. Give the file's full path on the computer running UXDuck"
+        ));
+    }
+    let (_, values) = read_physics_model(file)?;
+    Ok(SimInspectModelResult {
+        values: u32::try_from(values.len()).unwrap_or(u32::MAX),
+    })
 }
 
 /// A frame's default parameter files from the table built into the
@@ -3032,6 +3123,132 @@ mod tests {
         };
         assert_eq!(model("freestyle"), Some("X:@ROMFS/models/freestyle.json"));
         assert_eq!(model("X"), None);
+    }
+
+    #[test]
+    fn a_saved_physics_model_is_a_readable_json_object_at_a_full_path() {
+        let folder = tempfile::tempdir().expect("models folder");
+        let file = folder.path().join("my quad.json");
+        std::fs::write(
+            &file,
+            b"# Quad model\r\n{\r    # Mass in kg\r    \"mass\": 2.5, # kg\r\n    \"diagonal_size\": 0.35\n}\n# End",
+        )
+        .expect("model");
+        let file = file.display().to_string();
+        assert_eq!(
+            inspect_model(&file),
+            Ok(SimInspectModelResult { values: 2 })
+        );
+        assert!(
+            inspect_model("models/quad.json").is_err_and(|error| error.contains("not a full path"))
+        );
+        let missing = folder.path().join("gone.json").display().to_string();
+        assert!(
+            inspect_model(&missing)
+                .is_err_and(|error| error.starts_with("Can't read the physics model"))
+        );
+        let list = folder.path().join("list.json");
+        std::fs::write(&list, r#"[{"mass": 2.5}]"#).expect("not an object");
+        assert!(
+            inspect_model(&list.display().to_string())
+                .is_err_and(|error| error.contains("is not a JSON physics model"))
+        );
+    }
+
+    #[test]
+    fn a_physics_model_file_flies_its_frame_with_that_frames_defaults() {
+        let folder = tempfile::tempdir().expect("build folder");
+        std::fs::write(
+            folder.path().join(FRAME_TABLE),
+            r#"{ "ArduCopter": { "frames": {
+                "X": { "waf_target": "bin/arducopter",
+                    "default_params_filename": "default_params/copter.parm" },
+                "quad": { "waf_target": "bin/arducopter", "model": "+",
+                    "default_params_filename": "default_params/copter.parm" },
+                "freestyle": { "waf_target": "bin/arducopter",
+                    "model": "X:@ROMFS/models/freestyle.json" } } } }"#,
+        )
+        .expect("frame table");
+        std::fs::create_dir(folder.path().join("defaults")).expect("defaults folder");
+        let copter_parm = folder.path().join("defaults").join("copter.parm");
+        std::fs::write(&copter_parm, "FRAME_CLASS 1\n").expect("defaults");
+        let build = SimBinary {
+            path: folder.path().join("arducopter").display().to_string(),
+            autopilot: SimAutopilotDto::Ardupilot,
+            program: "arducopter".into(),
+            vehicles: vec![SimVehicleDto::Multicopter],
+            frames: vec!["X".into(), "quad".into(), "freestyle".into()],
+            default_frame: "X".into(),
+            version: None,
+            catalogue_id: None,
+            ardupilot_gimbals: Vec::new(),
+        };
+        assert_eq!(
+            model_and_defaults(&build, "X", Some("X")),
+            ("X".into(), Some(copter_parm.display().to_string()))
+        );
+
+        let directory = tempfile::tempdir().expect("simulator directory");
+        let file = folder.path().join("my quad-3d.json");
+        let comment_model = b"# Model at launch\n{\"mass\": 2.5} # kg\n";
+        std::fs::write(&file, comment_model).expect("physics model");
+        let file = file.display().to_string();
+        assert_eq!(
+            own_physics(directory.path(), "arducopter", "X", "X", &file),
+            Ok(format!("X:{OWN_PHYSICS}"))
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(OWN_PHYSICS)).expect("copied model"),
+            comment_model
+        );
+        let (quad_model, defaults) = model_and_defaults(&build, "quad", Some("quad"));
+        assert_eq!(defaults, Some(copter_parm.display().to_string()));
+        assert_eq!(
+            own_physics(directory.path(), "arducopter", "quad", &quad_model, &file),
+            Ok(format!("+:{OWN_PHYSICS}"))
+        );
+        assert_eq!(
+            own_physics(
+                directory.path(),
+                "arduplane",
+                "plane-catapult",
+                "plane-catapult",
+                &file
+            ),
+            Ok(format!("plane-catapult:{OWN_PHYSICS}"))
+        );
+        assert_eq!(
+            own_physics(directory.path(), "arducopter", "X", "X", "freestyle.json"),
+            Ok("X:freestyle.json".into())
+        );
+        assert_eq!(
+            own_physics(
+                directory.path(),
+                "arducopter",
+                "freestyle",
+                "X:@ROMFS/models/freestyle.json",
+                &file
+            ),
+            Err("freestyle already flies its own physics model. Choose the frame it is built on, such as X, for yours".into())
+        );
+        assert!(own_physics(directory.path(), "ardurover", "rover", "rover", &file).is_err());
+        let missing = folder.path().join("missing.json").display().to_string();
+        assert!(
+            own_physics(directory.path(), "arducopter", "X", "X", &missing)
+                .is_err_and(|error| error.starts_with("Can't read the physics model"))
+        );
+        let not_json = folder.path().join("quad.parm");
+        std::fs::write(&not_json, "FRAME_CLASS 1").expect("not a model");
+        assert!(
+            own_physics(
+                directory.path(),
+                "arducopter",
+                "X",
+                "X",
+                &not_json.display().to_string()
+            )
+            .is_err_and(|error| error.contains("is not a JSON physics model"))
+        );
     }
 
     #[test]

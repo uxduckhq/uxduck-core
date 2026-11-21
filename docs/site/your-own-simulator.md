@@ -79,6 +79,22 @@ uxduck sim start --vehicle multicopter --binary /absolute/path/to/arducopter --f
 
 Omit `--allow-network` for a build with local-only support. The same explicit `allowNetwork` option is available to MCP clients for `sim_start` and `snapshot_start`; requests still use UXDuck's configuration permissions and approvals.
 
+## Your own physics model
+
+ArduPilot's multicopter, plane and VTOL simulators can fly a frame with the values in a JSON model file of your own: mass, motors, drag and the rest for a multicopter, aerodynamic coefficients for a plane. The frame still sets the layout and its usual parameters, so a quad's file goes on `X` or `quad`.
+
+In **New simulation › Advanced › Physics model**, enter the file's full path on the computer running UXDuck. It works with UXDuck's downloaded simulators and with your own build. UXDuck checks that the file is JSON and copies it when the simulation starts, so a change to the file applies at the next start.
+
+**Save to your models** keeps the path, named, in **Settings › Custom firmware › Physics models**. UXDuck keeps the path, not a copy, and says so there when the file has gone. **Saved model** then offers it in New simulation.
+
+From the command line, put the path after the frame and a colon:
+
+```sh
+uxduck sim start --vehicle multicopter --frame "X:/Users/you/models/quad.json"
+```
+
+A physics model changes how the simulated vehicle flies, not the autopilot. To change the autopilot's own code, build your own simulator, above.
+
 ## Connect to it instead
 
 SITL started with `--no-mavproxy` listens on TCP port 5760. Choose **Connect to it instead**, pick **TCP client** and give the simulator's address and `5760`.

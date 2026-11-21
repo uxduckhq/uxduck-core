@@ -201,6 +201,12 @@ pub struct Settings {
     /// older daemon left it out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sim_builds: Vec<SimBuild>,
+    /// Settings › Custom firmware › Physics models: a person's own JSON
+    /// physics model files on this computer, each named, in the order they
+    /// were added. New simulation offers them. Empty when an older daemon
+    /// left it out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub physics_models: Vec<PhysicsModel>,
     /// Settings › Airspace (S174): traffic this near an armed vehicle,
     /// across, raises a warning. 2 km when an older daemon left it out.
     #[serde(default = "traffic_alert_m")]
@@ -341,6 +347,9 @@ pub struct SettingsUpdateParams {
     /// Replaces the whole list when present. However many builds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sim_builds: Option<Vec<SimBuild>>,
+    /// Replaces the whole list when present. However many models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physics_models: Option<Vec<PhysicsModel>>,
     /// 100 m to 20 km (S174).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_alert_m: Option<u32>,
@@ -658,6 +667,17 @@ const fn battery_critical_pct() -> u8 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SimBuild {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+}
+
+/// One of a person's own physics models: its name and the path of its JSON
+/// file on the computer running UXDuck. Kept as a path, never copied, until
+/// a simulation starts with it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PhysicsModel {
     pub id: String,
     pub name: String,
     pub path: String,

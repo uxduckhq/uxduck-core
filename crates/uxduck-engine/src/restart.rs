@@ -591,6 +591,9 @@ fn update_settings(
         settings.share_conversations = on;
     }
     simulations_and_traffic(&params, &mut settings)?;
+    if let Some(models) = &params.physics_models {
+        settings.physics_models = physics_models(engine, models)?;
+    }
     if let Some(dataset) = params.terrain_dataset {
         settings.terrain_dataset = dataset.into();
     }
@@ -1102,6 +1105,60 @@ fn sim_builds(
             path: b.path.trim().to_owned(),
         })
         .collect())
+}
+
+/// Settings › Custom firmware › Physics models, checked: each its own id, a
+/// name and the path of its JSON file.
+fn physics_models(
+    engine: &Engine,
+    models: &[uxduck_contracts::dto::settings::PhysicsModel],
+) -> Result<Vec<uxduck_core::domain::settings::PhysicsModel>, ApiError> {
+    let mut ids = std::collections::BTreeSet::new();
+    if models
+        .iter()
+        .any(|m| m.id.trim().is_empty() || !ids.insert(m.id.as_str()))
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "Each physics model needs its own identifier",
+        ));
+    }
+    if let Some(m) = models
+        .iter()
+        .find(|m| m.name.trim().is_empty() || m.path.trim().is_empty())
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "The physics model \"{}\" needs a name and the path of its file",
+                m.name.trim()
+            ),
+        ));
+    }
+    let saved = &engine.state.settings.physics_models;
+    models
+        .iter()
+        .map(|m| {
+            let path = m.path.trim();
+            if !saved.iter().any(|old| old.id == m.id && old.path == path) {
+                if !std::path::Path::new(path).is_absolute() {
+                    return Err(ApiError::new(
+                        ErrorKind::InvalidValue,
+                        "Give the physics model's full path on the computer running UXDuck",
+                    ));
+                }
+                engine
+                    .system
+                    .sim_inspect_model(path)
+                    .map_err(|error| ApiError::new(ErrorKind::InvalidValue, error))?;
+            }
+            Ok(uxduck_core::domain::settings::PhysicsModel {
+                id: m.id.clone(),
+                name: m.name.trim().to_owned(),
+                path: path.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// Settings › Simulations, and Settings › Airspace's traffic alert

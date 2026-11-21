@@ -43,6 +43,7 @@ pub fn annotations(method: &str) -> Value {
             | "sim/binaries"
             | "sim/catalogue"
             | "sim/inspect"
+            | "sim/inspectModel"
             | "sim/ownBuild"
             | "sim/faults"
             | "practice/list"
@@ -220,6 +221,7 @@ pub fn output_schema(method: &str) -> Option<Value> {
         "sim/catalogue" => schema::<dto::sim::SimCatalogueResult>(),
         "sim/faults" => schema::<dto::sim::SimFaultsResult>(),
         "sim/inspect" => schema::<dto::sim::SimInspectResult>(),
+        "sim/inspectModel" => schema::<dto::sim::SimInspectModelResult>(),
         "sim/ownBuild" => schema::<dto::sim::SimOwnBuildResult>(),
         "sim/frames" => schema::<dto::sim::SimFramesResult>(),
         "sim/snapshot" => schema::<dto::sim::SimSnapshot>(),

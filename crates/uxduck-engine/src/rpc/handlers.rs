@@ -556,6 +556,7 @@ pub(crate) fn handle(
         | ClientRequest::SimBinaries(_)
         | ClientRequest::SimFrames(_)
         | ClientRequest::SimInspect(_)
+        | ClientRequest::SimInspectModel(_)
         | ClientRequest::SimOwnBuild(_)
         | ClientRequest::SimCatalogue(_)
         | ClientRequest::SimDownload(_)

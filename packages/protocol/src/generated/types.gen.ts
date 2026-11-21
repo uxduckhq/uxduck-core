@@ -3980,6 +3980,9 @@ export type ClientRequest = {
     method: 'sim/inspect';
     params: SimInspectParams;
 } | {
+    method: 'sim/inspectModel';
+    params: SimInspectParams;
+} | {
     method: 'sim/ownBuild';
     params: SimOwnBuildParams;
 } | {
@@ -12864,6 +12867,17 @@ export type PayloadProfile = 'stream-only' | 'photo-video' | 'integrated' | 'the
  */
 export type PerformanceTrails = 'off' | 'recent' | 'whole' | 'mixed';
 
+/**
+ * One of a person's own physics models: its name and the path of its JSON
+ * file on the computer running UXDuck. Kept as a path, never copied, until
+ * a simulation starts with it.
+ */
+export type PhysicsModel = {
+    id: string;
+    name: string;
+    path: string;
+};
+
 export type PictureApplied = {
     /**
      * The camera that did not come back.
@@ -15811,6 +15825,13 @@ export type Settings = {
      * All selected network addresses. Empty is off.
      */
     networkAddresses?: Array<string>;
+    /**
+     * Settings › Custom firmware › Physics models: a person's own JSON
+     * physics model files on this computer, each named, in the order they
+     * were added. New simulation offers them. Empty when an older daemon
+     * left it out.
+     */
+    physicsModels?: Array<PhysicsModel>;
     pilotInputMethods?: Array<PilotInputSetting>;
     /**
      * The last run's simulations start again when UXDuck starts; off, as
@@ -15975,6 +15996,10 @@ export type SettingsUpdateParams = {
      * Only from this computer. Cannot be combined with networkAddress.
      */
     networkAddresses?: Array<string> | null;
+    /**
+     * Replaces the whole list when present. However many models.
+     */
+    physicsModels?: Array<PhysicsModel> | null;
     /**
      * Set one vehicle's pilot input method. Requires its controller released.
      */
@@ -16656,6 +16681,18 @@ export type SimFramesResult = {
      */
     frames: Array<string>;
     reading?: boolean;
+};
+
+/**
+ * A physics model file of a person's own, read without starting anything:
+ * a readable JSON object, as ArduPilot's multicopter, plane and VTOL
+ * physics read one.
+ */
+export type SimInspectModelResult = {
+    /**
+     * How many values the model sets, such as `mass` and `diagonal_size`.
+     */
+    values: number;
 };
 
 /**

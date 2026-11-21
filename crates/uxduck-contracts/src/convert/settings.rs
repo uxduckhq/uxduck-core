@@ -213,6 +213,7 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         message_notify_severity: settings.message_notify_severity,
         recreate_simulations: settings.recreate_simulations,
         sim_builds: settings.sim_builds.iter().map(Into::into).collect(),
+        physics_models: settings.physics_models.iter().map(Into::into).collect(),
         traffic_alert_m: settings.traffic_alert_m,
         traffic_alert_up_m: settings.traffic_alert_up_m,
         battery_low_pct: settings.battery_low_pct,
@@ -270,6 +271,16 @@ impl From<&s::SimBuild> for dto::SimBuild {
             id: build.id.clone(),
             name: build.name.clone(),
             path: build.path.clone(),
+        }
+    }
+}
+
+impl From<&s::PhysicsModel> for dto::PhysicsModel {
+    fn from(model: &s::PhysicsModel) -> Self {
+        Self {
+            id: model.id.clone(),
+            name: model.name.clone(),
+            path: model.path.clone(),
         }
     }
 }

@@ -192,6 +192,16 @@ pub struct SimInspectResult {
     pub modified_at_us: Option<u64>,
 }
 
+/// A physics model file of a person's own, read without starting anything:
+/// a readable JSON object, as ArduPilot's multicopter, plane and VTOL
+/// physics read one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimInspectModelResult {
+    /// How many values the model sets, such as `mass` and `diagonal_size`.
+    pub values: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SimFramesResult {

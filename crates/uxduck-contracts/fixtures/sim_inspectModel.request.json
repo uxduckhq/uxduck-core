@@ -1,0 +1,4 @@
+{
+  "method": "sim/inspectModel",
+  "params": { "path": "/Users/ada/models/quad.json" }
+}

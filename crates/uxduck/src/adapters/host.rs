@@ -1043,6 +1043,13 @@ impl System for Host {
         crate::sim::inspect(std::path::Path::new(path))
     }
 
+    fn sim_inspect_model(
+        &self,
+        path: &str,
+    ) -> Result<uxduck_contracts::dto::sim::SimInspectModelResult, String> {
+        crate::sim::inspect_model(path)
+    }
+
     fn sim_own_build(
         &self,
         params: &uxduck_contracts::dto::sim::SimOwnBuildParams,

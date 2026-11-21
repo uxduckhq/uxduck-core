@@ -1409,6 +1409,11 @@ pub enum ClientRequest {
     /// capability. Result: `SimInspectResult`.
     #[serde(rename = "sim/inspect")]
     SimInspect(SimInspectParams),
+    /// Whether a saved physics model file can be read and is a
+    /// JSON object, as a simulation starting with it reads it. Read
+    /// capability. Result: `SimInspectModelResult`.
+    #[serde(rename = "sim/inspectModel")]
+    SimInspectModel(SimInspectParams),
     /// Which ArduPilot program a build of your own is, and what it flies,
     /// read from the firmware name its file holds. Runs nothing. Result:
     /// `SimOwnBuildResult`.
@@ -2423,7 +2428,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 421] = [
+    pub const METHODS: [&'static str; 422] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2845,6 +2850,7 @@ impl ClientRequest {
         "feedback/add",
         "telemetry/calculate",
         "sim/inspect",
+        "sim/inspectModel",
     ];
 }
 

@@ -287,6 +287,10 @@ pub struct Settings {
     /// were added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sim_builds: Vec<SimBuild>,
+    /// Settings › Custom firmware › Physics models: a person's own JSON
+    /// physics model files on this computer, in the order they were added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub physics_models: Vec<PhysicsModel>,
     /// Settings › Airspace (S174, ADR-0034): traffic this near an armed
     /// vehicle across, and this near up or down, raises a warning.
     #[serde(default = "traffic_alert_m")]
@@ -502,6 +506,7 @@ impl Default for Settings {
             pilot_input_methods: BTreeMap::new(),
             recreate_simulations: false,
             sim_builds: Vec::new(),
+            physics_models: Vec::new(),
             traffic_alert_m: traffic_alert_m(),
             traffic_alert_up_m: traffic_alert_up_m(),
             battery_low_pct: battery_low_pct(),
@@ -802,6 +807,16 @@ mod simulator_retention_tests {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SimBuild {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+}
+
+/// One of a person's own physics models: a name and the path of its JSON
+/// file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhysicsModel {
     pub id: String,
     pub name: String,
     pub path: String,

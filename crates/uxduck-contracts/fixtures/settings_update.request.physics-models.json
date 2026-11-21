@@ -1,0 +1,13 @@
+{
+  "method": "settings/update",
+  "params": {
+    "expectedVersion": 3,
+    "physicsModels": [
+      {
+        "id": "model-1",
+        "name": "Heavy quad",
+        "path": "/Users/ada/models/heavy-quad.json"
+      }
+    ]
+  }
+}

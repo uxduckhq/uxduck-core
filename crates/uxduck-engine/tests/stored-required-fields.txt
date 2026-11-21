@@ -464,6 +464,9 @@ SharedCamera.name
 SimBuild.id
 SimBuild.name
 SimBuild.path
+PhysicsModel.id
+PhysicsModel.name
+PhysicsModel.path
 SimFault.kind
 LinkKind::TcpClient.host
 LinkKind::TcpClient.port
