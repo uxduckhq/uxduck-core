@@ -194,7 +194,9 @@ pub struct DaemonLogsParams {
     pub level: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component: Option<String>,
-    /// Literal substring, before redaction; never interpreted as code or regex.
+    /// Literal substring of the text as the daemon keeps it: without the
+    /// endpoints of the links configured when each line was kept, before
+    /// the rest of the redaction. Never interpreted as code or regex.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
 }

@@ -4741,7 +4741,11 @@ mod tests {
     struct OneLog(Vec<u8>);
 
     impl System for OneLog {
-        fn check_udp_bind(&self, _: &str, _: u16) -> Result<(), String> {
+        fn check_udp_bind(
+            &self,
+            _: &str,
+            _: u16,
+        ) -> Result<(), uxduck_core::domain::link_failure::BindRefused> {
             Ok(())
         }
         fn is_local_address(&self, _: &str) -> bool {

@@ -1,6 +1,7 @@
 //! The daemon's last log lines, kept in memory for a feedback report's
 //! bundle (ADR-0016 O11). Logs still go to stderr; this keeps a copy of the
-//! last 500 lines, without colour codes, and scrubs them when a report takes
+//! last 500 lines, without colour codes and without the endpoints of the
+//! links configured as each is kept, and scrubs them when a report takes
 //! them.
 
 use std::collections::VecDeque;
@@ -139,10 +140,21 @@ enum Console {
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+/// The engine's endpoints of the links configured now, which each kept line
+/// leaves out whole, before the scrub can hide only part of one (FB-267).
+static ENDPOINTS: Mutex<Option<uxduck_engine::feedback::ActiveEndpoints>> = Mutex::new(None);
 static LOST: AtomicBool = AtomicBool::new(false);
 fn lines() -> &'static Mutex<VecDeque<DaemonLogEntry>> {
     static LINES: OnceLock<Mutex<VecDeque<DaemonLogEntry>>> = OnceLock::new();
     LINES.get_or_init(|| Mutex::new(VecDeque::with_capacity(KEPT)))
+}
+
+/// Kept lines leave out the endpoints of the links configured as each is
+/// kept, as the engine has them.
+pub fn leave_out(endpoints: uxduck_engine::feedback::ActiveEndpoints) {
+    if let Ok(mut kept) = ENDPOINTS.lock() {
+        *kept = Some(endpoints);
+    }
 }
 
 /// The last lines, oldest first, scrubbed.
@@ -173,6 +185,10 @@ fn keep(text: &str) {
         } else {
             clean.push(c);
         }
+    }
+    let endpoints = ENDPOINTS.lock().ok().and_then(|kept| kept.clone());
+    if let Some(endpoints) = endpoints {
+        clean = uxduck_engine::feedback::without_endpoints(&clean, &[&endpoints.read()]);
     }
     if let Ok(mut kept) = lines().lock() {
         if kept.len() == KEPT {
@@ -280,7 +296,9 @@ impl<'a> MakeWriter<'a> for Tee {
     }
 }
 
-/// Bounded, redacted query of current-process daemon logs.
+/// Bounded, redacted query of current-process daemon logs. `query` matches
+/// the text as it is kept, which already left out the endpoints of the
+/// links configured when each line was kept (FB-267).
 pub fn query(
     params: &DaemonLogsParams,
     now: u64,

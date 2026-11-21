@@ -281,6 +281,52 @@ pub enum Topology {
     Multi,
 }
 
+/// What kind of failure stopped a link, whatever the operating system
+/// (FB-267).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkFailureKind {
+    NoAnswer,
+    Refused,
+    Reset,
+    Aborted,
+    HostUnreachable,
+    NetworkUnreachable,
+    AddressNotAvailable,
+    AddressInUse,
+    NameNotFound,
+    DeviceMissing,
+    DeviceUnavailable,
+    DeviceBusy,
+    AccessDenied,
+    Other,
+}
+
+/// What a link was doing when it failed (FB-267).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkOperation {
+    Connect,
+    Connected,
+    Lookup,
+    Bind,
+    Socket,
+    Datagram,
+    Device,
+}
+
+/// A link's failure as the operating system reported it (FB-267).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkFailure {
+    pub kind: LinkFailureKind,
+    pub operation: LinkOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_code: Option<i32>,
+    /// The system's own message, kept whole.
+    pub message: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum LinkStatus {
@@ -305,9 +351,18 @@ pub struct Link {
     pub policy: LinkPolicy,
     pub topology: Topology,
     pub status: LinkStatus,
-    /// Why it is down or refused, such as the bind error.
+    /// Why it is down or refused, such as the bind error, in plain words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<String>,
+    /// What the operating system said when it failed, which `statusDetail`
+    /// puts in plain words, for Connection diagnostics (FB-267).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_error: Option<LinkFailure>,
+    /// A vehicle link that has stayed down for a while without reaching a
+    /// vehicle in this run of the daemon, so its address may be one the
+    /// vehicle no longer uses (FB-267).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keeps_failing: bool,
     #[schemars(schema_with = "crate::safe::integer")]
     pub created_at_us: u64,
     /// For a forward: the vehicles whose traffic it carries; empty for all.

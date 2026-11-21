@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 
 use uxduck_core::domain::link::{Link, LinkKind, LinkStatus};
+use uxduck_core::domain::link_failure::LinkFailure;
 use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, NotificationState, Severity, Subject,
 };
@@ -19,6 +20,12 @@ use crate::{Engine, NO_CONNECTION};
 
 /// The notice that a power-saving mode is on while a vehicle is connected.
 const POWER_SAVING: &str = "power-saving";
+
+/// How long a vehicle link stays down before its row says it keeps failing
+/// (FB-267). By then a TCP connection has been tried six times
+/// (`TCP_BACKOFF` in uxduck-mavlink waits 1, 2, 5 and then 10 s), so a vehicle
+/// that is still starting up is not taken for an address it no longer uses.
+pub const KEEPS_FAILING_US: u64 = 30_000_000;
 
 /// The condition an older UXDuck gave a real vehicle's ground-testing
 /// notice, before its id.
@@ -62,6 +69,18 @@ pub(crate) fn drop_link(vehicle: &mut Vehicle, link_id: &str) -> bool {
 impl Engine {
     /// A link opened, failed or closed.
     pub fn link_status(&mut self, link_id: &str, status: LinkStatus, detail: Option<String>) {
+        self.link_failed(link_id, status, detail, None);
+    }
+
+    /// A link opened, failed or closed, with what the operating system said
+    /// when it failed (FB-267).
+    pub fn link_failed(
+        &mut self,
+        link_id: &str,
+        status: LinkStatus,
+        detail: Option<String>,
+        error: Option<LinkFailure>,
+    ) {
         let Some(mut link) = self.state.links.get(link_id).cloned() else {
             return;
         };
@@ -70,9 +89,27 @@ impl Engine {
         if link.status.is_off() {
             return;
         }
-        if link.status == status && link.status_detail == detail {
+        let down = matches!(status, LinkStatus::Down | LinkStatus::PortInUse);
+        // Kept through every failed retry, so the row can tell a link that
+        // keeps failing from one that only just went down.
+        let down_since_monotonic_us = if down {
+            link.down_since_monotonic_us
+                .or_else(|| Some(self.clock.monotonic_us()))
+        } else {
+            None
+        };
+        let keeps_failing = down && link.keeps_failing;
+        if link.status == status
+            && link.status_detail == detail
+            && link.status_error == error
+            && link.down_since_monotonic_us == down_since_monotonic_us
+            && link.keeps_failing == keeps_failing
+        {
             return;
         }
+        link.status_error = error;
+        link.down_since_monotonic_us = down_since_monotonic_us;
+        link.keeps_failing = keeps_failing;
         // A simulator that stopped or lost its link is no longer paused,
         // and its camera and gimbal have no faults when it is back.
         if status != LinkStatus::Up {
@@ -90,6 +127,36 @@ impl Engine {
         // A receiver's state is in its Airspace row (S172).
         if receiver {
             self.traffic_sources_changed();
+        }
+    }
+
+    /// Says which vehicle links keep failing (FB-267): down for
+    /// [`KEEPS_FAILING_US`] on the daemon's monotonic clock, so a step of
+    /// the wall clock can't bring it early, and never heard a vehicle in this
+    /// run. Called once a second.
+    pub fn links_keep_failing(&mut self) {
+        let now_us = self.clock.monotonic_us();
+        let due: Vec<Link> = self
+            .state
+            .links
+            .values()
+            .filter(|link| {
+                !link.keeps_failing
+                    && link.carries.is_mavlink()
+                    && !link.kind.is_simulator()
+                    && !link.kind.is_forward()
+                    && !matches!(link.kind, LinkKind::UsbReceiver {})
+                    && !self.heard_links.contains(&link.id)
+                    && link
+                        .down_since_monotonic_us
+                        .is_some_and(|since| now_us.saturating_sub(since) >= KEEPS_FAILING_US)
+            })
+            .cloned()
+            .collect();
+        for mut link in due {
+            link.keeps_failing = true;
+            link.version += 1;
+            self.commit_as(data_plane(), Change::LinkUpserted { link });
         }
     }
 
@@ -230,6 +297,9 @@ impl Engine {
     pub fn vehicle_observed(&mut self, seen: Observation) {
         if self.closed_before(&seen.link_id) {
             return;
+        }
+        if seen.presence != Presence::Offline {
+            self.heard_links.insert(seen.link_id.clone());
         }
         // A record that already knows this id as an earlier one (after a
         // restart, the session hears the vehicle under its provisional id

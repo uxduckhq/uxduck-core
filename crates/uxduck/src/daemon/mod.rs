@@ -545,6 +545,7 @@ fn start_engine(
         },
         loaded,
     );
+    crate::logs::leave_out(engine.link_endpoints());
     let engine = EngineHandle::spawn(engine);
     tokio::spawn(crate::replay::work(replay_works, engine.clone()));
     tokio::spawn(crate::pictures::work(pictures, engine.clone()));
@@ -705,6 +706,30 @@ async fn start_analytics(engine: &EngineHandle, options: &DaemonOptions, fresh: 
         .await;
 }
 
+/// Where a link opens, written as its status names it, so a feedback report
+/// can leave it out of the log (FB-267).
+fn opens_at(kind: &uxduck_contracts::dto::link::LinkKind) -> String {
+    use uxduck_contracts::dto::link::LinkKind as K;
+    match kind {
+        K::UdpListen { host, port }
+        | K::UdpForward { host, port }
+        | K::TcpServer { host, port }
+        | K::TcpClient { host, port }
+        | K::UdpClient { host, port }
+            if host.contains(':') =>
+        {
+            format!("[{host}]:{port}")
+        }
+        K::UdpListen { host, port }
+        | K::UdpForward { host, port }
+        | K::TcpServer { host, port }
+        | K::TcpClient { host, port }
+        | K::UdpClient { host, port } => format!("{host}:{port}"),
+        K::Serial { device, .. } => device.clone(),
+        _ => String::new(),
+    }
+}
+
 /// Makes sure the command line's links exist, applies the shutdown policy,
 /// and waits for Ctrl-C, SIGTERM, the last window to close, or a restart.
 async fn run_until_stopped(
@@ -714,10 +739,11 @@ async fn run_until_stopped(
 ) -> Stop {
     for params in options.links.clone() {
         let kind = format!("{:?}", params.kind);
+        let at = opens_at(&params.kind);
         match engine.run(move |e| e.ensure_link(params)).await {
-            Ok(Ok(id)) => tracing::info!(link = %id, %kind, "link ready"),
+            Ok(Ok(id)) => tracing::info!(link = %id, %at, "link ready"),
             Ok(Err(error)) => {
-                tracing::error!(%kind, error = %error.message, "link refused");
+                tracing::error!(%at, error = %error.message, "link refused");
                 eprintln!("uxduck: {kind}: {}", error.message);
             }
             Err(_) => {}
@@ -844,6 +870,8 @@ async fn expire_approvals(engine: EngineHandle) {
                 e.expire_approvals(now);
                 // Watch links still to end after an unreachable account (UXD-44).
                 e.watch_links_end_tick();
+                // Vehicle links that keep failing say so (FB-267).
+                e.links_keep_failing();
                 // Motors whose press stopped coming (S188).
                 e.expire_spins(now);
                 // Firmware installs waiting for the vehicle (S189).

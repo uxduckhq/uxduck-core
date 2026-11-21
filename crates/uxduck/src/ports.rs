@@ -4,6 +4,8 @@
 
 use std::net::{IpAddr, UdpSocket};
 
+use uxduck_core::domain::link_failure::{BindRefused, LinkFailure, LinkOperation, endpoint};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Protocol {
     Udp,
@@ -39,30 +41,60 @@ impl std::fmt::Display for Owner {
 /// program" when the owner cannot be read.
 #[must_use]
 pub fn in_use_message(protocol: Protocol, port: u16) -> String {
-    match owner(protocol, port) {
-        Some(owner) => format!("{protocol} port {port} is in use by {owner}"),
-        None => format!("{protocol} port {port} is in use by another program"),
+    format!(
+        "{protocol} port {port} is in use by {}",
+        holder(protocol, port)
+    )
+}
+
+/// Who holds a port, in words: "`MissionPlanner` (pid 812)", or "another
+/// program" when the owner cannot be read.
+fn holder(protocol: Protocol, port: u16) -> String {
+    owner(protocol, port).map_or_else(|| "another program".to_owned(), |owner| owner.to_string())
+}
+
+/// Why a listener can't bind at `host`:`port`, naming the endpoint once so a
+/// report that leaves it out leaves out its port too: who holds the port, that
+/// the address is another device's (a saved link whose address went away,
+/// such as a VPN's), or plain words for what the system said, which stays
+/// in the failure for diagnostics (FB-267).
+#[must_use]
+pub fn bind_refused(
+    protocol: Protocol,
+    host: &str,
+    port: u16,
+    error: &std::io::Error,
+) -> BindRefused {
+    let failure = LinkFailure::from_io(LinkOperation::Bind, error);
+    let words = match error.kind() {
+        std::io::ErrorKind::AddrInUse => format!(
+            "{protocol} {} is in use by {}, so UXDuck can't listen there.",
+            endpoint(host, port),
+            holder(protocol, port)
+        ),
+        std::io::ErrorKind::AddrNotAvailable => {
+            uxduck_engine::runtime::not_local_message(host, port)
+        }
+        _ => failure.words(host, port),
+    };
+    BindRefused {
+        words,
+        failure: Some(failure),
     }
 }
 
 /// Whether a UDP listener could bind here now, without address reuse.
 ///
 /// # Errors
-/// A message for people: who holds the port, or why the address is unusable.
-pub fn check_udp_bind(host: &str, port: u16) -> Result<(), String> {
-    let ip: IpAddr = host
-        .parse()
-        .map_err(|_| format!("{host} is not an IP address"))?;
-    match UdpSocket::bind((ip, port)) {
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            Err(in_use_message(Protocol::Udp, port))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {
-            Err(uxduck_engine::runtime::not_local_message(host))
-        }
-        Err(error) => Err(format!("cannot listen on {host}:{port}: {error}")),
-    }
+/// Why not, as [`bind_refused`] says, or that the host is not an IP address.
+pub fn check_udp_bind(host: &str, port: u16) -> Result<(), BindRefused> {
+    let ip: IpAddr = host.parse().map_err(|_| BindRefused {
+        words: format!("{host} is not an IP address"),
+        failure: None,
+    })?;
+    UdpSocket::bind((ip, port))
+        .map(drop)
+        .map_err(|error| bind_refused(Protocol::Udp, host, port, &error))
 }
 
 /// Whether nothing listens on this TCP port on any address, as SITL's
@@ -357,11 +389,18 @@ mod tests {
         assert!(check_udp_bind("127.0.0.1", 0).is_ok());
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = socket.local_addr().unwrap().port();
-        let message = check_udp_bind("127.0.0.1", port).unwrap_err();
+        let refused = check_udp_bind("127.0.0.1", port).unwrap_err();
+        assert!(refused.in_use(), "{refused:?}");
+        let message = refused.words;
         assert!(
-            message.starts_with(&format!("UDP port {port} is in use by")),
+            message.starts_with(&format!("UDP 127.0.0.1:{port} is in use by")),
             "{message}"
         );
+        assert!(
+            message.ends_with(", so UXDuck can't listen there."),
+            "{message}"
+        );
+        assert_eq!(message.matches(&port.to_string()).count(), 1, "{message}");
         if cfg!(any(target_os = "linux", target_os = "macos")) {
             let found = owner(Protocol::Udp, port).expect("an owner");
             assert_eq!(found.pid, std::process::id());
@@ -399,12 +438,53 @@ mod tests {
 
     #[test]
     fn listening_on_another_devices_address_says_whose_it_is() {
-        let message = check_udp_bind("192.0.2.1", 15010).unwrap_err();
+        let refused = check_udp_bind("192.0.2.1", 15010).unwrap_err();
+        assert!(
+            !refused.in_use(),
+            "another device's address is not a taken port"
+        );
+        let message = refused.words;
         assert!(
             message.starts_with("192.0.2.1 is not an address of this computer"),
             "{message}"
         );
+        assert!(
+            message.contains("can't listen on 192.0.2.1:15010."),
+            "{message}"
+        );
         assert!(message.contains("listen on 0.0.0.0"), "{message}");
+    }
+
+    /// FB-267: a listener the system refused for another reason says so in
+    /// plain words naming its host and port, and keeps what the system
+    /// said for diagnostics.
+    #[test]
+    fn a_refused_listener_names_its_address_and_keeps_the_system_words() {
+        let denied = bind_refused(
+            Protocol::Udp,
+            "0.0.0.0",
+            80,
+            &std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+        assert!(!denied.in_use());
+        assert!(
+            denied
+                .words
+                .starts_with("This computer didn't let UXDuck listen on 0.0.0.0:80."),
+            "{}",
+            denied.words
+        );
+        let odd = bind_refused(
+            Protocol::Udp,
+            "0.0.0.0",
+            14550,
+            &std::io::Error::other("something the system said"),
+        );
+        assert_eq!(odd.words, "UXDuck couldn't listen on 0.0.0.0:14550.");
+        assert_eq!(
+            odd.failure.map(|failure| failure.message).as_deref(),
+            Some("something the system said")
+        );
     }
 }
 

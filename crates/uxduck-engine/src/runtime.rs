@@ -5,9 +5,10 @@
 /// Why a listener cannot use an address that belongs to another device, such
 /// as the vehicle's own, and what to do instead.
 #[must_use]
-pub fn not_local_message(host: &str) -> String {
+pub fn not_local_message(host: &str, port: u16) -> String {
+    let at = uxduck_core::domain::link_failure::endpoint(host, port);
     format!(
-        "{host} is not an address of this computer, so UXDuck can't listen on it. \
+        "{host} is not an address of this computer, so UXDuck can't listen on {at}. \
          To connect to a device at {host}, use a client link. To hear it, listen on 0.0.0.0"
     )
 }
@@ -16,6 +17,14 @@ pub fn not_local_message(host: &str) -> String {
 pub trait Clock: Send {
     /// Microseconds since the Unix epoch.
     fn now_us(&self) -> u64;
+
+    /// Microseconds on a clock that never steps, for how long something has
+    /// lasted: the wall clock can be set back or forward (FB-267). Only
+    /// differences between two readings mean anything. A clock that never
+    /// steps, as a test's, can leave it to `now_us`.
+    fn monotonic_us(&self) -> u64 {
+        self.now_us()
+    }
 }
 
 /// Unpredictable values for tokens and pairing codes.
@@ -1021,13 +1030,17 @@ pub trait System: Send {
             "Daemon log queries require UXDuck installed on a computer.",
         ))
     }
-    /// Whether a UDP listener could bind here now. `Err` names the owner
-    /// when the platform says, such as "UDP port 14550 is in use by
-    /// `MissionPlanner` (pid 812)".
+    /// Whether a UDP listener could bind here now. `Err` says why in the
+    /// words a link opening there would, naming the owner when the platform
+    /// says, such as "UDP port 14550 is in use by `MissionPlanner` (pid 812)".
     ///
     /// # Errors
     /// When the port is taken or the address is not usable.
-    fn check_udp_bind(&self, host: &str, port: u16) -> Result<(), String>;
+    fn check_udp_bind(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<(), uxduck_core::domain::link_failure::BindRefused>;
     /// Opens UXDuck at login, or stops it, where the system lists such
     /// things (S108, ADR-0025 D5), and says what the system has now.
     ///
@@ -1339,7 +1352,11 @@ pub struct NoSystem {
 }
 
 impl System for NoSystem {
-    fn check_udp_bind(&self, _: &str, _: u16) -> Result<(), String> {
+    fn check_udp_bind(
+        &self,
+        _: &str,
+        _: u16,
+    ) -> Result<(), uxduck_core::domain::link_failure::BindRefused> {
         Ok(())
     }
     fn is_local_address(&self, host: &str) -> bool {

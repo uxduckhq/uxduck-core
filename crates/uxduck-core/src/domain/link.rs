@@ -334,6 +334,19 @@ pub struct Link {
     /// Why it is down or refused, such as the bind error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<String>,
+    /// What the operating system said when it failed, which
+    /// `status_detail` puts in plain words (FB-267).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_error: Option<crate::domain::link_failure::LinkFailure>,
+    /// Since when it has been down without coming up, on the engine's
+    /// monotonic clock, in this run of the daemon only (FB-267).
+    #[serde(skip)]
+    pub down_since_monotonic_us: Option<u64>,
+    /// A vehicle link that has stayed down for a while without reaching a
+    /// vehicle in this run of the daemon, so its address may be one the
+    /// vehicle no longer uses (FB-267).
+    #[serde(skip)]
+    pub keeps_failing: bool,
     /// For a forward: the VIDs whose traffic it carries; empty for all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vehicle_filter: Vec<String>,

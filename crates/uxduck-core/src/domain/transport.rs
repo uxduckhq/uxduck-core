@@ -43,6 +43,9 @@ pub struct TransportError {
     pub endpoint: Option<String>,
     pub message: String,
     pub active: bool,
+    /// What kind of failure it was, whatever the platform (FB-267).
+    #[serde(default)]
+    pub failure: crate::domain::link_failure::LinkFailureKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

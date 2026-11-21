@@ -18,6 +18,8 @@ use uxduck_contracts::dto::inspect::InspectDirection;
 use uxduck_core::domain::link::{
     Link, LinkCarries, LinkKind, LinkPolicy, LinkStatus, SimFaultKind,
 };
+use uxduck_core::domain::link_failure::{LinkFailure, LinkOperation};
+use uxduck_core::domain::transport::TransportError;
 use uxduck_engine::plane as glue;
 use uxduck_engine::runtime::{Clock, ControlRoute, LinkPort, TransferOrder};
 use uxduck_mavlink::framing::{Reassembler, header, split};
@@ -29,7 +31,7 @@ use uxduck_mavlink::session::{Config, Effect, Session};
 use super::controllers::{Controls, InputEvent, Report};
 use super::engine_task::EngineHandle;
 use crate::adapters::system::SystemClock;
-use crate::ports::{Protocol, in_use_message};
+use crate::ports::{Protocol, bind_refused};
 
 enum Command {
     Open(Link),
@@ -64,7 +66,7 @@ enum Command {
     /// link's latest open.
     Resolved {
         link: Link,
-        address: Result<SocketAddr, String>,
+        address: Result<SocketAddr, LinkFailure>,
         lookup: Arc<()>,
     },
 }
@@ -850,22 +852,22 @@ impl Plane {
                 if !receiver.has_changed().unwrap_or(false) {
                     return None;
                 }
-                Some((id.clone(), receiver.borrow_and_update().clone()))
+                Some((
+                    id.clone(),
+                    open.kind.clone(),
+                    receiver.borrow_and_update().clone(),
+                ))
             })
             .collect();
-        for (id, report) in reports {
-            let detail = report
+        for (id, kind, report) in reports {
+            let (detail, error) = report
                 .send_error
                 .as_ref()
                 .filter(|e| e.active)
                 .or_else(|| report.receive_error.as_ref().filter(|e| e.active))
                 .or_else(|| report.recovery_error.as_ref().filter(|e| e.active))
-                .map(|e| {
-                    format!(
-                        "{}: {} ({}, OS {:?})",
-                        e.operation, e.message, e.kind, e.os_code
-                    )
-                });
+                .map(|e| transport_failure(e, host(&kind)))
+                .unzip();
             let status = if report.socket_open {
                 LinkStatus::Up
             } else {
@@ -896,7 +898,7 @@ impl Plane {
                 self.apply(effects).await;
             }
             crate::diagnostics::transport(&id, report);
-            self.report(&id, status, detail).await;
+            self.report_failure(&id, status, detail, error).await;
         }
     }
 
@@ -1118,8 +1120,12 @@ impl Plane {
         let commands = self.commands.clone();
         tokio::spawn(async move {
             let address = match tokio::net::lookup_host((host.as_str(), port)).await {
-                Ok(mut found) => found.next().ok_or_else(|| format!("cannot resolve {host}")),
-                Err(e) => Err(format!("cannot resolve {host}: {e}")),
+                Ok(mut found) => found.next().ok_or_else(|| {
+                    LinkFailure::name_not_found(&std::io::Error::other(format!(
+                        "no addresses found for {host}"
+                    )))
+                }),
+                Err(error) => Err(LinkFailure::name_not_found(&error)),
             };
             let _ = commands.send(Command::Resolved {
                 link,
@@ -1134,7 +1140,7 @@ impl Plane {
     async fn resolved(
         &mut self,
         link: Link,
-        address: Result<SocketAddr, String>,
+        address: Result<SocketAddr, LinkFailure>,
         lookup: &Arc<()>,
         incoming: &mpsc::Sender<Incoming>,
     ) {
@@ -1148,7 +1154,12 @@ impl Plane {
         self.resolving.remove(&link.id);
         match address {
             Ok(address) => self.open_at(link, Some(address), incoming).await,
-            Err(detail) => self.report(&link.id, LinkStatus::Down, Some(detail)).await,
+            Err(failure) => {
+                let (host, port) = host(&link.kind).unwrap_or_default();
+                let detail = failure.words(host, port);
+                self.report_failure(&link.id, LinkStatus::Down, Some(detail), Some(failure))
+                    .await;
+            }
         }
     }
 
@@ -1230,10 +1241,10 @@ impl Plane {
                             greet(handle.sender(), self.gcs.clone());
                             Ok(handle)
                         }
-                        Err(error) => Err((LinkStatus::Down, error.to_string())),
+                        Err(error) => Err(failed(LinkOperation::Socket, &error, "127.0.0.1", port)),
                     }
                 }
-                Err(detail) => Err((LinkStatus::Down, detail)),
+                Err(detail) => Err((LinkStatus::Down, detail, None)),
             }
         } else if let LinkKind::UdpClient { host, port } = &link.kind {
             Ok(links::udp_client_host(
@@ -1282,9 +1293,10 @@ impl Plane {
                 );
                 crate::tlog_index::open(&link.id, &tlog_path);
             }
-            Err((status, detail)) => {
+            Err((status, detail, error)) => {
                 relay.abort();
-                self.report(&link.id, status, Some(detail)).await;
+                self.report_failure(&link.id, status, Some(detail), error)
+                    .await;
             }
         }
     }
@@ -1322,7 +1334,7 @@ impl Plane {
         link: &Link,
         events: links::Events,
     ) -> (
-        Result<LinkHandle, (LinkStatus, String)>,
+        Result<LinkHandle, Failed>,
         Option<crate::receiver_stick::Decoder>,
     ) {
         let log = self.tlog_dir.join(format!("{}-decoder.log", link.id));
@@ -1331,7 +1343,7 @@ impl Plane {
                 let handle = links::tcp_client("127.0.0.1".into(), decoder.port, events);
                 (Ok(handle), Some(decoder))
             }
-            Err(detail) => (Err((LinkStatus::Down, detail)), None),
+            Err(detail) => (Err((LinkStatus::Down, detail, None)), None),
         }
     }
 
@@ -1498,10 +1510,21 @@ impl Plane {
     }
 
     async fn report(&self, link_id: &str, status: LinkStatus, detail: Option<String>) {
+        self.report_failure(link_id, status, detail, None).await;
+    }
+
+    /// A link's status, with what the operating system said when it failed.
+    async fn report_failure(
+        &self,
+        link_id: &str,
+        status: LinkStatus,
+        detail: Option<String>,
+        error: Option<LinkFailure>,
+    ) {
         let link_id = link_id.to_owned();
         let _ = self
             .engine
-            .run(move |e| e.link_status(&link_id, status, detail))
+            .run(move |e| e.link_failed(&link_id, status, detail, error))
             .await;
     }
 
@@ -1521,10 +1544,11 @@ impl Plane {
                 self.announce_payload(link_id);
                 self.report(link_id, LinkStatus::Up, None).await;
             }
-            LinkEvent::Down(reason) => {
+            LinkEvent::Down { detail, error } => {
                 let effects = self.session.transport_lost(link_id, SystemClock.now_us());
                 self.apply(effects).await;
-                self.report(link_id, LinkStatus::Down, Some(reason)).await;
+                self.report_failure(link_id, LinkStatus::Down, Some(detail), error)
+                    .await;
             }
             LinkEvent::Left { peer } => {
                 if let Some(open) = self.open.get_mut(link_id) {
@@ -2218,6 +2242,39 @@ fn role(link: &Link) -> Role {
     }
 }
 
+/// A UDP socket's active error, in plain words for what it was doing, and
+/// as the operating system said it (FB-267). A lookup or bind reads at the
+/// link's configured host and port. A datagram reads at the peer it went
+/// to when the socket names one.
+fn transport_failure(
+    error: &TransportError,
+    configured: Option<(&str, u16)>,
+) -> (String, LinkFailure) {
+    let operation = match error.operation.as_str() {
+        "resolve" => LinkOperation::Lookup,
+        "bind" | "resolve-or-bind" => LinkOperation::Bind,
+        "open" => LinkOperation::Socket,
+        _ => LinkOperation::Datagram,
+    };
+    let failure = LinkFailure {
+        kind: error.failure,
+        operation,
+        os_code: error.os_code,
+        message: error.message.clone(),
+    };
+    let peer = error
+        .endpoint
+        .as_deref()
+        .and_then(|at| at.parse::<SocketAddr>().ok())
+        .filter(|_| operation == LinkOperation::Datagram);
+    let detail = match (peer, configured) {
+        (Some(peer), _) => failure.words(&peer.ip().to_string(), peer.port()),
+        (None, Some((host, port))) => failure.words(host, port),
+        (None, None) => failure.message.clone(),
+    };
+    (detail, failure)
+}
+
 /// The host a link kind opens at, for kinds that need its address before
 /// they start; a TCP client looks its host up itself on every connect.
 fn host(kind: &LinkKind) -> Option<(&str, u16)> {
@@ -2230,22 +2287,26 @@ fn host(kind: &LinkKind) -> Option<(&str, u16)> {
     }
 }
 
-/// Why a listener could not start: who holds the port, or that the address
-/// is another device's (a saved link whose address went away, such as a VPN's).
-fn listen_error(
-    protocol: Protocol,
-    host: &str,
-    port: u16,
-    error: &std::io::Error,
-) -> (LinkStatus, String) {
-    match error.kind() {
-        std::io::ErrorKind::AddrInUse => (LinkStatus::PortInUse, in_use_message(protocol, port)),
-        std::io::ErrorKind::AddrNotAvailable => (
-            LinkStatus::Down,
-            uxduck_engine::runtime::not_local_message(host),
-        ),
-        _ => (LinkStatus::Down, error.to_string()),
-    }
+/// Why a listener could not start, as the check before a link is saved
+/// says it (FB-267).
+fn listen_error(protocol: Protocol, host: &str, port: u16, error: &std::io::Error) -> Failed {
+    let refused = bind_refused(protocol, host, port, error);
+    let status = if refused.in_use() {
+        LinkStatus::PortInUse
+    } else {
+        LinkStatus::Down
+    };
+    (status, refused.words, refused.failure)
+}
+
+/// Why a link failed: its status, the plain words and what the operating
+/// system said (FB-267).
+type Failed = (LinkStatus, String, Option<LinkFailure>);
+
+/// A link that failed opening at `host`:`port`.
+fn failed(operation: LinkOperation, error: &std::io::Error, host: &str, port: u16) -> Failed {
+    let failure = LinkFailure::from_io(operation, error);
+    (LinkStatus::Down, failure.words(host, port), Some(failure))
 }
 
 /// Starts the transport for a link kind; a UDP client's hello comes from
@@ -2255,9 +2316,10 @@ async fn spawn(
     address: Option<SocketAddr>,
     gcs: Arc<AtomicU8>,
     events: links::Events,
-) -> Result<LinkHandle, (LinkStatus, String)> {
-    let resolve =
-        |host: &str| address.ok_or_else(|| (LinkStatus::Down, format!("cannot resolve {host}")));
+) -> Result<LinkHandle, Failed> {
+    let resolve = |host: &str| {
+        address.ok_or_else(|| (LinkStatus::Down, format!("cannot resolve {host}"), None))
+    };
     match kind.clone() {
         LinkKind::UdpListen { host, port } => {
             let address = resolve(&host)?;
@@ -2265,17 +2327,18 @@ async fn spawn(
                 .await
                 .map_err(|error| listen_error(Protocol::Udp, &host, port, &error))
         }
-        LinkKind::UdpForward { host, .. } => {
+        LinkKind::UdpForward { host, port } => {
             let address = resolve(&host)?;
             links::udp_target(address, events)
                 .await
-                .map_err(|e| (LinkStatus::Down, e.to_string()))
+                .map_err(|error| failed(LinkOperation::Socket, &error, &host, port))
         }
         LinkKind::TcpClient { host, port } => Ok(links::tcp_client(host, port, events)),
         // Opened with its decoder, in `open`.
         LinkKind::UsbReceiver {} => Err((
             LinkStatus::Down,
             "a USB receiver stick opens with its decoder".into(),
+            None,
         )),
         LinkKind::TcpServer { host, port } => {
             let address = resolve(&host)?;
@@ -2283,17 +2346,18 @@ async fn spawn(
                 .await
                 .map_err(|error| listen_error(Protocol::Tcp, &host, port, &error))
         }
-        LinkKind::UdpClient { host, .. } => {
+        LinkKind::UdpClient { host, port } => {
             let address = resolve(&host)?;
             links::udp_client(address, gcs, events)
                 .await
-                .map_err(|e| (LinkStatus::Down, e.to_string()))
+                .map_err(|error| failed(LinkOperation::Socket, &error, &host, port))
         }
         LinkKind::Serial { device, baud, usb } => Ok(links::serial(device, baud, usb, events)),
         // Started by the simulation manager in `Plane::open`.
         LinkKind::Simulator { .. } => Err((
             LinkStatus::Down,
             "a simulated vehicle starts through the simulation manager".to_owned(),
+            None,
         )),
     }
 }
@@ -2305,6 +2369,58 @@ mod tests {
     use uxduck_core::domain::link::Link;
     use uxduck_core::domain::telemetry::RoundTripMissing;
     use uxduck_mavlink::session::Config;
+
+    /// FB-267: a UDP link whose host name can't be looked up reads at the
+    /// host and port it was configured with, and keeps the system's words.
+    #[test]
+    fn a_udp_lookup_failure_names_the_configured_host() {
+        use uxduck_core::domain::link_failure::{LinkFailureKind, LinkOperation};
+        use uxduck_core::domain::transport::TransportError;
+        let error = TransportError {
+            at_us: 1,
+            operation: "resolve".into(),
+            kind: "Uncategorized".into(),
+            os_code: None,
+            endpoint: Some("review-test.invalid:14550".into()),
+            message: "failed to lookup address information: Name or service not known".into(),
+            active: true,
+            failure: LinkFailureKind::NameNotFound,
+        };
+        let (detail, failure) =
+            super::transport_failure(&error, Some(("review-test.invalid", 14550)));
+        assert_eq!(
+            detail,
+            "UXDuck couldn't find review-test.invalid (port 14550). Check the name, or use its IP address."
+        );
+        assert_eq!(failure.operation, LinkOperation::Lookup);
+        assert!(failure.message.contains("Name or service not known"));
+    }
+
+    /// FB-267: a UDP client whose own socket can't open reads plainly at
+    /// its configured endpoint, not as the system's sentence.
+    #[test]
+    fn a_udp_socket_this_computer_refused_reads_plainly() {
+        use uxduck_core::domain::link_failure::{LinkFailureKind, LinkOperation};
+        use uxduck_core::domain::transport::TransportError;
+        let error = TransportError {
+            at_us: 1,
+            operation: "open".into(),
+            kind: "PermissionDenied".into(),
+            os_code: Some(13),
+            endpoint: Some("review-test.invalid:14550".into()),
+            message: "Permission denied (os error 13)".into(),
+            active: true,
+            failure: LinkFailureKind::AccessDenied,
+        };
+        let (detail, failure) =
+            super::transport_failure(&error, Some(("review-test.invalid", 14550)));
+        assert_eq!(
+            detail,
+            "This computer didn't let UXDuck open a connection to review-test.invalid:14550. Check that a firewall or security software isn't blocking it."
+        );
+        assert_eq!(failure.operation, LinkOperation::Socket);
+        assert_eq!(failure.message, "Permission denied (os error 13)");
+    }
 
     fn plane(dir: &std::path::Path) -> (Plane, mpsc::UnboundedReceiver<Command>) {
         use crate::adapters::system::{OsRandom, SystemClock};

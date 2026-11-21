@@ -462,6 +462,13 @@ impl Clock for SharedClock {
             .unwrap_or_else(PoisonError::into_inner)
             .now_us()
     }
+
+    fn monotonic_us(&self) -> u64 {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .monotonic_us()
+    }
 }
 
 /// The browser as a host: nothing to report, as [`NoSystem`], except the
@@ -486,7 +493,11 @@ struct Host {
 const ATTACHED_MAX: usize = 512 * 1024 * 1024;
 
 impl System for Host {
-    fn check_udp_bind(&self, host: &str, port: u16) -> Result<(), String> {
+    fn check_udp_bind(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<(), uxduck_core::domain::link_failure::BindRefused> {
         self.none.check_udp_bind(host, port)
     }
     fn is_local_address(&self, host: &str) -> bool {

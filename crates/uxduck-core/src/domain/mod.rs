@@ -22,6 +22,7 @@ pub mod gripper;
 pub mod ground_station;
 pub mod history;
 pub mod link;
+pub mod link_failure;
 pub mod marker;
 pub mod mission;
 pub mod modes;

@@ -22,13 +22,18 @@ use tokio::sync::{mpsc, watch};
 mod udp;
 pub use udp::{NetworkChanges, RegistrationGate, udp_client_host};
 use uxduck_core::domain::link::UsbId;
+use uxduck_core::domain::link_failure::{LinkFailure, LinkFailureKind, LinkOperation};
 
 /// What a link reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkEvent {
     Up,
-    /// Why: the error, or "unplugged".
-    Down(String),
+    /// Why, in plain words, and what the operating system said, when it
+    /// said something (FB-267).
+    Down {
+        detail: String,
+        error: Option<LinkFailure>,
+    },
     /// Bytes from a peer: one datagram, or a piece of a stream.
     Received {
         peer: String,
@@ -228,7 +233,7 @@ pub fn tcp_client(host: String, port: u16, events: Events) -> LinkHandle {
     let task = tokio::spawn(async move {
         let mut attempt = 0usize;
         loop {
-            match TcpStream::connect((host.as_str(), port)).await {
+            match connect(&host, port).await {
                 Ok(stream) => {
                     attempt = 0;
                     let _ = stream.set_nodelay(true);
@@ -237,17 +242,30 @@ pub fn tcp_client(host: String, port: u16, events: Events) -> LinkHandle {
                         let _ = events.send(LinkEvent::Up).await;
                         read_tcp(reader, &peer, &events).await
                     };
-                    let reason = tokio::select! {
-                        reason = receiving => reason,
-                        reason = write_tcp(writer, &mut outgoing) => match reason {
-                            Some(reason) => reason,
+                    let failed = tokio::select! {
+                        failed = receiving => failed,
+                        failed = write_tcp(writer, &mut outgoing) => match failed {
+                            Some(failed) => Err(failed),
                             None => return,
                         },
                     };
-                    let _ = events.send(LinkEvent::Down(reason)).await;
+                    let event = match failed {
+                        Ok(detail) => LinkEvent::Down {
+                            detail,
+                            error: None,
+                        },
+                        Err(error) => down(&error, &host, port),
+                    };
+                    let _ = events.send(event).await;
                 }
-                Err(error) => {
-                    let _ = events.send(LinkEvent::Down(error.to_string())).await;
+                Err(failure) => {
+                    let detail = failure.words(&host, port);
+                    let _ = events
+                        .send(LinkEvent::Down {
+                            detail,
+                            error: Some(failure),
+                        })
+                        .await;
                 }
             }
             let wait = TCP_BACKOFF[attempt.min(TCP_BACKOFF.len() - 1)];
@@ -272,13 +290,46 @@ pub fn tcp_client(host: String, port: u16, events: Events) -> LinkHandle {
     }
 }
 
+/// Looks the host up, then connects to the first of its addresses that
+/// answers. A failed lookup is a name not found, whatever the system's
+/// words for it.
+async fn connect(host: &str, port: u16) -> Result<TcpStream, LinkFailure> {
+    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| LinkFailure::name_not_found(&error))?
+        .collect();
+    if addresses.is_empty() {
+        return Err(LinkFailure::name_not_found(&std::io::Error::other(
+            format!("no addresses found for {host}"),
+        )));
+    }
+    TcpStream::connect(addresses.as_slice())
+        .await
+        .map_err(|error| LinkFailure::from_io(LinkOperation::Connect, &error))
+}
+
+/// A connection that failed once open, in plain words with the system's
+/// own kept.
+fn down(error: &std::io::Error, host: &str, port: u16) -> LinkEvent {
+    let failure = LinkFailure::from_io(LinkOperation::Connected, error);
+    LinkEvent::Down {
+        detail: failure.words(host, port),
+        error: Some(failure),
+    }
+}
+
 /// Only this future waits for incoming event capacity; the writer runs
-/// alongside it even while telemetry is backpressured.
-async fn read_tcp(mut reader: OwnedReadHalf, peer: &str, events: &Events) -> String {
+/// alongside it even while telemetry is backpressured. Why it stopped:
+/// the server closing it, or the error.
+async fn read_tcp(
+    mut reader: OwnedReadHalf,
+    peer: &str,
+    events: &Events,
+) -> Result<String, std::io::Error> {
     let mut buffer = vec![0u8; BUFFER];
     loop {
         match reader.read(&mut buffer).await {
-            Ok(0) => return "the server closed the connection".into(),
+            Ok(0) => return Ok("the server closed the connection".into()),
             Ok(len) => {
                 if events
                     .send(LinkEvent::Received {
@@ -288,10 +339,10 @@ async fn read_tcp(mut reader: OwnedReadHalf, peer: &str, events: &Events) -> Str
                     .await
                     .is_err()
                 {
-                    return "the event receiver closed".into();
+                    return Ok("the event receiver closed".into());
                 }
             }
-            Err(error) => return error.to_string(),
+            Err(error) => return Err(error),
         }
     }
 }
@@ -299,10 +350,10 @@ async fn read_tcp(mut reader: OwnedReadHalf, peer: &str, events: &Events) -> Str
 async fn write_tcp(
     mut writer: OwnedWriteHalf,
     outgoing: &mut mpsc::UnboundedReceiver<Outgoing>,
-) -> Option<String> {
+) -> Option<std::io::Error> {
     while let Some(Outgoing { bytes, .. }) = outgoing.recv().await {
         if let Err(error) = writer.write_all(&bytes).await {
-            return Some(error.to_string());
+            return Some(error);
         }
     }
     None
@@ -463,9 +514,50 @@ fn open_serial(path: &str, baud: u32) -> serialport::Result<Box<dyn serialport::
     }
 }
 
-fn report_down(events: &Events, last: &mut Option<String>, reason: String, stopped: &AtomicBool) {
+/// A serial device that could not open, by the kind its library told. The
+/// library drops the system's code behind `NoDevice`: on Windows that is
+/// a port that isn't there as well as one another program holds or this
+/// account may not open, so the words cover all three (FB-267). Elsewhere
+/// it is a port another program holds.
+fn open_failure(error: &serialport::Error) -> LinkFailure {
+    let kind = match error.kind {
+        serialport::ErrorKind::NoDevice if cfg!(windows) => LinkFailureKind::DeviceUnavailable,
+        serialport::ErrorKind::NoDevice => LinkFailureKind::DeviceBusy,
+        serialport::ErrorKind::Io(kind) => return device_failure(kind, None, &error.description),
+        _ => LinkFailureKind::Other,
+    };
+    LinkFailure::device(kind, error.description.clone())
+}
+
+/// A serial device that failed with a system error.
+fn device_failure(kind: std::io::ErrorKind, os_code: Option<i32>, message: &str) -> LinkFailure {
+    let kind = match kind {
+        std::io::ErrorKind::NotFound => LinkFailureKind::DeviceMissing,
+        std::io::ErrorKind::PermissionDenied => LinkFailureKind::AccessDenied,
+        _ => LinkFailureKind::Other,
+    };
+    LinkFailure {
+        os_code,
+        ..LinkFailure::device(kind, message.to_owned())
+    }
+}
+
+fn io_failure(error: &std::io::Error) -> LinkFailure {
+    device_failure(error.kind(), error.raw_os_error(), &error.to_string())
+}
+
+fn report_down(
+    events: &Events,
+    last: &mut Option<String>,
+    reason: String,
+    error: Option<LinkFailure>,
+    stopped: &AtomicBool,
+) {
     if last.as_ref() != Some(&reason) {
-        let mut pending = TimedEvent::new(LinkEvent::Down(reason.clone()));
+        let mut pending = TimedEvent::new(LinkEvent::Down {
+            detail: reason.clone(),
+            error,
+        });
         while !stopped.load(Ordering::Relaxed) {
             match events.0.try_send(pending) {
                 Ok(()) => {
@@ -510,12 +602,12 @@ pub fn serial(device: String, baud: u32, usb: Option<UsbId>, events: Events) -> 
                             let mut failed = None;
                             while let Ok(Outgoing { bytes, .. }) = outgoing.try_recv() {
                                 if let Err(error) = port.write_all(&bytes) {
-                                    failed = Some(format!("{path}: {error}"));
+                                    failed = Some(io_failure(&error));
                                     break;
                                 }
                             }
-                            if let Some(reason) = failed {
-                                break reason;
+                            if let Some(failure) = failed {
+                                break (failure.device_words(&path), Some(failure));
                             }
                             if let Some(event) = pending.take() {
                                 match events.0.try_send(event) {
@@ -533,7 +625,7 @@ pub fn serial(device: String, baud: u32, usb: Option<UsbId>, events: Events) -> 
                             match port.read(&mut buffer) {
                                 // With a timeout, a quiet port times out; no
                                 // bytes at all means the other end hung up.
-                                Ok(0) => break format!("{path}: the device went away"),
+                                Ok(0) => break (format!("{path}: the device went away"), None),
                                 Ok(len) => {
                                     pending = Some(TimedEvent::new(LinkEvent::Received {
                                         peer: path.clone(),
@@ -541,17 +633,25 @@ pub fn serial(device: String, baud: u32, usb: Option<UsbId>, events: Events) -> 
                                     }));
                                 }
                                 Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
-                                Err(error) => break format!("{path}: {error}"),
+                                Err(error) => {
+                                    let failure = io_failure(&error);
+                                    break (failure.device_words(&path), Some(failure));
+                                }
                             }
                         };
-                        report_down(&events, &mut last_down, reason, &stopped);
+                        let (reason, failure) = reason;
+                        report_down(&events, &mut last_down, reason, failure, &stopped);
                     }
-                    Err(error) => report_down(
-                        &events,
-                        &mut last_down,
-                        format!("{path}: {error}"),
-                        &stopped,
-                    ),
+                    Err(error) => {
+                        let failure = open_failure(&error);
+                        report_down(
+                            &events,
+                            &mut last_down,
+                            failure.device_words(&path),
+                            Some(failure),
+                            &stopped,
+                        );
+                    }
                 }
                 // Anything queued while closed is stale.
                 while outgoing.try_recv().is_ok() {}
@@ -580,6 +680,28 @@ mod tests {
     use std::task::{Context, Poll, Waker};
 
     use super::*;
+
+    /// FB-267: the serial library's `NoDevice` drops the system's code,
+    /// so on Windows the words cover a port that isn't there, one another
+    /// program holds and one this account may not open, and keep the
+    /// library's message for diagnostics.
+    #[test]
+    fn a_serial_port_that_wont_open_reads_without_its_code() {
+        let no_device =
+            serialport::Error::new(serialport::ErrorKind::NoDevice, "Access is denied.");
+        let failure = open_failure(&no_device);
+        #[cfg(windows)]
+        assert_eq!(failure.kind, LinkFailureKind::DeviceUnavailable);
+        #[cfg(not(windows))]
+        assert_eq!(failure.kind, LinkFailureKind::DeviceBusy);
+        assert_eq!(failure.os_code, None);
+        assert_eq!(failure.message, "Access is denied.");
+        let windows = LinkFailure::device(LinkFailureKind::DeviceUnavailable, String::new());
+        assert_eq!(
+            windows.device_words("COM4"),
+            "UXDuck can't open COM4. It may be unplugged or in use by another program, or this account may not be allowed to open it."
+        );
+    }
 
     #[tokio::test]
     async fn incoming_events_are_bounded_and_timestamped_before_waiting() {

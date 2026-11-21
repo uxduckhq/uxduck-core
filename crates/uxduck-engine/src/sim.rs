@@ -556,6 +556,9 @@ pub(crate) fn stop(
     }
     link.status = LinkStatus::Stopped;
     link.status_detail = None;
+    link.status_error = None;
+    link.down_since_monotonic_us = None;
+    link.keeps_failing = false;
     link.launch = None;
     link.paused = false;
     link.scenery_hit = None;
@@ -613,6 +616,9 @@ pub(crate) fn restart(
     engine.forget_flights_on(id);
     link.status = LinkStatus::Configured;
     link.status_detail = None;
+    link.status_error = None;
+    link.down_since_monotonic_us = None;
+    link.keeps_failing = false;
     link.launch = None;
     // A new simulator starts running, whatever the last one was doing,
     // with a camera and a gimbal that have nothing wrong with them.
@@ -769,6 +775,9 @@ fn crash(
     link.launch = None;
     link.status = LinkStatus::Stopped;
     link.status_detail = Some("Crashed into the 3D scenery. Start again to fly again.".into());
+    link.status_error = None;
+    link.down_since_monotonic_us = None;
+    link.keeps_failing = false;
     link.paused = false;
     link.faults.clear();
     link.version += 1;

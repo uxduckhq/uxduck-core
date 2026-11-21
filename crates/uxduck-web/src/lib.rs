@@ -33,6 +33,24 @@ mod web {
         fn now_us(&self) -> u64 {
             (js_sys::Date::now() * 1000.0) as u64
         }
+
+        /// `performance.now()`, which never steps, in a worker or a window.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "milliseconds since the page started are positive and fit"
+        )]
+        fn monotonic_us(&self) -> u64 {
+            let performance =
+                js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("performance"))
+                    .unwrap_or(JsValue::UNDEFINED);
+            js_sys::Reflect::get(&performance, &JsValue::from_str("now"))
+                .ok()
+                .and_then(|now| now.dyn_into::<Function>().ok())
+                .and_then(|now| now.call0(&performance).ok())
+                .and_then(|ms| ms.as_f64())
+                .map_or_else(|| self.now_us(), |ms| (ms * 1000.0) as u64)
+        }
     }
 
     /// `crypto.getRandomValues`, in a worker or a window.

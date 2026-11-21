@@ -499,6 +499,8 @@ impl Sender {
                 report.insert("platform".into(), json!(crate::analytics::platform()));
                 report.insert("arch".into(), json!(crate::analytics::arch()));
             }
+            // The log is added here. Its lines left out the endpoints of the
+            // links configured as each was kept.
             bundle["log"] = json!(crate::logs::tail());
             left_out = uxduck_engine::feedback::fit(&mut bundle, left_out);
             std::fs::write(dir.join("feedback-bundle.json"), bundle.to_string())?;

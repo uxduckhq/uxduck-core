@@ -1,6 +1,7 @@
 //! The system clock and the OS random source behind the engine's ports.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use uxduck_engine::runtime::{Clock, Random};
 
@@ -14,6 +15,11 @@ impl Clock for SystemClock {
             .map_or(0, |elapsed| {
                 u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
             })
+    }
+
+    fn monotonic_us(&self) -> u64 {
+        static START: OnceLock<Instant> = OnceLock::new();
+        u64::try_from(START.get_or_init(Instant::now).elapsed().as_micros()).unwrap_or(u64::MAX)
     }
 }
 

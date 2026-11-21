@@ -870,7 +870,11 @@ impl System for Host {
     > {
         crate::logs::query(params, now)
     }
-    fn check_udp_bind(&self, host: &str, port: u16) -> Result<(), String> {
+    fn check_udp_bind(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<(), uxduck_core::domain::link_failure::BindRefused> {
         ports::check_udp_bind(host, port)
     }
 

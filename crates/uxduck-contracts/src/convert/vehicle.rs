@@ -1,3 +1,4 @@
+use uxduck_core::domain::link_failure::{LinkFailureKind, LinkOperation};
 use uxduck_core::domain::{link as core_link, vehicle as core};
 
 use crate::dto::{link, vehicle as dto};
@@ -539,6 +540,40 @@ impl From<&core_link::Link> for link::Link {
             topology: l.topology.into(),
             status: l.status.into(),
             status_detail: l.status_detail.clone(),
+            status_error: l.status_error.as_ref().map(|e| link::LinkFailure {
+                kind: match e.kind {
+                    LinkFailureKind::NoAnswer => link::LinkFailureKind::NoAnswer,
+                    LinkFailureKind::Refused => link::LinkFailureKind::Refused,
+                    LinkFailureKind::Reset => link::LinkFailureKind::Reset,
+                    LinkFailureKind::Aborted => link::LinkFailureKind::Aborted,
+                    LinkFailureKind::HostUnreachable => link::LinkFailureKind::HostUnreachable,
+                    LinkFailureKind::NetworkUnreachable => {
+                        link::LinkFailureKind::NetworkUnreachable
+                    }
+                    LinkFailureKind::AddressNotAvailable => {
+                        link::LinkFailureKind::AddressNotAvailable
+                    }
+                    LinkFailureKind::AddressInUse => link::LinkFailureKind::AddressInUse,
+                    LinkFailureKind::NameNotFound => link::LinkFailureKind::NameNotFound,
+                    LinkFailureKind::DeviceMissing => link::LinkFailureKind::DeviceMissing,
+                    LinkFailureKind::DeviceUnavailable => link::LinkFailureKind::DeviceUnavailable,
+                    LinkFailureKind::DeviceBusy => link::LinkFailureKind::DeviceBusy,
+                    LinkFailureKind::AccessDenied => link::LinkFailureKind::AccessDenied,
+                    LinkFailureKind::Other => link::LinkFailureKind::Other,
+                },
+                operation: match e.operation {
+                    LinkOperation::Connect => link::LinkOperation::Connect,
+                    LinkOperation::Connected => link::LinkOperation::Connected,
+                    LinkOperation::Lookup => link::LinkOperation::Lookup,
+                    LinkOperation::Bind => link::LinkOperation::Bind,
+                    LinkOperation::Socket => link::LinkOperation::Socket,
+                    LinkOperation::Datagram => link::LinkOperation::Datagram,
+                    LinkOperation::Device => link::LinkOperation::Device,
+                },
+                os_code: e.os_code,
+                message: e.message.clone(),
+            }),
+            keeps_failing: l.keeps_failing,
             created_at_us: l.created_at_us,
             vehicle_filter: l.vehicle_filter.clone(),
             from_link: l.from_link.clone(),

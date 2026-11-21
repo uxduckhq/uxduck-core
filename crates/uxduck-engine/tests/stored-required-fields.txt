@@ -1079,3 +1079,7 @@ ComputerRun.shown_first
 ComputerRun.started_at_us
 ComputerRun.vehicle_id
 ComputerRun.vehicle_name
+# What the operating system said when a link failed (FB-267, 2026-11-20):
+# an optional field of a link, a type no release has stored.
+LinkFailure.kind
+LinkFailure.message

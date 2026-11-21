@@ -7,7 +7,9 @@
 //! serial numbers and e-mail addresses are removed. The screenshot cannot be
 //! scrubbed, which is why the person sees it and can remove it.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Range;
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
 
 use serde_json::{Map, Value};
 use uxduck_contracts::dto::analytics::Surface;
@@ -22,6 +24,7 @@ use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::{ClientRequest, ServerNotification};
 use uxduck_core::domain::client::ClientKind;
 use uxduck_core::domain::link::LinkKind;
+use uxduck_core::domain::link_failure::LinkFailure;
 use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
 use uxduck_core::domain::thread::ItemKind;
 use uxduck_core::domain::video::without_login;
@@ -146,7 +149,14 @@ impl FeedbackPort for NoFeedback {
 
 /// Keeps a frame for the connection's report: the safe side only (the tap
 /// has redacted it), long strings cut, the high-rate streams left out.
-pub(crate) fn keep(recent: &mut VecDeque<TraceFrame>, mut frame: TraceFrame, now_us: u64) {
+/// Endpoints leave it here, before it is kept: the links' and any the
+/// frame itself names, such as a link it adds (FB-267).
+pub(crate) fn keep(
+    recent: &mut VecDeque<TraceFrame>,
+    mut frame: TraceFrame,
+    now_us: u64,
+    endpoints: &Endpoints,
+) {
     if matches!(
         frame.method.as_deref(),
         Some("telemetry/update" | "agent/itemDelta" | "trace/frame" | "feedback/progress")
@@ -154,6 +164,12 @@ pub(crate) fn keep(recent: &mut VecDeque<TraceFrame>, mut frame: TraceFrame, now
         return;
     }
     cut_strings(&mut frame.payload);
+    let mut named = Endpoints::default();
+    endpoints_in(&frame.payload, &mut named);
+    redact_endpoints(&mut frame.payload, &[endpoints, &named]);
+    if frame.kind == uxduck_contracts::dto::trace::FrameKind::Request {
+        without_listener_ports(&mut frame.payload);
+    }
     if frame.bytes > KEPT_FRAME as u64 && json_len(&frame.payload) > KEPT_FRAME {
         outline(&mut frame.payload);
     }
@@ -359,6 +375,334 @@ fn scrub_under(value: &mut Value, key: &str) {
     }
 }
 
+/// Where links are configured to reach or listen, kept for leaving out of
+/// reports: the scrub finds addresses by their shape, and a name such as
+/// `drone.local` has none (FB-267). Each host is kept once, as it is
+/// compared, with its ports, so a text is scanned once however many links
+/// there are. This computer's own addresses say nothing about the person
+/// and are not kept.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Endpoints(BTreeMap<String, BTreeSet<u16>>);
+
+impl Endpoints {
+    /// Keeps where a link opens, if that is another computer.
+    pub(crate) fn note(&mut self, kind: &LinkKind) {
+        let (LinkKind::UdpListen { host, port }
+        | LinkKind::UdpForward { host, port }
+        | LinkKind::TcpServer { host, port }
+        | LinkKind::TcpClient { host, port }
+        | LinkKind::UdpClient { host, port }) = kind
+        else {
+            return;
+        };
+        self.insert(host, *port);
+    }
+
+    fn insert(&mut self, host: &str, port: u16) {
+        let host = normalized_host(host);
+        if !is_local(&host) {
+            self.0.entry(host).or_default().insert(port);
+        }
+    }
+}
+
+/// The endpoints of the links configured now, shared with whatever keeps
+/// diagnostics for a report, such as the daemon's log lines. Each kept
+/// trace frame and log line leaves them out as it is kept, so only the
+/// links configured now are remembered, never every link of the run
+/// (FB-267).
+#[derive(Clone, Debug, Default)]
+pub struct ActiveEndpoints(Arc<RwLock<Endpoints>>);
+
+impl ActiveEndpoints {
+    /// Becomes the endpoints of these link kinds.
+    pub(crate) fn set<'a>(&self, kinds: impl IntoIterator<Item = &'a LinkKind>) {
+        let mut endpoints = Endpoints::default();
+        for kind in kinds {
+            endpoints.note(kind);
+        }
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = endpoints;
+    }
+
+    /// The endpoints now.
+    pub fn read(&self) -> RwLockReadGuard<'_, Endpoints> {
+        self.0.read().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl FromIterator<(String, u16)> for Endpoints {
+    fn from_iter<I: IntoIterator<Item = (String, u16)>>(pairs: I) -> Self {
+        let mut endpoints = Self::default();
+        for (host, port) in pairs {
+            endpoints.insert(&host, port);
+        }
+        endpoints
+    }
+}
+
+/// `host` as it is compared, the same for a configured host and one in
+/// text: in lower case, Unicode letters included, and without brackets. An IPv6 address loses its
+/// scope and is written the standard way. A DNS name loses the dot that
+/// makes it absolute. Empty for a host that names nothing, such as "%",
+/// "[]" or ".".
+fn normalized_host(host: &str) -> String {
+    let host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_lowercase();
+    let address = host
+        .split_once('%')
+        .map_or(host.as_str(), |(address, _)| address);
+    match address.parse::<std::net::Ipv6Addr>() {
+        Ok(ip) => ip.to_string(),
+        Err(_) => host.trim_end_matches('.').to_owned(),
+    }
+}
+
+/// Whether a normalized host is this computer, or names nothing.
+fn is_local(host: &str) -> bool {
+    host.is_empty()
+        || host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
+}
+
+/// The endpoints `value` holds as an object's `host` and `port`.
+fn endpoints_in(value: &Value, found: &mut Endpoints) {
+    match value {
+        Value::Object(map) => {
+            if let Some((host, port)) = endpoint_of(map) {
+                found.insert(host, port);
+            }
+            map.values().for_each(|v| endpoints_in(v, found));
+        }
+        Value::Array(items) => items.iter().for_each(|v| endpoints_in(v, found)),
+        _ => {}
+    }
+}
+
+/// A listener's port in a request, which a refused listener never turns
+/// into a link (FB-267): "[removed]", as its host is when it is another
+/// computer's.
+fn without_listener_ports(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if matches!(
+                map.get("type").and_then(Value::as_str),
+                Some("udp-listen" | "tcp-server")
+            ) && map.get("port").is_some_and(Value::is_u64)
+            {
+                map.insert("port".into(), Value::String("[removed]".into()));
+            }
+            map.values_mut().for_each(without_listener_ports);
+        }
+        Value::Array(items) => items.iter_mut().for_each(without_listener_ports),
+        _ => {}
+    }
+}
+
+/// An object's `host` and `port`, when the host is another computer.
+fn endpoint_of(map: &serde_json::Map<String, Value>) -> Option<(&str, u16)> {
+    let host = map.get("host")?.as_str()?;
+    let port = u16::try_from(map.get("port")?.as_u64()?).ok()?;
+    (!is_local(&normalized_host(host))).then_some((host, port))
+}
+
+/// Leaves endpoints out of a report (FB-267): an object's `host` with its
+/// `port`, unless the host is this computer, each endpoint of `known`
+/// where text names it, as [`without_endpoints`] says, and any endpoint a
+/// link's name is written with. Other words and numbers stay, even one that
+/// matches a host or a port.
+pub fn redact_endpoints(value: &mut Value, known: &[&Endpoints]) {
+    match value {
+        Value::Object(map) => {
+            if endpoint_of(map).is_some() {
+                map.insert("host".into(), Value::String("[removed]".into()));
+                map.insert("port".into(), Value::String("[removed]".into()));
+            }
+            if map.get("kind").and_then(|kind| kind.get("type")).is_some()
+                && let Some(Value::String(name)) = map.get_mut("name")
+            {
+                *name = name_without_endpoints(name);
+            }
+            map.values_mut().for_each(|v| redact_endpoints(v, known));
+        }
+        Value::Array(items) => items.iter_mut().for_each(|v| redact_endpoints(v, known)),
+        Value::String(text) => *text = without_endpoints(text, known),
+        _ => {}
+    }
+}
+
+/// Text without the endpoints of `known` that UXDuck and the system write,
+/// matched without regard to case, in one pass (FB-267):
+/// `drone.local:5760`, `tcp:drone.local:5760`, `drone.local (port 5760)`,
+/// an IPv6 address with or without brackets and with any scope, as
+/// `fe80::1%lo:5760` or `[fe80::1%2]:5760`, and the host of a URL whatever
+/// its port. A host or a port standing alone in other words stays. Run it
+/// before the scrub, which would hide an address and leave its port.
+#[must_use]
+pub fn without_endpoints(text: &str, known: &[&Endpoints]) -> String {
+    if known.iter().all(|endpoints| endpoints.0.is_empty()) {
+        return text.to_owned();
+    }
+    without_endpoints_where(text, &|host, port| known_at(known, host, port))
+}
+
+/// A link's name without any endpoint it is written with, known or not: a
+/// name can keep a host after the link is edited away from it (FB-267). A
+/// host is a name with a letter or a dot, or an IPv6 address, so "2:30"
+/// stays. The scrub hides a bracketed IPv6 address after this.
+fn name_without_endpoints(name: &str) -> String {
+    without_endpoints_where(name, &|host, _| {
+        let host = normalized_host(host);
+        host.chars()
+            .any(|c| c.is_alphabetic() || c == '.' || c == ':')
+    })
+}
+
+/// Text without each endpoint, as [`without_endpoints`] reads them, that
+/// `wanted` takes, given its host as written and its port if it has one.
+fn without_endpoints_where(text: &str, wanted: &dyn Fn(&str, Option<u16>) -> bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut at = 0;
+    while let Some(c) = text[at..].chars().next() {
+        if !host_char(c) {
+            at += c.len_utf8();
+            continue;
+        }
+        let start = at;
+        at = text[at..]
+            .find(|c: char| !host_char(c))
+            .map_or(text.len(), |n| at + n);
+        let found = if text[..at].ends_with(':') && text[at..].starts_with("//") {
+            let (span, host, end) = url_authority(text, at + 2);
+            at = end;
+            wanted(&host.replace("%25", "%"), None).then_some(span)
+        } else {
+            mention(text, start, at, wanted)
+        };
+        if let Some(span) = found {
+            out.push_str(&text[copied..span.start]);
+            out.push_str("[endpoint]");
+            copied = span.end;
+            at = at.max(span.end);
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// A character that can be part of a host and its port as text writes
+/// them, a letter of any script included, as in `café.local`.
+fn host_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '%')
+}
+
+/// Whether `host`, as text writes it, is one of `known` at `port`, or
+/// at any port when there is none.
+fn known_at(known: &[&Endpoints], host: &str, port: Option<u16>) -> bool {
+    let host = normalized_host(host);
+    known.iter().any(|endpoints| {
+        endpoints
+            .0
+            .get(&host)
+            .is_some_and(|ports| port.is_none_or(|port| ports.contains(&port)))
+    })
+}
+
+/// A port as text writes it: digits only.
+fn port_of(digits: &str) -> Option<u16> {
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
+/// Where the run of host characters at `start..end` names an endpoint
+/// `wanted` takes: `[host]:port`, `host:port` after a prefix such as
+/// `tcp:` or not, or `host (port N)`.
+fn mention<'a>(
+    text: &'a str,
+    start: usize,
+    end: usize,
+    wanted: &dyn Fn(&str, Option<u16>) -> bool,
+) -> Option<Range<usize>> {
+    let run = text[start..end].trim_end_matches('.');
+    let run_end = start + run.len();
+    if run_end == end
+        && start > 0
+        && text.as_bytes()[start - 1] == b'['
+        && text[end..].starts_with(']')
+    {
+        let digits = text[end + 1..].strip_prefix(':').map_or("", |after| {
+            &after[..after.bytes().take_while(u8::is_ascii_digit).count()]
+        });
+        if let Some(port) = port_of(digits)
+            && wanted(run, Some(port))
+        {
+            return Some(start - 1..end + 2 + digits.len());
+        }
+    }
+    let hosts = |host: &'a str| [Some(host), host.rsplit_once(':').map(|(_, last)| last)];
+    if let Some((host, digits)) = run.rsplit_once(':')
+        && let Some(port) = port_of(digits)
+        && let Some(host) = hosts(host)
+            .into_iter()
+            .flatten()
+            .find(|host| wanted(host, Some(port)))
+    {
+        return Some(run_end - digits.len() - 1 - host.len()..run_end);
+    }
+    let named = text[end..].strip_prefix(" (port ")?;
+    let digits = &named[..named.bytes().take_while(u8::is_ascii_digit).count()];
+    let port = port_of(digits)?;
+    if !named[digits.len()..].starts_with(')') {
+        return None;
+    }
+    let host = hosts(run)
+        .into_iter()
+        .flatten()
+        .find(|host| wanted(host, Some(port)))?;
+    Some(run_end - host.len()..end + " (port )".len() + digits.len())
+}
+
+/// A URL's authority from just after `://`: the span of its host with its
+/// port, the host alone, and where the authority ends. A dot that ends a
+/// sentence is not part of it, nor is a `]` around the whole URL, while
+/// the brackets around an IPv6 address are.
+fn url_authority(text: &str, from: usize) -> (Range<usize>, &str, usize) {
+    let mut end = text.len();
+    let mut literal = false;
+    for (n, c) in text[from..].char_indices() {
+        match c {
+            '[' => literal = true,
+            ']' if literal => literal = false,
+            ']' | '/' | '?' | '#' | '"' | '\'' | '<' | '>' | ',' | ')' => {
+                end = from + n;
+                break;
+            }
+            c if c.is_whitespace() => {
+                end = from + n;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let start = text[from..end].rfind('@').map_or(from, |n| from + n + 1);
+    let end = start + text[start..end].trim_end_matches('.').len();
+    let host_port = &text[start..end];
+    let host = match host_port.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map_or(rest, |(host, _)| host),
+        None => host_port
+            .rsplit_once(':')
+            .filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit()))
+            .map_or(host_port, |(host, _)| host),
+    };
+    (start..end, host, end)
+}
+
 /// Removes what looks like an address, a device path, an e-mail address, a
 /// key or a token from free text such as a log line or an error message.
 #[must_use]
@@ -380,6 +724,8 @@ pub fn scrub_text(text: &str) -> String {
 /// loses its login, as it does on its way to the account (FB-229), and a
 /// word the scrub hid in the address as written stays hidden.
 fn scrub_spaceless(text: &str) -> String {
+    let whole = without_bracketed_ipv6(text);
+    let text = whole.as_str();
     let (words, separators) = words_of(text);
     let scrubbed = joined(words.iter().map(|word| scrub_word(word)), &separators);
     let Some(at) = text.find("://") else {
@@ -413,6 +759,58 @@ fn scrub_spaceless(text: &str) -> String {
     } else {
         "[redacted]".to_owned()
     }
+}
+
+/// Text with each bracketed IPv6 address, as in `[2001:db8::1]:45680` or
+/// `[fe80::1%lo]`, replaced with its port as one address: the word
+/// scrub splits at brackets and would leave the port (FB-267). It walks the
+/// brackets once, pairing each `]` with the last `[` before it.
+fn without_bracketed_ipv6(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut open = None;
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'[' => open = Some(at),
+            b']' => {
+                if let Some(start) = open.take()
+                    && bracketed_ipv6(&text[start + 1..at])
+                {
+                    let mut end = at + 1;
+                    if text[end..].starts_with(':') {
+                        let digits = text[end + 1..]
+                            .bytes()
+                            .take_while(u8::is_ascii_digit)
+                            .count();
+                        if digits > 0 {
+                            end += 1 + digits;
+                        }
+                    }
+                    out.push_str(&text[copied..start]);
+                    out.push_str("[address]");
+                    copied = end;
+                    at = end;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// An IPv6 address as written between brackets, with or without its scope,
+/// `::` included.
+fn bracketed_ipv6(inner: &str) -> bool {
+    let (address, scope) = inner.split_once('%').unwrap_or((inner, ""));
+    address.parse::<std::net::Ipv6Addr>().is_ok()
+        && scope
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
 /// The words of text without whitespace, split at quotes, brackets, commas,
@@ -680,6 +1078,7 @@ pub(crate) fn handle(
     let bundle = if params.include_details {
         let mut value = serde_json::to_value(engine.bundle(connection, &params))
             .map_err(|e| ApiError::new(ErrorKind::Internal, e.to_string()))?;
+        redact_endpoints(&mut value, &[&engine.link_endpoints.read()]);
         scrub(&mut value);
         Some(value)
     } else {
@@ -1112,7 +1511,11 @@ impl Engine {
                 id: l.id.clone(),
                 kind: link_kind(&l.kind).to_owned(),
                 status: format!("{:?}", l.status).to_lowercase(),
-                detail: l.status_detail.clone(),
+                detail: l
+                    .status_error
+                    .as_ref()
+                    .map(LinkFailure::summary)
+                    .or_else(|| l.status_detail.clone()),
                 transport: self
                     .system
                     .transport_diagnostics(&l.id)
@@ -1325,6 +1728,453 @@ mod tests {
         );
     }
 
+    /// FB-267: a link's host name has no address's shape, so its endpoint
+    /// goes where UXDuck names it, and nowhere else: a host that is also a
+    /// word, such as `desktop`, leaves the word.
+    #[test]
+    fn a_link_endpoint_leaves_the_bundle_and_words_stay() {
+        let endpoints = Endpoints::from_iter([
+            ("drone.local".to_owned(), 5760),
+            ("review-test.invalid".to_owned(), 14550),
+            ("desktop".to_owned(), 14551),
+            ("fe80::1".to_owned(), 5760),
+        ]);
+        let mut bundle = json!({
+            "links": [{ "detail": "Nothing answered at drone.local:5760. Check that the device is on." }],
+            "trace": [
+                { "payload": "UXDuck couldn't find Review-Test.invalid (port 14550). Check the name." },
+                { "payload": { "kind": { "type": "tcp-client", "host": "elsewhere.invalid", "port": 5760 } } },
+                { "payload": { "kind": { "type": "udp-listen", "host": "0.0.0.0", "port": 14550 } } },
+            ],
+            "surface": "desktop",
+            "log": [
+                "desktop:14551 refused the connection. [fe80::1]:5760 closed the connection.",
+                "mydrone.local:5760, drone.local:57600 and drone.local port 5760 stay",
+            ],
+        });
+        redact_endpoints(&mut bundle, &[&endpoints]);
+        assert_eq!(
+            bundle,
+            json!({
+                "links": [{ "detail": "Nothing answered at [endpoint]. Check that the device is on." }],
+                "trace": [
+                    { "payload": "UXDuck couldn't find [endpoint]. Check the name." },
+                    { "payload": { "kind": { "type": "tcp-client", "host": "[removed]", "port": "[removed]" } } },
+                    { "payload": { "kind": { "type": "udp-listen", "host": "0.0.0.0", "port": 14550 } } },
+                ],
+                "surface": "desktop",
+                "log": [
+                    "[endpoint] refused the connection. [endpoint] closed the connection.",
+                    "mydrone.local:5760, drone.local:57600 and drone.local port 5760 stay",
+                ],
+            })
+        );
+    }
+
+    /// FB-267: IPv6 endpoints go however they are written, bracketed or not
+    /// and with any scope, and a URL loses a link's host whatever its port.
+    #[test]
+    fn ipv6_endpoints_and_url_hosts_leave_the_text() {
+        let endpoints = Endpoints::from_iter([
+            ("fe80::cafe%lo".to_owned(), 45676),
+            ("2001:db8::beef".to_owned(), 45671),
+            ("request".to_owned(), 14552),
+        ]);
+        let said = without_endpoints(
+            "UDP fe80::cafe%lo:45676, peer [FE80::CAFE%2]:45676, fe80::cafe:45676 \
+             and [2001:db8::beef]:45671 at=2001:db8::beef:45671. \
+             See https://request/path and http://user@request:8080/x?q=1, \
+             a request to fe80::cafe:1:45676 and 2001:db8::beef:456710 stays.",
+            &[&endpoints],
+        );
+        assert_eq!(
+            said,
+            "UDP [endpoint], peer [endpoint], [endpoint] \
+             and [endpoint] at=[endpoint]. \
+             See https://[endpoint]/path and http://user@[endpoint]/x?q=1, \
+             a request to fe80::cafe:1:45676 and 2001:db8::beef:456710 stays."
+        );
+        assert_eq!(
+            scrub_text(&without_endpoints(
+                "link ready at=[2001:db8::beef]:45671",
+                &[&endpoints]
+            )),
+            "link ready at=[endpoint]"
+        );
+    }
+
+    /// A small, seeded generator: the same cases on every run.
+    struct Cases(u64);
+
+    impl Cases {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            usize::try_from(self.0 % n as u64).unwrap()
+        }
+
+        fn pick<'a>(&mut self, from: &[&'a str]) -> &'a str {
+            from[self.below(from.len())]
+        }
+
+        fn port(&mut self) -> u16 {
+            u16::try_from(1 + self.below(65_535)).unwrap()
+        }
+
+        fn cased(&mut self, text: &str) -> String {
+            text.chars()
+                .map(|c| {
+                    if self.below(2) == 0 {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        }
+
+        /// A host a link can be configured with, as written there.
+        fn host(&mut self) -> String {
+            match self.below(4) {
+                0 => format!(
+                    "{}{}.{}{}",
+                    self.pick(&["drone", "relay", "gcs", "request", "desktop", "link"]),
+                    self.below(100),
+                    self.pick(&["local", "example", "lan"]),
+                    self.pick(&["", "."])
+                ),
+                1 => format!(
+                    "10.{}.{}.{}",
+                    self.below(256),
+                    self.below(256),
+                    self.below(256)
+                ),
+                2 => format!("2001:db8::{:x}", 1 + self.below(0xfffe)),
+                _ => format!(
+                    "fe80::{:x}{}",
+                    1 + self.below(0xfffe),
+                    self.pick(&["", "%lo", "%2", "%eth0"])
+                ),
+            }
+        }
+
+        /// A host that names nothing, or nearly.
+        fn garbage(&mut self) -> String {
+            let n = self.below(6);
+            (0..n)
+                .map(|_| self.pick(&["%", "[", "]", ".", ":", "a", "0", "f", "-", "_", " "]))
+                .collect()
+        }
+
+        /// Words between mentions: never a digit, so a port left behind shows.
+        fn filler(&mut self) -> String {
+            let n = self.below(4);
+            (0..n)
+                .map(|_| self.pick(&["link", "ready", "at", "to", "UDP", "port", "the", "is"]))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        /// `host` at `port` as UXDuck or the system writes it.
+        fn mention(&mut self, host: &str, port: u16) -> String {
+            let written = self.cased(host);
+            let (address, scope) = written.split_once('%').unwrap_or((&written, ""));
+            let v6 = address.contains(':');
+            let scope = if v6 && self.below(2) == 0 {
+                format!("%{}", self.pick(&["lo", "2", "eth0"]))
+            } else if scope.is_empty() {
+                String::new()
+            } else {
+                format!("%{scope}")
+            };
+            let dns = address.trim_end_matches('.');
+            let dotted = if !v6 && self.below(2) == 0 {
+                format!("{dns}.")
+            } else {
+                dns.to_owned()
+            };
+            let host = format!("{}{scope}", if v6 { address } else { &dotted });
+            let path = self.pick(&["", "/status", "/a/b?q=x"]);
+            match self.below(if v6 { 5 } else { 4 }) {
+                0 => uxduck_core::domain::link_failure::endpoint(&host, port),
+                1 => format!("{host} (port {port})"),
+                2 if v6 => format!("https://[{}]{path}", host.replace('%', "%25")),
+                2 => format!("https://{host}{path}"),
+                3 if v6 => format!("http://user@[{host}]:{port}{path}"),
+                3 => format!("http://user@{host}:{port}{path}"),
+                _ => format!("{host}:{port}"),
+            }
+        }
+    }
+
+    /// FB-267: over random hosts and text the endpoint scan always ends, and
+    /// it never leaves a configured host or its port where an endpoint is
+    /// written, whatever its case, brackets, scope or trailing dot.
+    #[test]
+    fn the_endpoint_scan_ends_and_leaves_no_configured_endpoint() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut cases = Cases(0x2545_f491_4f6c_dd1d);
+            for _ in 0..20_000 {
+                let endpoints: Endpoints = (0..=cases.below(3))
+                    .map(|_| (cases.garbage(), cases.port()))
+                    .collect();
+                let text: String = (0..cases.below(12))
+                    .map(|_| match cases.below(3) {
+                        0 => cases.garbage(),
+                        1 => cases.filler(),
+                        _ => cases
+                            .pick(&["://", "[", "]:", "%", " (port ", ":1", "."])
+                            .to_owned(),
+                    })
+                    .collect();
+                let _ = without_endpoints(&text, &[&endpoints]);
+                let _ = scrub_text(&text);
+            }
+            for _ in 0..20_000 {
+                let mut configured = Vec::new();
+                let mut text = cases.filler();
+                for _ in 0..=cases.below(3) {
+                    let host = cases.host();
+                    let port = cases.port();
+                    let mention = cases.mention(&host, port);
+                    text.push_str(cases.pick(&[" ", "=", "(", "\"", ", "]));
+                    text.push_str(&mention);
+                    text.push_str(cases.pick(&[" ", ". ", ", ", ") ", "\" "]));
+                    text.push_str(&cases.filler());
+                    configured.push((host, port));
+                }
+                let endpoints = configured.iter().cloned().collect::<Endpoints>();
+                let kept = without_endpoints(&text, &[&endpoints]).to_ascii_lowercase();
+                for (host, port) in &configured {
+                    let bare = normalized_host(host);
+                    assert!(
+                        !kept.contains(&bare),
+                        "{bare} left in {kept:?} from {text:?}"
+                    );
+                    assert!(
+                        !kept.contains(&port.to_string()),
+                        "port {port} left in {kept:?} from {text:?}"
+                    );
+                }
+            }
+            done.send(()).unwrap();
+        });
+        finished
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the scan ends for every case");
+    }
+
+    /// FB-267: hosts that name nothing never stop the scan.
+    #[test]
+    fn a_host_that_names_nothing_is_skipped() {
+        let text = "UDP %:5760 at [].:5760 and .:5760 or :5760";
+        for host in ["[]", ".", "", " ", "...", "[.]"] {
+            let endpoints = Endpoints::from_iter([(host.to_owned(), 5760)]);
+            assert_eq!(endpoints, Endpoints::default(), "{host:?}");
+            assert_eq!(without_endpoints(text, &[&endpoints]), text, "{host:?}");
+        }
+        let endpoints = Endpoints::from_iter([("%".to_owned(), 5760), ("%%".to_owned(), 5760)]);
+        assert_eq!(
+            without_endpoints(text, &[&endpoints]),
+            "UDP [endpoint] at [].:5760 and .:5760 or :5760"
+        );
+    }
+
+    /// FB-267: only an IPv6 address loses its scope, so a name with a `%`
+    /// in it never stands for a shorter name.
+    #[test]
+    fn a_scope_goes_only_from_an_ipv6_address() {
+        let endpoints = Endpoints::from_iter([
+            ("relay%wifi".to_owned(), 5760),
+            ("FE80::0:CAFE%eth0".to_owned(), 14550),
+        ]);
+        assert_eq!(
+            without_endpoints(
+                "relay%wifi:5760, relay%wifi:note, https://relay/status and fe80::cafe%2:14550",
+                &[&endpoints]
+            ),
+            "[endpoint], relay%wifi:note, https://relay/status and [endpoint]"
+        );
+    }
+
+    /// FB-267: the scan reads a text once however many links there are, so
+    /// a megabyte of log with a thousand links and nested brackets is quick.
+    #[test]
+    fn the_endpoint_scan_grows_with_the_text_and_not_the_links() {
+        let endpoints: Endpoints = (0..1_000u16)
+            .map(|i| (format!("drone{i}.example"), 5_000 + i))
+            .collect();
+        let chunk = "[[[[link ready at=drone7.example:5007]] [2001:db8::1]:45680]] \
+         see https://drone999.example/status, fe80::1%lo:14550 (port 5) [x]:5 ";
+        let megabyte = 1 << 20;
+        let texts = [
+            chunk.repeat(megabyte / chunk.len() + 1),
+            format!("{}{}", "[".repeat(megabyte / 2), "]".repeat(megabyte / 2)),
+            "a:".repeat(megabyte / 2),
+            "[::1".repeat(megabyte / 4),
+        ];
+        let started = std::time::Instant::now();
+        for text in &texts {
+            let kept = scrub_text(&without_endpoints(text, &[&endpoints]));
+            assert!(!kept.contains("drone7.example") && !kept.contains("drone999"));
+        }
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(20), "took {took:?}");
+    }
+
+    /// FB-267: a host in any script leaves the text however it is written,
+    /// in a plain endpoint, a lookup error and a URL.
+    #[test]
+    fn a_unicode_host_leaves_the_text() {
+        let endpoints = Endpoints::from_iter([
+            ("café.invalid".to_owned(), 45688),
+            ("Ünï.example".to_owned(), 14550),
+        ]);
+        assert_eq!(
+            without_endpoints(
+                "UXDuck couldn't find CAFÉ.invalid (port 45688). Check the name. \
+                 link ready at=café.invalid:45688 and https://ünï.example/x, \
+                 café.invalid alone stays",
+                &[&endpoints]
+            ),
+            "UXDuck couldn't find [endpoint]. Check the name. \
+             link ready at=[endpoint] and https://[endpoint]/x, \
+             café.invalid alone stays"
+        );
+    }
+
+    /// FB-267: a bracket around a whole URL or endpoint is punctuation, and
+    /// the brackets around an IPv6 address are part of it.
+    #[test]
+    fn a_bracket_around_an_endpoint_is_punctuation() {
+        let endpoints = Endpoints::from_iter([
+            ("review-synthetic.invalid".to_owned(), 45684),
+            ("2001:db8::7".to_owned(), 5760),
+        ]);
+        assert_eq!(
+            without_endpoints(
+                "See [https://review-synthetic.invalid:45684]. And [http://[2001:db8::7]:5760/x]. \
+                 And [review-synthetic.invalid:45684].",
+                &[&endpoints]
+            ),
+            "See [https://[endpoint]]. And [http://[endpoint]/x]. And [[endpoint]]."
+        );
+    }
+
+    /// FB-267: a link's name loses any endpoint it is written with, known
+    /// or not, and other names stay as they are.
+    #[test]
+    fn a_link_name_loses_any_endpoint_it_names() {
+        let mut value = json!({
+            "link": {
+                "name": "Old drone.local:5760, https://old.example/x and Desk:14550 at 2:30",
+                "kind": { "type": "udp-client", "host": "127.0.0.1", "port": 14550 }
+            },
+            "vehicle": { "name": "Plane at drone.local:5760" },
+        });
+        redact_endpoints(&mut value, &[&Endpoints::default()]);
+        assert_eq!(
+            value,
+            json!({
+                "link": {
+                    "name": "Old [endpoint], https://[endpoint]/x and [endpoint] at 2:30",
+                    "kind": { "type": "udp-client", "host": "127.0.0.1", "port": 14550 }
+                },
+                "vehicle": { "name": "Plane at drone.local:5760" },
+            })
+        );
+    }
+
+    /// FB-267: the index holds the links configured now, never one removed.
+    #[test]
+    fn the_active_endpoints_are_the_links_configured_now() {
+        let active = ActiveEndpoints::default();
+        let drone = LinkKind::TcpClient {
+            host: "drone.local".into(),
+            port: 5760,
+        };
+        let relay = LinkKind::UdpClient {
+            host: "relay.example".into(),
+            port: 14550,
+        };
+        active.set([&drone, &relay]);
+        assert_eq!(
+            *active.read(),
+            Endpoints::from_iter([
+                ("drone.local".to_owned(), 5760),
+                ("relay.example".to_owned(), 14550)
+            ])
+        );
+        active.set([&relay]);
+        assert_eq!(
+            *active.read(),
+            Endpoints::from_iter([("relay.example".to_owned(), 14550)])
+        );
+    }
+
+    /// FB-267: the scrub hides a bracketed IPv6 address with its port, which
+    /// a refused listener names before any endpoint was saved.
+    #[test]
+    fn a_bracketed_ipv6_address_goes_with_its_port() {
+        assert_eq!(
+            scrub_text(
+                "UXDuck can't listen on [2001:db8::1]:45680. Or [fe80::1%lo]. Or [x]:5. \
+                 UDP [::]:50481 is in use."
+            ),
+            "UXDuck can't listen on [address]. Or [address]. Or [x]:5. UDP [address] is in use."
+        );
+    }
+
+    /// FB-267: a frame that adds a link leaves out its endpoint before the
+    /// link is saved, wherever else the frame names it.
+    #[test]
+    fn a_kept_frame_leaves_out_the_endpoint_it_names() {
+        let mut recent = VecDeque::new();
+        let frame = |payload| TraceFrame {
+            ts_us: 1,
+            direction: uxduck_contracts::dto::trace::TraceDirection::In,
+            kind: uxduck_contracts::dto::trace::FrameKind::Request,
+            client_id: "c".into(),
+            transport: uxduck_contracts::dto::trace::Transport::WebSocket,
+            method: Some("link/add".into()),
+            id: None,
+            bytes: 1,
+            latency_us: None,
+            payload,
+        };
+        keep(
+            &mut recent,
+            frame(
+                json!({ "params": { "kind": { "type": "udp-client", "host": "link", "port": 14552 } }, "note": "link:14552 and link/add" }),
+            ),
+            1,
+            &Endpoints::default(),
+        );
+        assert_eq!(
+            recent[0].payload,
+            json!({ "params": { "kind": { "type": "udp-client", "host": "[removed]", "port": "[removed]" } }, "note": "[endpoint] and link/add" })
+        );
+        // A listener's port goes from a request, which may be refused before
+        // it is a link, and stays in what UXDuck says about a link.
+        let listener = json!({ "kind": { "type": "udp-listen", "host": "::", "port": 50481 } });
+        keep(
+            &mut recent,
+            frame(listener.clone()),
+            1,
+            &Endpoints::default(),
+        );
+        assert_eq!(
+            recent[1].payload,
+            json!({ "kind": { "type": "udp-listen", "host": "::", "port": "[removed]" } })
+        );
+        let mut answer = frame(listener.clone());
+        answer.kind = uxduck_contracts::dto::trace::FrameKind::Response;
+        keep(&mut recent, answer, 1, &Endpoints::default());
+        assert_eq!(recent[2].payload, listener);
+    }
+
     #[test]
     fn scrubbing_keeps_what_the_maps_say_about_themselves() {
         let failed = "failed basemapstyles-api.arcgis.com/arcgis/rest/services/styles/v2/styles/arcgis/imagery";
@@ -1503,7 +2353,7 @@ mod tests {
                 "data_dir=/Users/ana/Library/Application Support",
                 "data_dir=[path] Support",
             ),
-            ("peer [fe80::1]:14550", "peer [[address]]:14550"),
+            ("peer [fe80::1]:14550", "peer [address]"),
         ] {
             assert_eq!(scrub_text(given), kept, "{given}");
         }
@@ -1522,7 +2372,7 @@ mod tests {
             scrub_text("link opened on /dev/ttyUSB0."),
             "link opened on [device]."
         );
-        assert_eq!(scrub_text("peer [fe80::1]:14550"), "peer [[address]]:14550");
+        assert_eq!(scrub_text("peer [fe80::1]:14550"), "peer [address]");
         assert_eq!(
             scrub_text("session 3f9a0c6b1d2e4f5a6b7c8d9e0f1a2b3c4d5e6f7a"),
             "session [redacted]"
@@ -1552,8 +2402,18 @@ mod tests {
     #[test]
     fn kept_frames_are_recent_short_and_not_telemetry() {
         let mut recent = VecDeque::new();
-        keep(&mut recent, frame(1, "telemetry/update", json!({})), 1);
-        keep(&mut recent, frame(1, "feedback/progress", json!({})), 1);
+        keep(
+            &mut recent,
+            frame(1, "telemetry/update", json!({})),
+            1,
+            &Endpoints::default(),
+        );
+        keep(
+            &mut recent,
+            frame(1, "feedback/progress", json!({})),
+            1,
+            &Endpoints::default(),
+        );
         assert!(recent.is_empty());
         keep(
             &mut recent,
@@ -1563,6 +2423,7 @@ mod tests {
                 json!({ "screenshot": "A".repeat(10_000) }),
             ),
             1,
+            &Endpoints::default(),
         );
         let kept = recent[0].payload["screenshot"].as_str().unwrap();
         assert!(kept.len() < 600 && kept.ends_with('…'));
@@ -1570,6 +2431,7 @@ mod tests {
             &mut recent,
             frame(RECENT_US + 10, "command/send", json!({})),
             RECENT_US + 10,
+            &Endpoints::default(),
         );
         assert_eq!(recent.len(), 1, "older than two minutes goes");
     }
@@ -1592,7 +2454,7 @@ mod tests {
         );
         let bytes = snapshot.bytes;
         let mut recent = VecDeque::new();
-        keep(&mut recent, snapshot, 1);
+        keep(&mut recent, snapshot, 1, &Endpoints::default());
         let kept = &recent[0];
         assert_eq!(kept.bytes, bytes, "the bundle still says how large it was");
         assert_eq!(
@@ -1616,6 +2478,7 @@ mod tests {
                 json!({ "screenshot": "A".repeat(100_000), "attachments": [{ "name": "a.pdf" }] }),
             ),
             1,
+            &Endpoints::default(),
         );
         assert_eq!(recent[1].payload["attachments"][0]["name"], "a.pdf");
     }

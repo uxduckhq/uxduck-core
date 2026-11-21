@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
+use uxduck_core::domain::link_failure::LinkFailureKind;
 use uxduck_core::domain::transport::{SocketSend, TransportDiagnostics, TransportError};
 
 const QUIET_RECOVERY: Duration = Duration::from_secs(30);
@@ -108,6 +109,11 @@ fn failure(operation: &str, endpoint: Option<String>, error: &io::Error) -> Tran
         endpoint,
         message: error.to_string(),
         active: true,
+        failure: if operation == "resolve" {
+            LinkFailureKind::NameNotFound
+        } else {
+            LinkFailureKind::of(error.kind(), error.raw_os_error())
+        },
     }
 }
 fn clear(error: &mut Option<TransportError>) {
@@ -249,29 +255,35 @@ fn run_resolved(
             if socket.is_none() {
                 state.recreation_attempts += 1;
                 let previous_remote = remote;
+                // Each failure names what the opening was doing, so it reads
+                // for it: a lookup, a client's own socket or a listener's bind.
                 let opening = async {
                     let target = if let Some((host, port)) = &host {
-                        Some(resolve(host.clone(), *port).await?)
+                        Some(
+                            resolve(host.clone(), *port)
+                                .await
+                                .map_err(|e| ("resolve", e))?,
+                        )
                     } else {
                         previous_remote
                     };
-                    let next =
-                        if let Some(target) = target {
-                            ephemeral(target).await?
-                        } else {
-                            UdpSocket::bind(local.ok_or_else(|| {
-                                io::Error::other("UDP listener has no bind address")
-                            })?)
-                            .await?
-                        };
-                    Ok::<_, io::Error>((next, target))
+                    let next = if let Some(target) = target {
+                        ephemeral(target).await.map_err(|e| ("open", e))?
+                    } else {
+                        UdpSocket::bind(local.ok_or_else(|| {
+                            ("bind", io::Error::other("UDP listener has no bind address"))
+                        })?)
+                        .await
+                        .map_err(|e| ("bind", e))?
+                    };
+                    Ok::<_, (&str, io::Error)>((next, target))
                 };
                 let opening = tokio::time::timeout(Duration::from_secs(10), opening);
                 tokio::pin!(opening);
                 // Discard frames arriving during DNS/bind, just as during backoff.
                 let result = loop {
                     tokio::select! {
-                        result = &mut opening => break result.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "UDP destination resolution or bind timed out"))),
+                        result = &mut opening => break result.unwrap_or_else(|_| Err((if host.is_some() { "resolve" } else { "bind" }, io::Error::new(io::ErrorKind::TimedOut, "UDP destination resolution or bind timed out")))),
                         next = outgoing.recv() => if next.is_none() { return; },
                     }
                 };
@@ -281,10 +293,10 @@ fn run_resolved(
                         remote = target;
                         clear(&mut state.recovery_error);
                     }
-                    Err(error) => {
+                    Err((operation, error)) => {
                         unreachable = is_unreachable(&error);
                         state.recovery_error = Some(failure(
-                            "resolve-or-bind",
+                            operation,
                             state.configured_destination.clone(),
                             &error,
                         ));
@@ -646,6 +658,37 @@ mod tests {
         tokio::time::advance(Duration::from_secs(60)).await;
         settle().await;
         assert_eq!(calls.load(Ordering::Relaxed), 2, "removal cancels recovery");
+    }
+
+    /// FB-267: a host name that can't be looked up is told as a lookup,
+    /// apart from a socket that could not open, with the system's words kept.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_lookup_is_told_as_a_lookup() {
+        let resolve: Resolve = Arc::new(|_, _| {
+            Box::pin(async {
+                Err(io::Error::other(
+                    "failed to lookup address information: Name or service not known",
+                ))
+            })
+        });
+        let (tx, _events) = super::super::event_channel();
+        let link = run_resolved(
+            None,
+            None,
+            Some(("nothing.invalid".into(), 14550)),
+            Some(Arc::new(AtomicU8::new(255))),
+            RegistrationGate::default(),
+            &NetworkChanges::default(),
+            tx,
+            resolve,
+            Arc::new(|| None),
+        );
+        settle().await;
+        let error = snapshot(&link).recovery_error.expect("the lookup failed");
+        assert_eq!(error.operation, "resolve");
+        assert_eq!(error.failure, LinkFailureKind::NameNotFound);
+        assert_eq!(error.endpoint.as_deref(), Some("nothing.invalid:14550"));
+        assert!(error.message.contains("Name or service not known"));
     }
 
     #[tokio::test(start_paused = true)]

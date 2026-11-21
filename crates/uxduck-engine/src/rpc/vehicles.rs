@@ -490,6 +490,9 @@ fn create_link_inner(
         topology: params.topology.map(Into::into).unwrap_or_default(),
         status: LinkStatus::Configured,
         status_detail: None,
+        status_error: None,
+        down_since_monotonic_us: None,
+        keeps_failing: false,
         vehicle_filter,
         from_link: from_link.filter(|_| kind_is_forward),
         keep_alive: params.keep_alive,
@@ -617,7 +620,7 @@ pub(crate) fn check_kind(
         }
         LinkKind::TcpServer { host, port } => {
             let name = check_tcp_server(&links, kind, host, *port)?;
-            check_own_address(engine, host)?;
+            check_own_address(engine, host, *port)?;
             Ok(name)
         }
         LinkKind::UdpClient { host, port } => check_udp_client(
@@ -685,17 +688,20 @@ fn check_udp_listen(
             ),
         ));
     }
-    check_own_address(engine, host)?;
-    engine
-        .system
-        .check_udp_bind(host, port)
-        .map_err(|detail| ApiError::new(ErrorKind::PortInUse, detail))
+    check_own_address(engine, host, port)?;
+    engine.system.check_udp_bind(host, port).map_err(|refused| {
+        if refused.in_use() {
+            ApiError::new(ErrorKind::PortInUse, refused.words)
+        } else {
+            invalid(refused.words)
+        }
+    })
 }
 
 /// A listener's address must be one of this computer's. People often enter
 /// the vehicle's own, such as a Tailscale or radio address; the error says
 /// so and suggests every address instead.
-fn check_own_address(engine: &Engine, host: &str) -> Result<(), ApiError> {
+fn check_own_address(engine: &Engine, host: &str, port: u16) -> Result<(), ApiError> {
     let ours = host
         .parse::<std::net::IpAddr>()
         .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
@@ -703,7 +709,7 @@ fn check_own_address(engine: &Engine, host: &str) -> Result<(), ApiError> {
     if ours {
         return Ok(());
     }
-    let mut error = invalid(crate::runtime::not_local_message(host));
+    let mut error = invalid(crate::runtime::not_local_message(host, port));
     error.data.suggested_host = Some("0.0.0.0".into());
     Err(error)
 }
@@ -779,6 +785,9 @@ fn enable_link(engine: &mut Engine, connection: ConnectionId, id: &str) -> Resul
         check_kind(engine, &link.kind, Some(id))?;
         link.status = LinkStatus::Configured;
         link.status_detail = None;
+        link.status_error = None;
+        link.down_since_monotonic_us = None;
+        link.keeps_failing = false;
         link.version += 1;
         engine.commit(connection, Change::LinkUpserted { link: link.clone() });
         if !link.carries.is_mavlink() {
@@ -810,6 +819,9 @@ fn disable_link(
         engine.links.close(id);
         link.status = LinkStatus::Disabled;
         link.status_detail = None;
+        link.status_error = None;
+        link.down_since_monotonic_us = None;
+        link.keeps_failing = false;
         link.version += 1;
         engine.commit(connection, Change::LinkUpserted { link: link.clone() });
         if !link.carries.is_mavlink() {
@@ -916,6 +928,9 @@ fn update_link(
     if reopens && moved {
         link.status = LinkStatus::Configured;
         link.status_detail = None;
+        link.status_error = None;
+        link.down_since_monotonic_us = None;
+        link.keeps_failing = false;
     }
     link.version += 1;
     engine.commit(connection, Change::LinkUpserted { link: link.clone() });

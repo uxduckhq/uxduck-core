@@ -434,6 +434,12 @@ pub struct Engine {
     /// Account calls waiting for the root (S27).
     awaiting_account: BTreeMap<String, (ConnectionId, Value)>,
     awaiting_identity: std::collections::BTreeSet<String>,
+    /// The links a vehicle has been heard on in this run, so a link that
+    /// keeps failing can tell whether it ever reached one (FB-267).
+    heard_links: BTreeSet<String>,
+    /// Every endpoint a link has had in this run, which feedback leaves
+    /// out of its reports, from frames as they are kept on (FB-267).
+    link_endpoints: feedback::ActiveEndpoints,
     /// The computer's one sign-in, whichever operator is chosen (ADR-0033).
     account_identity: uxduck_contracts::dto::account::AccountState,
     /// The operator a local operator connection chose last: a window that
@@ -600,6 +606,14 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
+    /// The endpoints of the links configured now, for the host to leave out
+    /// of the diagnostics it keeps for a report, such as its log lines
+    /// (FB-267).
+    #[must_use]
+    pub fn link_endpoints(&self) -> feedback::ActiveEndpoints {
+        self.link_endpoints.clone()
+    }
+
     /// Starts from what was loaded. `loaded.state.seq` is where the sequence
     /// continues.
     #[must_use]
@@ -673,6 +687,8 @@ impl Engine {
             agent_filing: BTreeMap::new(),
             awaiting_account: BTreeMap::new(),
             awaiting_identity: std::collections::BTreeSet::new(),
+            heard_links: BTreeSet::new(),
+            link_endpoints: feedback::ActiveEndpoints::default(),
             account_identity: uxduck_contracts::dto::account::AccountState::default(),
             chosen_operator: None,
             hosted_models: None,
@@ -746,6 +762,9 @@ impl Engine {
             heard_provisionally: BTreeSet::new(),
         };
         engine.started_us = engine.clock.now_us();
+        engine
+            .link_endpoints
+            .set(engine.state.links.values().map(|link| &link.kind));
         // A phone forgotten just before a crash may have left its session
         // behind (S97): without its record it is no longer paired.
         let clients = engine.state.clients.clone();
@@ -997,8 +1016,21 @@ impl Engine {
             change,
         };
         self.persistence.append(&event);
+        let endpoints_change = match &event.change {
+            Change::LinkUpserted { link } => self
+                .state
+                .links
+                .get(&link.id)
+                .is_none_or(|before| before.kind != link.kind),
+            Change::LinkRemoved { id } => self.state.links.contains_key(id),
+            _ => false,
+        };
         // Built with `seq + 1`, so it always applies.
         let _ = self.state.apply(&event);
+        if endpoints_change {
+            self.link_endpoints
+                .set(self.state.links.values().map(|link| &link.kind));
+        }
         self.dialects_after(&event.change);
         self.gripper_after(&event.change);
         self.plan_run_after(&event.change);
@@ -1174,10 +1206,20 @@ impl Engine {
             payload: parsed.payload.clone(),
         };
         if self.tracers.is_empty() {
-            feedback::keep(&mut connection.recent, frame, now);
+            feedback::keep(
+                &mut connection.recent,
+                frame,
+                now,
+                &self.link_endpoints.read(),
+            );
             return;
         }
-        feedback::keep(&mut connection.recent, frame.clone(), now);
+        feedback::keep(
+            &mut connection.recent,
+            frame.clone(),
+            now,
+            &self.link_endpoints.read(),
+        );
         let notification =
             rpc::router::notification(&ServerNotification::TraceFrame(frame)).to_string();
         for tracer in self.tracers.iter().filter(|tracer| **tracer != id) {

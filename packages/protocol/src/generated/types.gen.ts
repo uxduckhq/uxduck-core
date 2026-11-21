@@ -5822,7 +5822,9 @@ export type DaemonLogsParams = {
     level?: string | null;
     limit?: number | null;
     /**
-     * Literal substring, before redaction; never interpreted as code or regex.
+     * Literal substring of the text as the daemon keeps it: without the
+     * endpoints of the links configured when each line was kept, before
+     * the rest of the redaction. Never interpreted as code or regex.
      */
     query?: string | null;
     toUs?: number | null;
@@ -9956,6 +9958,12 @@ export type Link = {
      * Keeps the daemon running when the last window closes.
      */
     keepAlive: boolean;
+    /**
+     * A vehicle link that has stayed down for a while without reaching a
+     * vehicle in this run of the daemon, so its address may be one the
+     * vehicle no longer uses (FB-267).
+     */
+    keepsFailing?: boolean;
     kind: LinkKind;
     /**
      * A simulated vehicle started in the air: how the take-off that its
@@ -9977,9 +9985,14 @@ export type Link = {
     sceneryHit?: SceneryHit | null;
     status: LinkStatus;
     /**
-     * Why it is down or refused, such as the bind error.
+     * Why it is down or refused, such as the bind error, in plain words.
      */
     statusDetail?: string | null;
+    /**
+     * What the operating system said when it failed, which `statusDetail`
+     * puts in plain words, for Connection diagnostics (FB-267).
+     */
+    statusError?: LinkFailure | null;
     topology: Topology;
     /**
      * For a forward: the vehicles whose traffic it carries; empty for all.
@@ -10054,6 +10067,25 @@ export type LinkDiagnoseResult = {
     transport?: TransportDiagnostics | null;
     vehicles: Array<Vehicle>;
 };
+
+/**
+ * A link's failure as the operating system reported it (FB-267).
+ */
+export type LinkFailure = {
+    kind: LinkFailureKind;
+    /**
+     * The system's own message, kept whole.
+     */
+    message: string;
+    operation: LinkOperation;
+    osCode?: number | null;
+};
+
+/**
+ * What kind of failure stopped a link, whatever the operating system
+ * (FB-267).
+ */
+export type LinkFailureKind = 'no-answer' | 'refused' | 'reset' | 'aborted' | 'host-unreachable' | 'network-unreachable' | 'address-not-available' | 'address-in-use' | 'name-not-found' | 'device-missing' | 'device-unavailable' | 'device-busy' | 'access-denied' | 'other';
 
 /**
  * How the link to a vehicle is doing (S261, ADR-0004 2026-11-01), as
@@ -10209,6 +10241,11 @@ export type LinkKind = {
 export type LinkListResult = {
     links: Array<Link>;
 };
+
+/**
+ * What a link was doing when it failed (FB-267).
+ */
+export type LinkOperation = 'connect' | 'connected' | 'lookup' | 'bind' | 'socket' | 'datagram' | 'device';
 
 export type LinkPolicy = 'read' | 'read-write';
 

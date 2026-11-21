@@ -369,6 +369,9 @@ fn recipe(link: &Link) -> Link {
     Link {
         status: LinkStatus::Configured,
         status_detail: None,
+        status_error: None,
+        down_since_monotonic_us: None,
+        keeps_failing: false,
         keep_alive: false,
         launch: None,
         paused: false,
