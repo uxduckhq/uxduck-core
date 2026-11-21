@@ -17,7 +17,8 @@ use uxduck_contracts::dto::feedback::{
     BUNDLE_SCHEMA, BundleChatItem, BundleDaemon, BundleLink, BundleNotification, BundleReport,
     BundleVehicle, FeedbackAddParams, FeedbackAttachment, FeedbackBundle, FeedbackFileParams,
     FeedbackFiled, FeedbackKind, FeedbackLeftOut, FeedbackProgress, FeedbackSendParams,
-    FeedbackSendResult, FeedbackSuggestParams, FeedbackVoiceNote, LeftOut, SuggestionCard,
+    FeedbackSendResult, FeedbackSuggestParams, FeedbackUi, FeedbackVoiceNote, LeftOut,
+    SuggestionCard,
 };
 use uxduck_contracts::dto::trace::TraceFrame;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
@@ -162,6 +163,9 @@ pub(crate) fn keep(
         Some("telemetry/update" | "agent/itemDelta" | "trace/frame" | "feedback/progress")
     ) {
         return;
+    }
+    if frame.method.as_deref() == Some("feedback/send") {
+        keep_sent_ui(&mut frame.payload);
     }
     cut_strings(&mut frame.payload);
     let mut named = Endpoints::default();
@@ -335,6 +339,184 @@ const COORDINATE_KEYS: [&str; 8] = [
     "lng",
     "latdeg",
 ];
+
+/// What a map's failure can be called (FB-285), as `MapFailure` and
+/// `MapProvider` serialize.
+const MAP_FAILURES: [&str; 6] = [
+    "tile-load",
+    "style-load",
+    "webgl-context",
+    "render",
+    "worker",
+    "other",
+];
+const MAP_PROVIDERS: [&str; 6] = ["esri", "google", "osm", "terrain", "custom", "other"];
+
+/// A map's problem as UXDuck's page words it: the failure, whose request it
+/// was and the HTTP status, such as `tile-load esri 401`.
+fn is_map_problem(text: &str) -> bool {
+    let mut words = text.split(' ').peekable();
+    if !words
+        .next()
+        .is_some_and(|code| MAP_FAILURES.contains(&code))
+    {
+        return false;
+    }
+    let _provider = words.next_if(|word| MAP_PROVIDERS.contains(word));
+    let status_ok = words
+        .next()
+        .is_none_or(|status| status.len() == 3 && status.parse::<u16>().is_ok_and(is_http_status));
+    status_ok && words.next().is_none()
+}
+
+fn is_http_status(status: u16) -> bool {
+    (100..=599).contains(&status)
+}
+
+/// What else a map says about itself, as `mapRecord.ts` names it: the
+/// engine, the variant and what it draws under the vehicles.
+const MAP_ENGINES: [&str; 2] = ["maplibre", "cesium"];
+const MAP_VARIANTS: [&str; 2] = ["map", "globe"];
+const MAP_BASEMAPS: [&str; 8] = [
+    "esri",
+    "esri-loading",
+    "esri-failed",
+    "no-key",
+    "google",
+    "tiles",
+    "custom",
+    "none",
+];
+
+/// The first word of a GPU's name as browsers give it, such as `ANGLE`,
+/// `Apple` or `Mali` in `Mali-G78`.
+const GPU_VENDORS: [&str; 30] = [
+    "angle",
+    "apple",
+    "intel",
+    "mesa",
+    "nvidia",
+    "geforce",
+    "quadro",
+    "amd",
+    "ati",
+    "radeon",
+    "mali",
+    "adreno",
+    "powervr",
+    "qualcomm",
+    "arm",
+    "llvmpipe",
+    "softpipe",
+    "swiftshader",
+    "google",
+    "microsoft",
+    "webkit",
+    "mozilla",
+    "vmware",
+    "svga",
+    "virgl",
+    "parallels",
+    "vivante",
+    "samsung",
+    "xclipse",
+    "zink",
+];
+
+/// The page sends at most this much of a GPU's name (`webglRenderer.ts`).
+const RENDERER_CHARS: usize = 200;
+
+fn known(value: &str, values: &[&str]) -> String {
+    if values.contains(&value) {
+        value
+    } else {
+        "other"
+    }
+    .to_owned()
+}
+
+/// A map's size in CSS pixels, such as `822×165`.
+fn is_size(text: &str) -> bool {
+    text.split_once('×').is_some_and(|(width, height)| {
+        [width, height]
+            .iter()
+            .all(|side| !side.is_empty() && side.bytes().all(|byte| byte.is_ascii_digit()))
+    })
+}
+
+/// A GPU's name as a browser words it, such as `ANGLE (Intel, Intel(R) UHD
+/// Graphics 620 (0x00003EA0) Direct3D11 vs_5_0 ps_5_0, D3D11)`: a known
+/// vendor first, and no address, host or coordinate.
+fn is_renderer(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let first = text
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .find(|word| !word.is_empty())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let host = bytes
+        .windows(3)
+        .any(|w| w[1] == b'.' && w[0].is_ascii_alphabetic() && w[2].is_ascii_alphabetic());
+    let coordinate = bytes
+        .windows(5)
+        .any(|w| w[0] == b'.' && w[1..].iter().all(u8::is_ascii_digit));
+    text.len() <= RENDERER_CHARS
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || b" ()_,.+-:".contains(byte))
+        && GPU_VENDORS.contains(&first.as_str())
+        && !host
+        && !coordinate
+}
+
+/// The page's own account as the bundle keeps it (FB-285). Each map's
+/// problems keep only what UXDuck's page words: an older or a hostile page
+/// could send a place, coordinates or a key in their place. A failure's
+/// status is an HTTP status or nothing. The engine, variant, basemap, size
+/// and GPU read as the page names them, or `other`.
+fn kept_ui(ui: &FeedbackUi) -> FeedbackUi {
+    let mut ui = ui.clone();
+    for map in &mut ui.maps {
+        map.engine = known(&map.engine, &MAP_ENGINES);
+        map.variant = known(&map.variant, &MAP_VARIANTS);
+        map.basemap = known(&map.basemap, &MAP_BASEMAPS);
+        if !is_size(&map.size) {
+            "other".clone_into(&mut map.size);
+        }
+        if let Some(renderer) = map
+            .renderer
+            .as_mut()
+            .filter(|renderer| !is_renderer(renderer))
+        {
+            "other".clone_into(renderer);
+        }
+        map.problems.retain(|problem| is_map_problem(problem));
+        if let Some(error) = &mut map.last_error {
+            error.status = error.status.filter(|status| is_http_status(*status));
+        }
+    }
+    ui
+}
+
+/// A `feedback/send` frame in the trace keeps the same window state the
+/// bundle's `ui` does, so a map problem the bundle drops does not come back
+/// through the request that carried it. A `ui` that does not parse keeps no maps.
+fn keep_sent_ui(payload: &mut Value) {
+    let Some(ui) = payload.pointer_mut("/params/ui") else {
+        return;
+    };
+    let kept = serde_json::from_value::<FeedbackUi>(ui.clone())
+        .ok()
+        .and_then(|parsed| serde_json::to_value(kept_ui(&parsed)).ok());
+    match kept {
+        Some(kept) => *ui = kept,
+        None => {
+            if let Some(object) = ui.as_object_mut() {
+                object.remove("maps");
+            }
+        }
+    }
+}
 
 /// Scrubs a bundle in place (ADR-0013): see the module comment.
 pub fn scrub(value: &mut Value) {
@@ -1580,7 +1762,7 @@ impl Engine {
                 platform: None,
                 arch: None,
             },
-            ui: params.ui.clone(),
+            ui: kept_ui(&params.ui),
             daemon: Some(BundleDaemon {
                 seq: self.state.seq,
                 uptime_s: now.saturating_sub(self.started_us) / 1_000_000,
@@ -2175,6 +2357,89 @@ mod tests {
         assert_eq!(recent[2].payload, listener);
     }
 
+    /// FB-285: a map's problems keep only UXDuck's own words for a failure.
+    #[test]
+    fn a_maps_problems_keep_only_a_failures_kind_provider_and_status() {
+        for kept in [
+            "tile-load esri 401",
+            "webgl-context",
+            "render",
+            "style-load google",
+            "other 503",
+        ] {
+            assert!(is_map_problem(kept), "{kept}");
+        }
+        for dropped in [
+            "401 basemapstyles-api.arcgis.com/arcgis/rest/services/styles/v2/styles/arcgis/imagery",
+            "failed map: Invalid LngLat (-122.42, 37.77) near San Francisco",
+            "tile-load esri 401 key=secret",
+            "tile-load esri 99",
+            "tile-load esri 600",
+            "tile-load esri 0401",
+            "tile-load San Francisco",
+            "webgl context lost",
+            "",
+        ] {
+            assert!(!is_map_problem(dropped), "{dropped}");
+        }
+    }
+
+    #[test]
+    fn a_maps_other_fields_keep_only_what_the_page_names() {
+        for kept in [
+            "ANGLE (Intel, Intel(R) UHD Graphics 620 (0x00003EA0) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+            "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+            "Mali-G78",
+            "Adreno (TM) 650",
+            "llvmpipe (LLVM 15.0.7, 256 bits)",
+        ] {
+            assert!(is_renderer(kept), "{kept}");
+        }
+        for dropped in [
+            "Mozilla/5.0 near Fillmore",
+            "ANGLE (Apple, tiles.example.net)",
+            "ANGLE (Apple, at -122.4194 37.7749)",
+            "ANGLE (Apple, key=sekrit)",
+            "Hayes Valley GPU",
+            "",
+        ] {
+            assert!(!is_renderer(dropped), "{dropped}");
+        }
+        for (size, kept) in [
+            ("822×165", true),
+            ("0×0", true),
+            ("822x165", false),
+            ("822×", false),
+            ("822×165 near Dogpatch", false),
+        ] {
+            assert_eq!(is_size(size), kept, "{size}");
+        }
+        let ui: FeedbackUi = serde_json::from_value(json!({
+            "route": "/", "panes": ["map"], "theme": "dark", "density": "comfortable",
+            "mapEngine": "maplibre", "actions": [], "appVersion": "0.1.0", "locale": "en",
+            "maps": [{
+                "engine": "maplibre at Pier 39",
+                "variant": "globe",
+                "size": "Dogpatch",
+                "basemap": "https://tiles.example.net/{z}/{x}/{y}.png",
+                "renderer": "Hayes Valley GPU",
+            }],
+        }))
+        .unwrap();
+        let map = &kept_ui(&ui).maps[0];
+        assert_eq!(
+            (
+                map.engine.as_str(),
+                map.variant.as_str(),
+                map.size.as_str(),
+                map.basemap.as_str()
+            ),
+            ("other", "globe", "other", "other")
+        );
+        assert_eq!(map.renderer.as_deref(), Some("other"));
+    }
+
     #[test]
     fn scrubbing_keeps_what_the_maps_say_about_themselves() {
         let failed = "failed basemapstyles-api.arcgis.com/arcgis/rest/services/styles/v2/styles/arcgis/imagery";
@@ -2190,6 +2455,19 @@ mod tests {
                     "basemap": "esri-failed",
                     "renderer": renderer,
                     "problems": [failed, tile],
+                }, {
+                    "engine": "maplibre",
+                    "variant": "map",
+                    "size": "498×268",
+                    "canvas": { "width": 822, "height": 165, "pixelWidth": 1644, "pixelHeight": 330 },
+                    "basemap": "esri",
+                    "contextLostAtUs": 1_763_700_000_000_000_u64,
+                    "contextRestoredAtUs": 1_763_700_001_000_000_u64,
+                    "lastFrameAtUs": 1_763_700_002_000_000_u64,
+                    "recentFrames": 0,
+                    "problems": ["webgl-context", "tile-load esri 401", "render"],
+                    "lastError": { "code": "render", "atUs": 1_763_700_000_000_000_u64 },
+                    "closedAtUs": 1_763_700_003_000_000_u64,
                 }],
                 "mapKeys": [{ "name": "arcgis", "state": "fetched" }, { "name": "google", "state": "saved", "failure": "unreachable" }],
             },

@@ -72,8 +72,13 @@ pub struct FeedbackMap {
     pub engine: String,
     /// `map`, or `globe` for the home's decorative one.
     pub variant: String,
-    /// The map's size in CSS pixels, such as `822×165`.
+    /// The map's size in CSS pixels, such as `822×165`; a closed map's as
+    /// it was last laid out.
     pub size: String,
+    /// Its canvas: one whose size differs from `size` was not resized with
+    /// the map and draws a stale picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas: Option<FeedbackCanvas>,
     /// What it draws under the vehicles: `esri`, `esri-loading`,
     /// `esri-failed`, `no-key`, `google`, `tiles`, `custom` (a tile server
     /// the person added) or `none`.
@@ -81,16 +86,103 @@ pub struct FeedbackMap {
     /// The GPU as the browser names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renderer: Option<String>,
+    /// WebGL lost the map's context and has not given it back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_lost: Option<bool>,
+    /// When WebGL last lost the map's context, in microseconds since the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub context_lost_at_us: Option<u64>,
+    /// When the browser last gave the context back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub context_restored_at_us: Option<u64>,
     /// Drawing threw and the map stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped: Option<bool>,
-    /// The last requests refused or failed, such as `failed
-    /// basemapstyles-api.arcgis.com/arcgis/rest/services/styles/v2/styles/arcgis/imagery`:
-    /// no query, and `{n}` for tile numbers.
+    /// When the map last drew a frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_frame_at_us: Option<u64>,
+    /// Frames drawn in the five seconds before the report, or before it
+    /// closed. A healthy 2D map draws none while nothing on it changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_frames: Option<u32>,
+    /// The last failures, as `MapFailure` and `MapProvider` name them with
+    /// the HTTP status, such as `tile-load esri 401`. No address or error
+    /// text.
     #[serde(default)]
     pub problems: Vec<String>,
+    /// The last failure, by kind only (FB-285).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<FeedbackMapError>,
+    /// When the map was closed: a map closed in the five minutes before the
+    /// report keeps its last record, so one closed to recover from a
+    /// problem still says what it was (FB-285).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub closed_at_us: Option<u64>,
+}
+
+/// A map's canvas: its size in CSS pixels, and its drawing buffer's in
+/// device pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackCanvas {
+    pub width: u32,
+    pub height: u32,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+}
+
+/// A map's failure as feedback keeps it: its kind, whose it was and the
+/// HTTP status. Never an address or an error's text, which can hold a key
+/// or a place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackMapError {
+    pub code: MapFailure,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<MapProvider>,
+    /// An HTTP status, 100 to 599. The daemon leaves out any other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 100, max = 599))]
+    pub status: Option<u16>,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub at_us: u64,
+}
+
+/// What failed on a map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum MapFailure {
+    /// A tile, or ground heights.
+    TileLoad,
+    /// The basemap's style or service.
+    StyleLoad,
+    WebglContext,
+    /// Drawing threw and the map stopped.
+    Render,
+    Worker,
+    /// Anything else, or a kind this UXDuck does not know.
+    #[serde(other)]
+    Other,
+}
+
+/// Whose request failed, by its host alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum MapProvider {
+    Esri,
+    Google,
+    Osm,
+    /// Ground heights.
+    Terrain,
+    /// A tile server the person added.
+    Custom,
+    /// Anyone else, or one this UXDuck does not know.
+    #[serde(other)]
+    Other,
 }
 
 /// A map key the page fetches from the UXDuck API.
@@ -676,4 +768,47 @@ pub struct BundleChatItem {
     /// `user-message`, `agent-message`, `tool-call` or `error`.
     pub kind: String,
     pub text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FB-285: what a page says about a map's failure reaches a report only
+    /// as a kind, whose it was and a status. Words or an address in their
+    /// place are no kind UXDuck knows, and a canvas is numbers.
+    #[test]
+    fn a_maps_failure_and_canvas_keep_their_shape() {
+        let map: FeedbackMap = serde_json::from_value(serde_json::json!({
+            "engine": "maplibre",
+            "variant": "map",
+            "size": "822×165",
+            "basemap": "esri",
+            "lastError": {
+                "code": "Forbidden: https://tiles.example.com/abc123/1/2/3.png?key=secret",
+                "provider": "San Francisco",
+                "status": 403,
+                "atUs": 1_763_700_000_000_000_u64,
+            },
+        }))
+        .unwrap();
+        let error = map.last_error.unwrap();
+        assert_eq!(error.code, MapFailure::Other);
+        assert_eq!(error.provider, Some(MapProvider::Other));
+        assert_eq!(error.status, Some(403));
+        assert!(!serde_json::to_string(&error).unwrap().contains("secret"));
+
+        for wrong in [
+            serde_json::json!({ "code": "tile-load", "atUs": 1, "status": "403 https://x" }),
+            serde_json::json!({ "code": { "text": "secret" }, "atUs": 1 }),
+        ] {
+            assert!(serde_json::from_value::<FeedbackMapError>(wrong).is_err());
+        }
+        assert!(
+            serde_json::from_value::<FeedbackCanvas>(serde_json::json!({
+                "width": "822 at San Francisco", "height": 165, "pixelWidth": 1644, "pixelHeight": 330,
+            }))
+            .is_err()
+        );
+    }
 }

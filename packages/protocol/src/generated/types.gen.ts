@@ -7005,6 +7005,17 @@ export type FeedbackBundle = {
 };
 
 /**
+ * A map's canvas: its size in CSS pixels, and its drawing buffer's in
+ * device pixels.
+ */
+export type FeedbackCanvas = {
+    height: number;
+    pixelHeight: number;
+    pixelWidth: number;
+    width: number;
+};
+
+/**
  * A report the agent files by itself (S294), from a chat or over MCP: what
  * is broken, missing or awkward in UXDuck, in words about UXDuck alone.
  * Only these words are sent, anonymously: no screenshot, chat, technical
@@ -7104,23 +7115,59 @@ export type FeedbackMap = {
      * the person added) or `none`.
      */
     basemap: string;
+    /**
+     * Its canvas: one whose size differs from `size` was not resized with
+     * the map and draws a stale picture.
+     */
+    canvas?: FeedbackCanvas | null;
+    /**
+     * When the map was closed: a map closed in the five minutes before the
+     * report keeps its last record, so one closed to recover from a
+     * problem still says what it was (FB-285).
+     */
+    closedAtUs?: number | null;
+    /**
+     * WebGL lost the map's context and has not given it back.
+     */
     contextLost?: boolean | null;
+    /**
+     * When WebGL last lost the map's context, in microseconds since the epoch.
+     */
+    contextLostAtUs?: number | null;
+    /**
+     * When the browser last gave the context back.
+     */
+    contextRestoredAtUs?: number | null;
     /**
      * `maplibre` (the 2D map) or `cesium` (the 3D map).
      */
     engine: string;
     /**
-     * The last requests refused or failed, such as `failed
-     * basemapstyles-api.arcgis.com/arcgis/rest/services/styles/v2/styles/arcgis/imagery`:
-     * no query, and `{n}` for tile numbers.
+     * The last failure, by kind only (FB-285).
+     */
+    lastError?: FeedbackMapError | null;
+    /**
+     * When the map last drew a frame.
+     */
+    lastFrameAtUs?: number | null;
+    /**
+     * The last failures, as `MapFailure` and `MapProvider` name them with
+     * the HTTP status, such as `tile-load esri 401`. No address or error
+     * text.
      */
     problems?: Array<string>;
+    /**
+     * Frames drawn in the five seconds before the report, or before it
+     * closed. A healthy 2D map draws none while nothing on it changes.
+     */
+    recentFrames?: number | null;
     /**
      * The GPU as the browser names it.
      */
     renderer?: string | null;
     /**
-     * The map's size in CSS pixels, such as `822×165`.
+     * The map's size in CSS pixels, such as `822×165`; a closed map's as
+     * it was last laid out.
      */
     size: string;
     /**
@@ -7131,6 +7178,21 @@ export type FeedbackMap = {
      * `map`, or `globe` for the home's decorative one.
      */
     variant: string;
+};
+
+/**
+ * A map's failure as feedback keeps it: its kind, whose it was and the
+ * HTTP status. Never an address or an error's text, which can hold a key
+ * or a place.
+ */
+export type FeedbackMapError = {
+    atUs: number;
+    code: MapFailure;
+    provider?: MapProvider | null;
+    /**
+     * An HTTP status, 100 to 599. The daemon leaves out any other.
+     */
+    status?: number | null;
 };
 
 /**
@@ -10550,6 +10612,11 @@ export type MapCameraOptions = {
 };
 
 /**
+ * What failed on a map.
+ */
+export type MapFailure = 'webgl-context' | 'worker' | 'tile-load' | 'style-load' | 'render' | 'other';
+
+/**
  * Something a plugin draws on the map (X4): a `GeoJSON` geometry in
  * longitude and latitude, replaced whenever the plugin sends the same id
  * again. Drawn in the plugin's own layer, never as a panel over the map.
@@ -10611,6 +10678,11 @@ export type MapFramePoint = {
  * How the map drew the ground.
  */
 export type MapProjection = 'web-mercator' | 'perspective';
+
+/**
+ * Whose request failed, by its host alone.
+ */
+export type MapProvider = 'esri' | 'google' | 'osm' | 'terrain' | 'custom' | 'other';
 
 export type MapViewpoint = 'cockpit' | 'rear' | 'tail' | 'orbit' | 'behind' | 'below' | 'camera' | 'home' | 'above';
 
