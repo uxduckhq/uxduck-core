@@ -48,7 +48,7 @@ Only warnings and worse become notifications; **Vehicle messages that notify** i
 
 ## Instruments
 
-Speed, altitude and heading as large numbers, each with a thin rail showing where it will be in about five seconds, over a quiet horizon. The altitude is the one chosen in **Settings › Altitude**, above home unless you change it, with its frame named beside it. A ring with wings shows where the vehicle is going, so drift in the wind or a boat's slip shows at once. A chip appears only when the battery, GPS, EKF, vibration or radio is past its threshold, the worst first. Rovers and boats leave out the pitch ladder and climb and show the next waypoint; submarines show depth.
+Speed, altitude and heading as large numbers, each with a thin rail showing where it will be in about five seconds, over a quiet horizon. The altitude is the one chosen in **Settings › Altitude**, above home unless you change it, with its frame named beside it. A ring with wings shows where the vehicle is going, so drift in the wind or a boat's slip shows at once. A chip appears only when the battery, GPS, EKF, vibration or radio is past its threshold, the worst first. Rovers and boats leave out the climb and show the next waypoint, and submarines show depth.
 
 ## Instruments (classic)
 
