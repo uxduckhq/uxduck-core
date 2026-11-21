@@ -7,6 +7,7 @@
 //! for serial and TCP links from S7).
 
 pub mod autopilot;
+pub mod autopilot_log;
 pub mod bootloader;
 pub mod camera;
 pub mod camera_control;

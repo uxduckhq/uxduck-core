@@ -91,6 +91,46 @@ pub struct CopiedLog {
     pub card: String,
     #[schemars(schema_with = "crate::safe::integer")]
     pub bytes: u64,
+    /// What it covers, once UXDuck has read it (S426). Absent while it is
+    /// being read, and when it could not be.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<LogSpan>,
+    /// Why it could not be read, so it matches no flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<String>,
+    /// The Logbook's flights it covers, newest first: its vehicle's system
+    /// id, and any of their armed time inside its span on GPS time. Only
+    /// `logs/cards` fills it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flights: Vec<LogFlight>,
+}
+
+/// The vehicle an autopilot log names and the time it covers (S426).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LogSpan {
+    /// `SYSID_THISMAV`, or PX4's `MAV_SYS_ID`, else 1.
+    pub system_id: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware: Option<String>,
+    /// Its times are GPS time. Without it they count from boot, and the log
+    /// matches no flight.
+    pub gps_time: bool,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub from_us: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub to_us: u64,
+}
+
+/// A Logbook flight an autopilot log covers (S426).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFlight {
+    pub id: String,
+    /// Its name, else its vehicle's.
+    pub name: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub armed_at_us: u64,
 }
 
 /// Result of `logs/cards` and `logs/copyCard`.

@@ -5723,8 +5723,23 @@ export type CopiedLog = {
      * The card and the day it was copied, such as "NO NAME-2026-10-28".
      */
     card: string;
+    /**
+     * The Logbook's flights it covers, newest first: its vehicle's system
+     * id, and any of their armed time inside its span on GPS time. Only
+     * `logs/cards` fills it.
+     */
+    flights?: Array<LogFlight>;
     name: string;
     path: string;
+    /**
+     * What it covers, once UXDuck has read it (S426). Absent while it is
+     * being read, and when it could not be.
+     */
+    span?: LogSpan | null;
+    /**
+     * Why it could not be read, so it matches no flight.
+     */
+    unread?: string | null;
 };
 
 /**
@@ -7863,6 +7878,13 @@ export type Fitness = 'good' | 'acceptable' | 'poor';
 export type Flight = {
     airUs: number;
     armedAtUs: number;
+    /**
+     * The autopilot's own logs copied off its card that cover it (S426),
+     * as `flight/list` matches them: its vehicle's system id, and any of
+     * its armed time inside the log's span on GPS time. This computer's
+     * alone: never in the account.
+     */
+    autopilotLogs?: Array<FlightAutopilotLog>;
     batteryEndPct?: number | null;
     batteryStartPct?: number | null;
     /**
@@ -7971,6 +7993,15 @@ export type FlightAddVideoParams = {
      * The file on the computer running UXDuck: MP4, MOV, M4V or MPEG-TS.
      */
     path?: string;
+};
+
+/**
+ * An autopilot log copied off a card that covers a flight (S426), to
+ * replay with it by its `path`.
+ */
+export type FlightAutopilotLog = {
+    name: string;
+    path: string;
 };
 
 /**
@@ -10446,6 +10477,18 @@ export type LogCopyCardParams = {
 };
 
 /**
+ * A Logbook flight an autopilot log covers (S426).
+ */
+export type LogFlight = {
+    armedAtUs: number;
+    id: string;
+    /**
+     * Its name, else its vehicle's.
+     */
+    name: string;
+};
+
+/**
  * One message type an autopilot log holds, as logged: a DataFlash message
  * or a PX4 topic.
  */
@@ -10465,6 +10508,24 @@ export type LogMessage = {
      */
     rateHz: number;
     records: number;
+};
+
+/**
+ * The vehicle an autopilot log names and the time it covers (S426).
+ */
+export type LogSpan = {
+    firmware?: string | null;
+    fromUs: number;
+    /**
+     * Its times are GPS time. Without it they count from boot, and the log
+     * matches no flight.
+     */
+    gpsTime: boolean;
+    /**
+     * `SYSID_THISMAV`, or PX4's `MAV_SYS_ID`, else 1.
+     */
+    systemId: number;
+    toUs: number;
 };
 
 /**

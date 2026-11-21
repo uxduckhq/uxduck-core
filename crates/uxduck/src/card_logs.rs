@@ -4,12 +4,14 @@
 //! (`<data>/logs-from-cards/<card>-<date>/`), where Flights lists them to
 //! replay. Nothing is fetched from a vehicle: people pull the
 //! card, since nothing reads a log over MAVLink quickly (maintainer,
-//! 2026-10-28).
+//! 2026-10-28). Each copy is read once for the vehicle and the time it
+//! covers (S426), so the Logbook says which flight it belongs to.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use uxduck_contracts::dto::replay::{CopiedLog, LogCard, LogCardsResult};
+use uxduck_contracts::dto::replay::{CopiedLog, LogCard, LogCardsResult, LogSpan};
 
 /// Where the copies go.
 #[must_use]
@@ -159,6 +161,7 @@ pub fn copied(data_dir: &Path) -> Vec<CopiedLog> {
                     name: file.file_name()?.to_string_lossy().into_owned(),
                     card,
                     bytes: meta.len(),
+                    ..CopiedLog::default()
                 },
             ))
         })
@@ -252,13 +255,125 @@ impl Copying {
     }
 }
 
+/// What a copied log covers, as read once, with the size it had then.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Read {
+    bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    span: Option<LogSpan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unread: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct SpansNow {
+    loaded: bool,
+    reading: bool,
+    /// By path.
+    read: BTreeMap<String, Read>,
+}
+
+/// What each copied log covers (S426), read once on a thread of its own,
+/// since a log can be hundreds of megabytes, and kept in
+/// `<data>/logs-from-cards/spans.json` so it is not read again.
+#[derive(Clone, Debug, Default)]
+pub struct Spans(Arc<Mutex<SpansNow>>);
+
+fn spans_file(data_dir: &Path) -> PathBuf {
+    dir(data_dir).join("spans.json")
+}
+
+fn read_span(path: &str, bytes: u64) -> Read {
+    let read = std::fs::read(path)
+        .map_err(|e| e.to_string())
+        .and_then(|log| uxduck_mavlink::autopilot_log::span(&log));
+    match read {
+        Ok(span) => Read {
+            bytes,
+            span: Some(LogSpan {
+                system_id: span.system_id,
+                firmware: span.firmware,
+                gps_time: span.gps_time,
+                from_us: span.from_us,
+                to_us: span.to_us,
+            }),
+            unread: None,
+        },
+        Err(why) => Read {
+            bytes,
+            span: None,
+            unread: Some(why),
+        },
+    }
+}
+
+impl Spans {
+    /// Each log's span or why it could not be read, from what is known. The
+    /// logs not read yet, or changed since, are read on a thread, and have
+    /// neither until it is done.
+    pub fn fill(&self, data_dir: &Path, logs: &mut [CopiedLog]) {
+        let mut now = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !now.loaded {
+            now.loaded = true;
+            now.read = std::fs::read(spans_file(data_dir))
+                .ok()
+                .and_then(|json| serde_json::from_slice(&json).ok())
+                .unwrap_or_default();
+        }
+        let mut unread = Vec::new();
+        for log in logs.iter_mut() {
+            match now
+                .read
+                .get(&log.path)
+                .filter(|read| read.bytes == log.bytes)
+            {
+                Some(read) => {
+                    log.span.clone_from(&read.span);
+                    log.unread.clone_from(&read.unread);
+                }
+                None => unread.push((log.path.clone(), log.bytes)),
+            }
+        }
+        if unread.is_empty() || now.reading {
+            return;
+        }
+        now.reading = true;
+        let state = self.0.clone();
+        let file = spans_file(data_dir);
+        std::thread::spawn(move || {
+            for (path, bytes) in unread {
+                let read = read_span(&path, bytes);
+                let mut now = state.lock().unwrap_or_else(PoisonError::into_inner);
+                now.read.insert(path, read);
+                let saved = serde_json::to_vec(&now.read)
+                    .map_err(|e| e.to_string())
+                    .and_then(|json| std::fs::write(&file, json).map_err(|e| e.to_string()));
+                if let Err(error) = saved {
+                    tracing::warn!(%error, "logs from cards: what each covers could not be kept");
+                }
+            }
+            state.lock().unwrap_or_else(PoisonError::into_inner).reading = false;
+        });
+    }
+}
+
+/// The logs copied off cards, newest first, with what each covers once
+/// read (S426).
+#[must_use]
+pub fn copied_with_spans(data_dir: &Path, spans: &Spans) -> Vec<CopiedLog> {
+    let mut logs = copied(data_dir);
+    spans.fill(data_dir, &mut logs);
+    logs
+}
+
 /// What `logs/cards` answers.
 #[must_use]
-pub fn status(data_dir: &Path, copying: &Copying) -> LogCardsResult {
+pub fn status(data_dir: &Path, copying: &Copying, spans: &Spans) -> LogCardsResult {
     let now = copying.now();
     LogCardsResult {
         cards: cards_in(&mount_roots()),
-        copied: copied(data_dir),
+        copied: copied_with_spans(data_dir, spans),
         copying: now.as_ref().map(|(card, _, _, _)| card.clone()),
         done: now.as_ref().map_or(0, |n| n.1),
         of: now.as_ref().map_or(0, |n| n.2),
@@ -301,6 +416,42 @@ mod tests {
         let logs = copied(data.path());
         assert_eq!(logs.len(), 2);
         assert!(logs.iter().all(|l| l.card == "NO NAME-2026-10-28"));
+    }
+
+    /// S426: each copy is read once, on a thread, for its vehicle and its
+    /// time on GPS time, and what was read is kept for the next start.
+    #[test]
+    fn each_copy_is_read_once_for_what_it_covers_and_kept() {
+        let data = tempfile::tempdir().unwrap();
+        let into = dir(data.path()).join("NO NAME-2026-11-20");
+        std::fs::create_dir_all(&into).unwrap();
+        std::fs::write(
+            into.join("00000001.BIN"),
+            uxduck_mavlink::dataflash::fixture::flight(),
+        )
+        .unwrap();
+        std::fs::write(into.join("00000002.BIN"), b"not a log").unwrap();
+        let spans = Spans::default();
+        let first = copied_with_spans(data.path(), &spans);
+        assert!(first.iter().all(|l| l.span.is_none() && l.unread.is_none()));
+        let mut logs = first;
+        for _ in 0..500 {
+            logs = copied_with_spans(data.path(), &spans);
+            if logs.iter().all(|l| l.span.is_some() || l.unread.is_some()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let log = |name: &str| logs.iter().find(|l| l.name == name).unwrap().clone();
+        let span = log("00000001.BIN").span.unwrap();
+        assert!(span.gps_time && span.from_us < span.to_us, "{span:?}");
+        assert_eq!(
+            log("00000002.BIN").unread.as_deref(),
+            Some("This is not an ArduPilot .bin or a PX4 .ulg log.")
+        );
+        // Kept: a new start knows them at once, without reading them.
+        let again = copied_with_spans(data.path(), &Spans::default());
+        assert_eq!(again, logs);
     }
 
     #[test]

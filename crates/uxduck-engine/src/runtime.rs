@@ -908,6 +908,12 @@ pub trait System: Send {
         let _ = card;
         Err("SD cards are read by UXDuck Desktop.".into())
     }
+    /// The logs copied off cards, newest first, each with what it covers
+    /// once read (S426), for `flight/list` to match to its flights. Never
+    /// reads a log: one not read yet has no span.
+    fn copied_logs(&self) -> Vec<uxduck_contracts::dto::replay::CopiedLog> {
+        Vec::new()
+    }
     /// The tlog a link is writing and where its next record goes, for a
     /// flight beginning now (ADR-0039 R10). None where no tlogs are kept.
     fn tlog_position(&self, link_id: &str) -> Option<(String, u64)> {

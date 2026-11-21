@@ -29,6 +29,8 @@ pub struct Host {
     desktop_app: std::sync::Arc<crate::desktop_app::DesktopApp>,
     /// A card's logs being copied (S212).
     card_copying: crate::card_logs::Copying,
+    /// What each log copied off a card covers (S426).
+    card_spans: crate::card_logs::Spans,
     /// Flights in other apps' tlogs (S215).
     found_flights: crate::found_flights::Found,
     /// Where work on a replay's log goes to be done off the engine's task
@@ -74,6 +76,7 @@ impl Host {
             catalogue,
             desktop_app,
             card_copying: crate::card_logs::Copying::default(),
+            card_spans: crate::card_logs::Spans::default(),
             found_flights: crate::found_flights::Found::new(data_dir),
             replay_work,
             camera_definitions,
@@ -757,7 +760,15 @@ impl System for Host {
     }
 
     fn log_cards(&mut self) -> Result<uxduck_contracts::dto::replay::LogCardsResult, String> {
-        Ok(crate::card_logs::status(&self.data_dir, &self.card_copying))
+        Ok(crate::card_logs::status(
+            &self.data_dir,
+            &self.card_copying,
+            &self.card_spans,
+        ))
+    }
+
+    fn copied_logs(&self) -> Vec<uxduck_contracts::dto::replay::CopiedLog> {
+        crate::card_logs::copied_with_spans(&self.data_dir, &self.card_spans)
     }
 
     fn copy_card_logs(&mut self, card: &str) -> Result<(), String> {

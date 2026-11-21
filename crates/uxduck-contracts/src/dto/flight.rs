@@ -124,6 +124,21 @@ pub struct Flight {
     /// UXDuck from before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<FlightSize>,
+    /// The autopilot's own logs copied off its card that cover it (S426),
+    /// as `flight/list` matches them: its vehicle's system id, and any of
+    /// its armed time inside the log's span on GPS time. This computer's
+    /// alone: never in the account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub autopilot_logs: Vec<FlightAutopilotLog>,
+}
+
+/// An autopilot log copied off a card that covers a flight (S426), to
+/// replay with it by its `path`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightAutopilotLog {
+    pub path: String,
+    pub name: String,
 }
 
 /// What a flight's recordings take on this computer (FB-148), in bytes.
@@ -652,6 +667,7 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
                 .collect(),
             offload: None,
             size: None,
+            autopilot_logs: Vec::new(),
         }
     }
 }

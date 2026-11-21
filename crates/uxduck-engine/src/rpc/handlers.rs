@@ -496,10 +496,11 @@ pub(crate) fn handle(
         }
         ClientRequest::LogsCards(_) => {
             require(Read)?;
-            let cards = engine
+            let mut cards = engine
                 .system
                 .log_cards()
                 .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            engine.match_copied_logs(&mut cards.copied);
             to_value(&cards)
         }
         ClientRequest::LogsCopyCard(params) => {
@@ -508,10 +509,11 @@ pub(crate) fn handle(
                 .system
                 .copy_card_logs(&params.path)
                 .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
-            let cards = engine
+            let mut cards = engine
                 .system
                 .log_cards()
                 .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            engine.match_copied_logs(&mut cards.copied);
             to_value(&cards)
         }
         request @ (ClientRequest::OperationList(_)

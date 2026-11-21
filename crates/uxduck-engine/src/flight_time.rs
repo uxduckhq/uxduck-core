@@ -609,13 +609,11 @@ impl Engine {
         };
         // What each takes here (FB-148), each link's files read once.
         let mut logs = BTreeMap::new();
+        let copied = self.system.copied_logs();
         Ok(uxduck_contracts::dto::flight::FlightListResult {
             flights: page
                 .into_iter()
-                .map(|flight| uxduck_contracts::dto::flight::Flight {
-                    size: Some(self.flight_size(flight, &mut logs)),
-                    ..self.flight_dto(flight)
-                })
+                .map(|flight| self.listed_flight(flight, &mut logs, &copied))
                 .collect(),
             older,
             totals,
@@ -706,6 +704,66 @@ impl Engine {
             .collect();
         operators.sort_by(|a, b| (&a.name, &a.operator_id).cmp(&(&b.name, &b.operator_id)));
         operators
+    }
+
+    /// An entry as `flight/list` gives it: what it takes here (FB-148) and
+    /// the autopilot logs copied off cards that cover it (S426).
+    fn listed_flight(
+        &self,
+        flight: &Flight,
+        logs: &mut BTreeMap<String, Vec<crate::runtime::LinkLog>>,
+        copied: &[uxduck_contracts::dto::replay::CopiedLog],
+    ) -> uxduck_contracts::dto::flight::Flight {
+        uxduck_contracts::dto::flight::Flight {
+            size: Some(self.flight_size(flight, logs)),
+            autopilot_logs: copied
+                .iter()
+                .filter(|log| self.log_covers(log, flight))
+                .map(|log| uxduck_contracts::dto::flight::FlightAutopilotLog {
+                    path: log.path.clone(),
+                    name: log.name.clone(),
+                })
+                .collect(),
+            ..self.flight_dto(flight)
+        }
+    }
+
+    /// Whether an autopilot log copied off a card covers a flight (S426):
+    /// the system id it names is its vehicle's, and some of the flight's
+    /// armed time is inside the log's span. Only a log on GPS time can be
+    /// placed, and only a flight of a vehicle known here has a system id.
+    fn log_covers(&self, log: &uxduck_contracts::dto::replay::CopiedLog, flight: &Flight) -> bool {
+        let Some(span) = log.span.as_ref().filter(|span| span.gps_time) else {
+            return false;
+        };
+        let Some(vehicle) = self.vehicle(&flight.vehicle_id) else {
+            return false;
+        };
+        let ended = flight.ended_at_us.unwrap_or_else(|| self.clock.now_us());
+        vehicle.system_id == span.system_id
+            && span.from_us <= ended
+            && flight.armed_at_us <= span.to_us
+    }
+
+    /// `logs/cards`: each copied log with the Logbook's flights it covers,
+    /// newest first (S426).
+    pub(crate) fn match_copied_logs(&self, logs: &mut [uxduck_contracts::dto::replay::CopiedLog]) {
+        let mut flights: Vec<&Flight> = self.state.flights.values().collect();
+        flights.sort_by(|a, b| (b.armed_at_us, &b.id).cmp(&(a.armed_at_us, &a.id)));
+        for log in logs {
+            log.flights = flights
+                .iter()
+                .filter(|flight| self.log_covers(log, flight))
+                .map(|flight| uxduck_contracts::dto::replay::LogFlight {
+                    id: flight.id.clone(),
+                    name: flight
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| flight.vehicle_name.clone()),
+                    armed_at_us: flight.armed_at_us,
+                })
+                .collect();
+        }
     }
 
     fn flight_dto(&self, flight: &Flight) -> uxduck_contracts::dto::flight::Flight {
