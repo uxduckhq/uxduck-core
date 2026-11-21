@@ -69,7 +69,7 @@ portable-pty.workspace = true
 crossterm.workspace = true
 # This computer's addresses, for "Phones and tablets on this network" (S97).
 if-addrs = "0.15"
-oxc = { version = "0.156", features = ["transformer", "codegen", "semantic"], optional = true }
+oxc = { version = "0.159", features = ["transformer", "codegen", "semantic"], optional = true }
 
 # Keeping the system and display awake on Windows (SetThreadExecutionState).
 # Pausing a simulation suspends its build's threads (Toolhelp, SuspendThread).
