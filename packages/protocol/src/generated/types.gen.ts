@@ -3347,6 +3347,9 @@ export type ClientRequest = {
     method: 'computer/rename';
     params: ComputerRenameParams;
 } | {
+    method: 'computer/route';
+    params: ComputerRouteParams;
+} | {
     method: 'computer/check';
     params: ComputerCheckParams;
 } | {
@@ -4987,8 +4990,18 @@ export type CompanionComputer = {
      */
     key?: boolean;
     name: string;
+    /**
+     * Other addresses it answers at, tried in order when `host` cannot be
+     * reached.
+     */
+    otherHosts?: Array<string>;
     port?: number | null;
     role: CompanionRole;
+    /**
+     * Another of its vehicle's computers, by id, that SSH goes through when
+     * none of its own addresses can be reached.
+     */
+    through?: string | null;
     user?: string | null;
 };
 
@@ -5181,6 +5194,25 @@ export type ComputerRenameParams = {
      * Its new name, trimmed. An empty one is refused.
      */
     name: string;
+    vehicleId: string;
+};
+
+/**
+ * `computer/route`: how SSH reaches a computer when its address does not
+ * answer. Both replace what was kept.
+ */
+export type ComputerRouteParams = {
+    computerId: string;
+    /**
+     * Other addresses it answers at, tried in order after its address.
+     */
+    otherHosts?: Array<string>;
+    /**
+     * Another computer of the same vehicle, by id, to go through when none
+     * of its own addresses answers. That computer must not go through
+     * another itself.
+     */
+    through?: string | null;
     vehicleId: string;
 };
 

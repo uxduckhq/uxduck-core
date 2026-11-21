@@ -310,6 +310,9 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "computer/remove",
     // Its name is the person's, beside the computer's other settings.
     "computer/rename",
+    // Which addresses and computer SSH goes through are the person's, as
+    // adding the computer is.
+    "computer/route",
     "computer/check",
     "computer/cameras",
     "computer/network",

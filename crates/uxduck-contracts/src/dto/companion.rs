@@ -135,6 +135,14 @@ pub struct CompanionComputer {
     pub user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Other addresses it answers at, tried in order when `host` cannot be
+    /// reached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_hosts: Vec<String>,
+    /// Another of its vehicle's computers, by id, that SSH goes through when
+    /// none of its own addresses can be reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through: Option<String>,
     pub role: CompanionRole,
     /// The onboard computer id it reports as, 191 to 194.
     pub component_id: u8,
@@ -197,6 +205,23 @@ pub struct ComputerRenameParams {
     pub computer_id: String,
     /// Its new name, trimmed. An empty one is refused.
     pub name: String,
+}
+
+/// `computer/route`: how SSH reaches a computer when its address does not
+/// answer. Both replace what was kept.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerRouteParams {
+    pub vehicle_id: String,
+    pub computer_id: String,
+    /// Other addresses it answers at, tried in order after its address.
+    #[serde(default)]
+    pub other_hosts: Vec<String>,
+    /// Another computer of the same vehicle, by id, to go through when none
+    /// of its own addresses answers. That computer must not go through
+    /// another itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through: Option<String>,
 }
 
 /// A saved network, without its credentials.

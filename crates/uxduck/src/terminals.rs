@@ -201,8 +201,9 @@ impl TerminalPort for Host {
         // Before anything else (T16).
         let program = companions::ssh_program().ok_or_else(companions::ssh_missing)?;
         let (pasted, own) = companions::saved_sign_in(&self.data_dir, &order.computer)?;
+        let through_key = companions::saved_through_key(&self.data_dir, order.through.as_deref())?;
         if let Some(keeps) = order.collect {
-            self.run(program, order, pasted, own, keeps);
+            self.run(program, order, pasted, own, through_key, keeps);
             return Ok(());
         }
         let (input, typed) = mpsc::channel(QUEUED);
@@ -229,6 +230,7 @@ impl TerminalPort for Host {
             order,
             pasted,
             own,
+            through_key,
             typed: Some(typed),
             shown,
             shown_err: None,
@@ -281,6 +283,7 @@ impl Host {
         order: TerminalOrder,
         pasted: Option<String>,
         own: OwnKey,
+        through_key: Option<String>,
         keeps: uxduck_engine::terminals::Keeps,
     ) {
         let (shown, out) = mpsc::channel(QUEUED);
@@ -304,6 +307,7 @@ impl Host {
             order,
             pasted,
             own,
+            through_key,
             typed: None,
             shown,
             shown_err: Some(shown_err),
@@ -367,6 +371,9 @@ fn failed(problem: String) -> Outcome {
 enum Attended {
     /// The computer refused this way of signing in: what `ssh` said.
     Refused(String),
+    /// `ssh` never reached the computer on this route: what it and the
+    /// `ssh` it went through said.
+    Unreached(String),
     Done(Outcome),
 }
 
@@ -378,6 +385,8 @@ struct Task {
     order: TerminalOrder,
     pasted: Option<String>,
     own: OwnKey,
+    /// The saved key of the computer it is reached through, if any.
+    through_key: Option<String>,
     typed: Option<mpsc::Receiver<Vec<u8>>>,
     shown: mpsc::Sender<Vec<u8>>,
     /// Where a run's standard error goes, apart from its standard output.
@@ -388,6 +397,10 @@ struct Task {
 }
 
 impl Task {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the session's files, its routes and the ways to sign in stay in one scope"
+    )]
     async fn run(&mut self) -> Outcome {
         let computer = self.order.computer.clone();
         let Some(pinned) = computer.check.as_ref().and_then(|c| c.host_key.clone()) else {
@@ -434,48 +447,113 @@ impl Task {
             }
         });
         let (pasted, own) = (self.pasted.take(), self.own.clone());
-        let mut said = String::new();
-        for way in companions::pinned_ways(pasted.as_deref(), Some(&own)) {
-            // `ssh` adds to its file: each try reads its own words alone.
-            let _ = std::fs::remove_file(&log);
-            let built = match companions::ssh(
-                &key,
-                &files.path().join("askpass"),
-                None,
-                &computer,
-                way,
-                HostKeys::Pinned(&trusted),
-                Session::Terminal {
-                    tty: command.is_none(),
-                    log: &log,
-                },
-                command.as_deref(),
-            ) {
-                Ok(built) => built,
-                Err(why) => return failed(why),
-            };
-            let (cols, rows) = *self.size.borrow_and_update();
-            let running = if command.is_some() {
-                let err = self.shown_err.clone().unwrap_or_else(|| self.shown.clone());
-                spawn_piped(&self.program, &built, self.shown.clone(), err, run)
-            } else {
-                spawn_pty(&self.program, &built, (cols, rows), self.shown.clone())
-            };
-            let running = match running {
-                Ok(running) => running,
-                Err(why) => return failed(why),
-            };
-            match self.attend(running, &log, &key).await {
-                Attended::Refused(text) => said = text,
-                Attended::Done(outcome) => return outcome,
+        let through_key = self.through_key.take();
+        let through_computer = self.order.through.clone();
+        let through = through_computer
+            .as_deref()
+            .map(|computer| companions::Through {
+                computer,
+                pasted: through_key.as_deref(),
+                own: Some(&own),
+            });
+        let hop_key = files.path().join("through_key");
+        let hop_hosts = files.path().join("through_known_hosts");
+        let hop_log = files.path().join("through.log");
+        let mut missed = Vec::new();
+        let mut trusted_hop = false;
+        'routes: for route in companions::routes(
+            &computer,
+            through.as_ref(),
+            &hop_key,
+            &hop_hosts,
+            &hop_log,
+            false,
+        ) {
+            if let Some(hop) = route.hop
+                && !trusted_hop
+            {
+                if let Err(why) = companions::trust_through(&self.dir, hop).await {
+                    missed.push(why);
+                    break;
+                }
+                trusted_hop = true;
             }
+            let mut said = String::new();
+            for way in companions::pinned_ways(pasted.as_deref(), Some(&own)) {
+                // `ssh` adds to its file: each try reads its own words alone.
+                let _ = std::fs::remove_file(&log);
+                let _ = std::fs::remove_file(&hop_log);
+                let built = match companions::ssh(
+                    &key,
+                    &files.path().join("askpass"),
+                    None,
+                    &computer,
+                    route,
+                    way,
+                    HostKeys::Pinned(&trusted),
+                    Session::Terminal {
+                        tty: command.is_none(),
+                        log: &log,
+                    },
+                    command.as_deref(),
+                ) {
+                    Ok(built) => built,
+                    Err(why) => return failed(why),
+                };
+                let (cols, rows) = *self.size.borrow_and_update();
+                let running = if command.is_some() {
+                    let err = self.shown_err.clone().unwrap_or_else(|| self.shown.clone());
+                    spawn_piped(&self.program, &built, self.shown.clone(), err, run)
+                } else {
+                    spawn_pty(&self.program, &built, (cols, rows), self.shown.clone())
+                };
+                let running = match running {
+                    Ok(running) => running,
+                    Err(why) => return failed(why),
+                };
+                let hop = route.hop.map(|_| (hop_key.as_path(), hop_log.as_path()));
+                match self.attend(running, &log, &key, hop).await {
+                    Attended::Refused(text) => said = text,
+                    Attended::Unreached(text) => {
+                        missed.push(format!(
+                            "{route}: {}",
+                            companions::unreached_why(
+                                &text,
+                                route.hop.map(|hop| hop.through.computer.name.as_str()),
+                            )
+                        ));
+                        continue 'routes;
+                    }
+                    Attended::Done(outcome) => return outcome,
+                }
+            }
+            // It reached the computer, which refused every way to sign in.
+            return failed(companions::terminal_failure(&computer, &said));
         }
-        failed(companions::terminal_failure(&computer, &said))
+        let then = if command.is_some() {
+            "Nothing ran on it."
+        } else {
+            "No terminal was opened."
+        };
+        failed(companions::cannot_reach(&computer, &missed, then))
     }
 
-    /// Stays with one `ssh` until it ends or the engine ends it.
-    async fn attend(&mut self, mut running: Running, log: &Path, key: &Path) -> Attended {
+    /// Stays with one `ssh` until it ends or the engine ends it. `hop` is
+    /// the key and the log of the `ssh` it goes through, when it does.
+    async fn attend(
+        &mut self,
+        mut running: Running,
+        log: &Path,
+        key: &Path,
+        hop: Option<(&Path, &Path)>,
+    ) -> Attended {
         let said = || std::fs::read_to_string(log).unwrap_or_default();
+        let forget_keys = || {
+            let _ = std::fs::remove_file(key);
+            if let Some((hop_key, _)) = hop {
+                let _ = std::fs::remove_file(hop_key);
+            }
+        };
         let mut signed = false;
         let mut poll = tokio::time::interval(SIGN_IN_POLL);
         let status = loop {
@@ -494,19 +572,28 @@ impl Task {
                 _ = poll.tick(), if !signed => {
                     if companions::signed_in(&said()) {
                         signed = true;
-                        // `ssh` has read the key it signed in with.
-                        let _ = std::fs::remove_file(key);
+                        // `ssh` has read the keys it signed in with.
+                        forget_keys();
                         running.type_from(self.typed.take());
                     }
                 }
             }
         };
         running.reaped = true;
-        let _ = std::fs::remove_file(key);
+        forget_keys();
         let said = said();
         if !companions::signed_in(&said) {
             if companions::refused(&said) {
                 return Attended::Refused(said);
+            }
+            let hop_said = hop
+                .and_then(|(_, hop_log)| std::fs::read_to_string(hop_log).ok())
+                .unwrap_or_default();
+            if companions::not_reached(status, &said, &hop_said) {
+                return Attended::Unreached(format!(
+                    "{said}
+{hop_said}"
+                ));
             }
             return Attended::Done(failed(companions::terminal_failure(
                 &self.order.computer,
@@ -836,6 +923,8 @@ mod tests {
             host: "camera.local".into(),
             user: Some("pi".into()),
             port: Some(2222),
+            other_hosts: Vec::new(),
+            through: None,
             role: CompanionRole::Report,
             component_id: 191,
             key: false,
@@ -891,6 +980,7 @@ mod tests {
         ]
         .concat_ways();
         assert_eq!(ways.len(), 3);
+        let target = computer();
         for way in ways {
             assert!(!matches!(way, Way::Password(..)));
             for (tty, remote) in [(true, None), (false, Some("uname -m"))] {
@@ -898,7 +988,11 @@ mod tests {
                     &key,
                     &dir.path().join("askpass"),
                     None,
-                    &computer(),
+                    &target,
+                    companions::Route {
+                        host: &target.host,
+                        hop: None,
+                    },
                     way,
                     HostKeys::Pinned(&trusted),
                     Session::Terminal { tty, log: &log },
@@ -944,7 +1038,11 @@ mod tests {
             &key,
             &dir.path().join("askpass"),
             None,
-            &computer(),
+            &target,
+            companions::Route {
+                host: &target.host,
+                hop: None,
+            },
             Way::Person,
             HostKeys::AcceptNew {
                 known_hosts: &trusted,
@@ -957,6 +1055,71 @@ mod tests {
         let check = words(&check);
         assert!(check.contains(&"StrictHostKeyChecking=accept-new".to_owned()));
         assert!(check.contains(&"-v".to_owned()) && !check.contains(&"-E".to_owned()));
+    }
+
+    /// Through another computer, the ssh it goes through writes what it
+    /// says about itself to a file of its own, never to the terminal.
+    #[test]
+    fn a_terminal_through_another_computer_keeps_the_inner_ssh_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, trusted, log) = (
+            dir.path().join("key"),
+            dir.path().join("known_hosts"),
+            dir.path().join("ssh.log"),
+        );
+        let own = own();
+        let target = computer();
+        let mut gateway = computer();
+        gateway.name = "Gateway".into();
+        gateway.host = "192.168.50.21".into();
+        let through = companions::Through {
+            computer: &gateway,
+            pasted: None,
+            own: Some(&own),
+        };
+        let hop_key = dir.path().join("through_key");
+        let hop_hosts = dir.path().join("through_known_hosts");
+        let hop_log = dir.path().join("through.log");
+        let routes = companions::routes(
+            &target,
+            Some(&through),
+            &hop_key,
+            &hop_hosts,
+            &hop_log,
+            false,
+        );
+        assert_eq!(
+            routes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                "camera.local",
+                "camera.local through Gateway at 192.168.50.21"
+            ]
+        );
+        let built = companions::ssh(
+            &key,
+            &dir.path().join("askpass"),
+            None,
+            &target,
+            routes[1],
+            Way::Own(&own),
+            HostKeys::Pinned(&trusted),
+            Session::Terminal {
+                tty: true,
+                log: &log,
+            },
+            None,
+        )
+        .unwrap();
+        let words = words(&built);
+        let proxy = words
+            .iter()
+            .find_map(|w| w.strip_prefix("ProxyCommand="))
+            .unwrap();
+        assert!(proxy.contains("'-E'"), "{proxy}");
+        assert!(proxy.contains(&hop_log.display().to_string()), "{proxy}");
+        assert!(proxy.ends_with("'--' '192.168.50.21'"), "{proxy}");
+        assert_eq!(words.last().unwrap(), "camera.local");
+        let _ = std::fs::remove_file(&hop_key);
     }
 
     trait ConcatWays<'a> {

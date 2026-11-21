@@ -532,7 +532,7 @@ fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
     assert_eq!(vehicle["companions"][0]["check"]["state"], "checking");
     let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
     assert!(
-        matches!(&orders[..], [CompanionOrder::Check { vehicle_id, computer, password: None }] if vehicle_id == "v" && computer.host == "pi-vision.local")
+        matches!(&orders[..], [CompanionOrder::Check { vehicle_id, computer, password: None, .. }] if vehicle_id == "v" && computer.host == "pi-vision.local")
     );
 
     engine.companion_checked(CheckAnswer {
@@ -1174,4 +1174,320 @@ fn a_failed_check_keeps_its_kind_and_what_ssh_said() {
     assert_eq!(check["state"], "checking");
     assert!(check.get("problemKind").is_none());
     assert!(check.get("detail").is_none());
+}
+
+/// Buggy (2026-11-16): with the ground radio unplugged, the gateway answers
+/// only at its Tailscale address and the camera Pi only through the
+/// gateway. Both are kept with the computers, and only a route SSH can
+/// follow is taken.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one vehicle's routes from the first through every refusal to a restart"
+)]
+fn a_computer_keeps_its_other_addresses_and_the_computer_it_goes_through() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let mut add = |engine: &mut Engine, host: &str| {
+        let vehicle = ok(
+            engine,
+            &mut ui,
+            "computer/add",
+            json!({ "vehicleId": "v", "host": host, "user": "pi" }),
+        );
+        let computers = vehicle["companions"].as_array().unwrap();
+        computers[computers.len() - 1]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let gateway = add(&mut engine, "192.168.50.21");
+    let camera = add(&mut engine, "192.168.50.20");
+    let third = add(&mut engine, "pi-3.local");
+    let mut ui = connect(&mut engine);
+    let route = |computer: &str, other_hosts: Value, through: Value| json!({ "vehicleId": "v", "computerId": computer, "otherHosts": other_hosts, "through": through });
+
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/route",
+        route(&gateway, json!([" 100.76.177.45 ", ""]), Value::Null),
+    );
+    assert_eq!(
+        vehicle["companions"][0]["otherHosts"],
+        json!(["100.76.177.45"])
+    );
+    assert_eq!(vehicle["companions"][0]["host"], "192.168.50.21");
+    assert!(vehicle["companions"][0].get("through").is_none());
+
+    for (other_hosts, said) in [
+        (json!(["192.168.50.21"]), "192.168.50.21 is listed twice."),
+        (
+            json!(["gateway.local", "Gateway.local"]),
+            "Gateway.local is listed twice.",
+        ),
+    ] {
+        assert_eq!(
+            refused(
+                &mut engine,
+                &mut ui,
+                "computer/route",
+                route(&gateway, other_hosts, Value::Null)
+            ),
+            said
+        );
+    }
+    assert!(
+        refused(
+            &mut engine,
+            &mut ui,
+            "computer/route",
+            route(&gateway, json!(["-oProxyCommand=x"]), Value::Null)
+        )
+        .contains("is not a host name")
+    );
+    assert_eq!(
+        refused(
+            &mut engine,
+            &mut ui,
+            "computer/route",
+            route(&camera, json!([]), json!(camera))
+        ),
+        "A computer cannot be reached through itself."
+    );
+    assert!(
+        refused(
+            &mut engine,
+            &mut ui,
+            "computer/route",
+            route(&camera, json!([]), json!("cc000000000000"))
+        )
+        .starts_with("That computer is not one of ")
+    );
+    assert!(
+        refused(
+            &mut engine,
+            &mut ui,
+            "computer/route",
+            route("cc000000000000", json!([]), Value::Null)
+        )
+        .contains("not found")
+    );
+
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/route",
+        route(&camera, json!([]), json!(gateway)),
+    );
+    assert_eq!(vehicle["companions"][1]["through"], json!(gateway));
+    assert_eq!(
+        vehicle["companions"][0]["otherHosts"],
+        json!(["100.76.177.45"]),
+        "another computer's route is left as it was"
+    );
+
+    let name = |at: usize| engine_name(&vehicle, at);
+    assert_eq!(
+        refused(
+            &mut engine,
+            &mut ui,
+            "computer/route",
+            route(&third, json!([]), json!(camera))
+        ),
+        format!(
+            "{} is itself reached through another computer. Choose one UXDuck reaches at its own addresses.",
+            name(1)
+        )
+    );
+    assert_eq!(
+        refused(
+            &mut engine,
+            &mut ui,
+            "computer/route",
+            route(&gateway, json!(["100.76.177.45"]), json!(third))
+        ),
+        format!(
+            "Another computer is reached through {}, so it cannot go through one itself.",
+            name(0)
+        )
+    );
+    let kept = &engine.state().vehicles["v"].companions;
+    assert_eq!(kept[0].other_hosts, ["100.76.177.45"]);
+    assert_eq!(kept[0].through, None, "a refused route keeps what was kept");
+    assert_eq!(kept[1].through.as_deref(), Some(gateway.as_str()));
+
+    let restarted = self::engine(engine.state().clone(), &keys);
+    let kept = &restarted.state().vehicles["v"].companions;
+    assert_eq!(kept[0].other_hosts, ["100.76.177.45"]);
+    assert_eq!(kept[1].through.as_deref(), Some(gateway.as_str()));
+
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/route",
+        route(&camera, json!([]), json!("")),
+    );
+    assert!(
+        vehicle["companions"][1].get("through").is_none(),
+        "an empty choice is None"
+    );
+}
+
+fn engine_name(vehicle: &Value, at: usize) -> String {
+    vehicle["companions"][at]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn removing_a_computer_others_go_through_leaves_them_direct() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let gateway = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({ "vehicleId": "v", "host": "192.168.50.21" }),
+    )["companions"][0]["id"]
+        .clone();
+    let camera = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({ "vehicleId": "v", "host": "192.168.50.20" }),
+    )["companions"][1]["id"]
+        .clone();
+    ok(
+        &mut engine,
+        &mut ui,
+        "computer/route",
+        json!({ "vehicleId": "v", "computerId": camera, "otherHosts": ["cam.local"], "through": gateway }),
+    );
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/remove",
+        json!({ "vehicleId": "v", "computerId": gateway }),
+    );
+    assert_eq!(vehicle["companions"][0]["id"], camera);
+    assert!(vehicle["companions"][0].get("through").is_none());
+    assert_eq!(vehicle["companions"][0]["otherHosts"], json!(["cam.local"]));
+    assert_eq!(engine.state().vehicles["v"].companions[0].through, None);
+}
+
+/// SSH needs the computer a check or change goes through, with its pinned
+/// host key, so every order carries it.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one computer's check, camera and network orders through the same hop"
+)]
+fn checks_and_changes_carry_the_computer_they_go_through() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let ssh = Ssh::default();
+    engine.set_companions(Box::new(ssh.clone()));
+    let mut ids = Vec::new();
+    for host in ["192.168.50.21", "192.168.50.20"] {
+        let vehicle = ok(
+            &mut engine,
+            &mut ui,
+            "computer/add",
+            json!({ "vehicleId": "v", "host": host }),
+        );
+        let id = vehicle["companions"][ids.len()]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        engine.companion_checked(CheckAnswer {
+            vehicle_id: "v".into(),
+            computer_id: id.clone(),
+            result: Ok(Found {
+                host_key: Some(format!("SHA256:{host}")),
+                ..Found::default()
+            }),
+        });
+        ids.push(id);
+    }
+    let (gateway, camera) = (ids[0].clone(), ids[1].clone());
+    ok(
+        &mut engine,
+        &mut ui,
+        "computer/route",
+        json!({ "vehicleId": "v", "computerId": gateway, "otherHosts": ["100.76.177.45"] }),
+    );
+    ok(
+        &mut engine,
+        &mut ui,
+        "computer/route",
+        json!({ "vehicleId": "v", "computerId": camera, "through": gateway }),
+    );
+    ssh.0.lock().unwrap().clear();
+    let hop = |order: &CompanionOrder| match order {
+        CompanionOrder::Check {
+            computer, through, ..
+        }
+        | CompanionOrder::Network {
+            computer, through, ..
+        }
+        | CompanionOrder::Cameras {
+            computer, through, ..
+        } => (
+            computer.id.clone(),
+            through.as_ref().map(|t| {
+                (
+                    t.id.clone(),
+                    t.other_hosts.clone(),
+                    t.check.as_ref().and_then(|c| c.host_key.clone()),
+                )
+            }),
+        ),
+        CompanionOrder::Forget { .. } => panic!("not a check"),
+    };
+    let read = json!({ "vehicleId": "v", "computerId": camera });
+    for (method, params) in [
+        ("computer/check", read.clone()),
+        ("computer/cameras", read.clone()),
+        ("computer/network", read.clone()),
+    ] {
+        ok(&mut engine, &mut ui, method, params);
+        let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
+        assert_eq!(orders.len(), 1, "{method}");
+        assert_eq!(
+            hop(&orders[0]),
+            (
+                camera.clone(),
+                Some((
+                    gateway.clone(),
+                    vec!["100.76.177.45".to_owned()],
+                    Some("SHA256:192.168.50.21".to_owned())
+                ))
+            ),
+            "{method}"
+        );
+        engine.companion_checked(CheckAnswer {
+            vehicle_id: "v".into(),
+            computer_id: camera.clone(),
+            result: Ok(Found {
+                host_key: Some("SHA256:192.168.50.20".into()),
+                ..Found::default()
+            }),
+        });
+    }
+    ok(
+        &mut engine,
+        &mut ui,
+        "computer/check",
+        json!({ "vehicleId": "v", "computerId": gateway }),
+    );
+    let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
+    assert_eq!(hop(&orders[0]), (gateway, None));
 }

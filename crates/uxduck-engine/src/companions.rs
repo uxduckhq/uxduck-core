@@ -9,7 +9,7 @@
 use serde_json::Value;
 use uxduck_contracts::dto::companion::{
     ComputerAddParams, ComputerCheckParams, ComputerNetworkParams, ComputerParams,
-    ComputerRenameParams, WifiSecurity,
+    ComputerRenameParams, ComputerRouteParams, WifiSecurity,
 };
 use uxduck_contracts::dto::companion_cameras::ComputerCamerasParams;
 use uxduck_contracts::dto::vehicle::Vehicle as VehicleDto;
@@ -32,12 +32,16 @@ pub enum CompanionOrder {
     Check {
         vehicle_id: String,
         computer: Box<CompanionComputer>,
+        /// The computer it is reached through when none of its own
+        /// addresses answers (`computer/route`).
+        through: Option<Box<CompanionComputer>>,
         /// Used for this check alone, to add this computer's UXDuck key.
         password: Option<Password>,
     },
     Network {
         vehicle_id: String,
         computer: Box<CompanionComputer>,
+        through: Option<Box<CompanionComputer>>,
         /// JSON on SSH stdin, wrapped so neither PSK nor credentials reach logs.
         input: Password,
     },
@@ -46,6 +50,7 @@ pub enum CompanionOrder {
     Cameras {
         vehicle_id: String,
         computer: Box<CompanionComputer>,
+        through: Option<Box<CompanionComputer>>,
         /// JSON on SSH stdin: empty to read, else one change.
         input: String,
     },
@@ -222,6 +227,21 @@ fn invalid(message: impl Into<String>) -> ApiError {
 
 fn busy() -> ApiError {
     invalid("A check, network or camera change is already running on this computer.")
+}
+
+/// The computer `computer_id` is reached through, as kept with it.
+pub(crate) fn through(vehicle: &Vehicle, computer_id: &str) -> Option<Box<CompanionComputer>> {
+    let id = vehicle
+        .companions
+        .iter()
+        .find(|c| c.id == computer_id)?
+        .through
+        .as_deref()?;
+    vehicle
+        .companions
+        .iter()
+        .find(|c| c.id == id)
+        .map(|c| Box::new(c.clone()))
 }
 
 fn to_value(vehicle: &Vehicle) -> Result<Value, ApiError> {
@@ -457,6 +477,8 @@ impl Engine {
             host,
             user,
             port: params.port,
+            other_hosts: Vec::new(),
+            through: None,
             role,
             component_id,
             key: key.is_some(),
@@ -497,6 +519,77 @@ impl Engine {
         to_value(&self.save_companions(Some(connection), vehicle))
     }
 
+    /// `computer/route`: the other addresses SSH tries, in order, and the
+    /// computer it goes through when none answers. Like the name, they
+    /// change nothing on the computer. A host key is still checked on every
+    /// address, so a new address needs no new check.
+    pub(crate) fn route_computer(
+        &mut self,
+        connection: ConnectionId,
+        ComputerRouteParams {
+            vehicle_id,
+            computer_id,
+            other_hosts,
+            through,
+        }: ComputerRouteParams,
+    ) -> Result<Value, ApiError> {
+        let mut vehicle = self.companion_vehicle(&vehicle_id)?;
+        let Some(at) = vehicle.companions.iter().position(|c| c.id == computer_id) else {
+            return Err(ApiError::new(
+                ErrorKind::NotFound,
+                format!("computer {computer_id} not found"),
+            ));
+        };
+        let mut hosts: Vec<String> = Vec::new();
+        for host in other_hosts
+            .iter()
+            .map(|h| h.trim())
+            .filter(|h| !h.is_empty())
+        {
+            companion::check_address(host, None).map_err(invalid)?;
+            if host.eq_ignore_ascii_case(&vehicle.companions[at].host)
+                || hosts.iter().any(|h| h.eq_ignore_ascii_case(host))
+            {
+                return Err(invalid(format!("{host} is listed twice.")));
+            }
+            hosts.push(host.to_owned());
+        }
+        let through = through.filter(|t| !t.is_empty());
+        if let Some(id) = &through {
+            if *id == computer_id {
+                return Err(invalid("A computer cannot be reached through itself."));
+            }
+            let Some(other) = vehicle.companions.iter().find(|c| c.id == *id) else {
+                return Err(invalid(format!(
+                    "That computer is not one of {}'s.",
+                    vehicle.name
+                )));
+            };
+            // One step only: SSH jumps through one computer, which UXDuck
+            // reaches at its own addresses.
+            if other.through.is_some() {
+                return Err(invalid(format!(
+                    "{} is itself reached through another computer. Choose one UXDuck reaches at its own addresses.",
+                    other.name
+                )));
+            }
+            if vehicle
+                .companions
+                .iter()
+                .any(|c| c.through.as_deref() == Some(computer_id.as_str()))
+            {
+                return Err(invalid(format!(
+                    "Another computer is reached through {}, so it cannot go through one itself.",
+                    vehicle.companions[at].name
+                )));
+            }
+        }
+        let computer = &mut vehicle.companions[at];
+        computer.other_hosts = hosts;
+        computer.through = through;
+        to_value(&self.save_companions(Some(connection), vehicle))
+    }
+
     /// `computer/remove`.
     pub(crate) fn remove_computer(
         &mut self,
@@ -528,6 +621,11 @@ impl Engine {
             ));
         }
         let computer = vehicle.companions.remove(at);
+        for other in &mut vehicle.companions {
+            if other.through.as_deref() == Some(computer.id.as_str()) {
+                other.through = None;
+            }
+        }
         if computer.key {
             self.credentials
                 .set(&computer.key_name(), "")
@@ -571,6 +669,7 @@ impl Engine {
             return Err(invalid("Disarm the vehicle before changing its networks."));
         }
         validate_network_change(params)?;
+        let through = through(&vehicle, &params.computer_id);
         let computer = vehicle
             .companions
             .iter_mut()
@@ -594,6 +693,7 @@ impl Engine {
         let order = CompanionOrder::Network {
             vehicle_id: vehicle.id.clone(),
             computer: Box::new(computer.clone()),
+            through,
             input,
         };
         if !params.background
@@ -634,6 +734,7 @@ impl Engine {
         if changes > 0 && vehicle.armed {
             return Err(invalid("Disarm the vehicle before changing its cameras."));
         }
+        let through = through(&vehicle, &params.computer_id);
         let computer = vehicle
             .companions
             .iter_mut()
@@ -686,6 +787,7 @@ impl Engine {
         let order = CompanionOrder::Cameras {
             vehicle_id: vehicle.id.clone(),
             computer: Box::new(computer.clone()),
+            through,
             input,
         };
         if let Some(check) = &mut computer.check {
@@ -718,6 +820,7 @@ impl Engine {
             ));
         }
         let at_us = self.clock.now_us();
+        let through = through(&vehicle, &computer_id);
         let Some(computer) = vehicle.companions.iter_mut().find(|c| c.id == computer_id) else {
             return Err(ApiError::new(
                 ErrorKind::NotFound,
@@ -744,6 +847,7 @@ impl Engine {
         let order = CompanionOrder::Check {
             vehicle_id: vehicle.id.clone(),
             computer: Box::new(computer.clone()),
+            through,
             password: password.filter(|p| !p.is_empty()).map(Password),
         };
         let vehicle = self.save_companions(Some(connection), vehicle);
@@ -885,10 +989,10 @@ impl Engine {
                 v.companions
                     .iter()
                     .filter(|c| c.connectivity.is_some())
-                    .map(|c| (v.id.clone(), c.clone()))
+                    .map(|c| (v.id.clone(), c.clone(), through(v, &c.id)))
             })
             .collect();
-        for (vehicle_id, computer) in gateways {
+        for (vehicle_id, computer, through) in gateways {
             if computer
                 .check
                 .as_ref()
@@ -912,6 +1016,7 @@ impl Engine {
                 port.request(CompanionOrder::Network {
                     vehicle_id,
                     computer: Box::new(computer),
+                    through,
                     input: Password("{}".into()),
                 });
             }

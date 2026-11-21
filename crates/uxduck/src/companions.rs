@@ -100,6 +100,18 @@ pub(crate) struct SignIn<'a> {
     pub own: Option<&'a OwnKey>,
     /// Its password, for this check alone, to add `own` to it.
     pub password: Option<&'a str>,
+    /// The computer SSH goes through when none of its own addresses
+    /// answers (`computer/route`).
+    pub through: Option<&'a Through<'a>>,
+}
+
+/// A computer another is reached through, and how to sign in to it: its
+/// own pasted key alone, else the person's agent with UXDuck's own key.
+/// Its host key must already be pinned by a check of its own.
+pub(crate) struct Through<'a> {
+    pub computer: &'a CompanionComputer,
+    pub pasted: Option<&'a str>,
+    pub own: Option<&'a OwnKey>,
 }
 
 /// A problem with UXDuck's own key, which a check with the computer's
@@ -333,6 +345,26 @@ pub(crate) fn saved_sign_in(
     ))
 }
 
+/// The saved private key of the computer another is reached through, when
+/// it has one.
+pub(crate) fn saved_through_key(
+    data_dir: &Path,
+    through: Option<&CompanionComputer>,
+) -> Result<Option<String>, String> {
+    let Some(through) = through.filter(|t| t.key) else {
+        return Ok(None);
+    };
+    FileCredentials::new(data_dir)
+        .get(&through.key_name())
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "{}'s saved SSH private key is missing, and this computer is reached through it.",
+                through.name
+            )
+        })
+}
+
 /// The keys a check signs in with: the one given for the computer, from the
 /// credential store when it has one, and UXDuck's own. A key given for it
 /// signs in alone when no password was typed, so then a problem with
@@ -386,6 +418,9 @@ struct Ran {
     /// What `ssh` itself wrote, in its own log: never a server's banner or
     /// what ran on the computer, which are on `output`'s standard error.
     log: String,
+    /// What the `ssh` it went through wrote in its own log, when it went
+    /// through another computer.
+    hop_log: String,
     /// Whether UXDuck's askpass gave `ssh` the password: a file UXDuck's
     /// askpass leaves, never anything a server says.
     asked: bool,
@@ -546,28 +581,42 @@ impl Host {
         &self,
         vehicle_id: String,
         computer: Box<CompanionComputer>,
+        through: Option<Box<CompanionComputer>>,
         adapter: Adapter,
         input: String,
     ) {
         let dir = self.dir.clone();
-        let saved = saved_sign_in(&self.data_dir, &computer);
+        let saved = saved_sign_in(&self.data_dir, &computer).and_then(|saved| {
+            Ok((
+                saved,
+                saved_through_key(&self.data_dir, through.as_deref())?,
+            ))
+        });
         let engine = self.engine.clone();
         tokio::spawn(async move {
             let result = match saved {
                 Err(why) => Err(CheckFailure::from(why)),
-                Ok((key, own)) => pinned(
-                    &dir,
-                    &computer,
-                    SignIn {
-                        pasted: key.as_deref(),
+                Ok(((key, own), through_key)) => {
+                    let through = through.as_deref().map(|computer| Through {
+                        computer,
+                        pasted: through_key.as_deref(),
                         own: Some(&own),
-                        password: None,
-                    },
-                    adapter,
-                    &input,
-                )
-                .await
-                .map_err(CheckFailure::from),
+                    });
+                    pinned(
+                        &dir,
+                        &computer,
+                        SignIn {
+                            pasted: key.as_deref(),
+                            own: Some(&own),
+                            password: None,
+                            through: through.as_ref(),
+                        },
+                        adapter,
+                        &input,
+                    )
+                    .await
+                    .map_err(CheckFailure::from)
+                }
             };
             let answer = CheckAnswer {
                 vehicle_id,
@@ -586,6 +635,7 @@ impl CompanionPort for Host {
                 vehicle_id,
                 computer,
                 password,
+                through,
             } => {
                 let dir = self.dir.clone();
                 let mut credentials = FileCredentials::new(&self.data_dir);
@@ -595,15 +645,23 @@ impl CompanionPort for Host {
                     .flatten();
                 let own = own_key(&mut credentials, password.is_some());
                 let keys = check_keys(computer.key, key, own, password.is_some());
+                let through_key = saved_through_key(&self.data_dir, through.as_deref());
                 let engine = self.engine.clone();
                 tokio::spawn(async move {
-                    let result = match keys {
-                        Err(failure) => Err(failure),
-                        Ok((pasted, own)) => {
+                    let result = match (keys, through_key) {
+                        (Err(failure), _) => Err(failure),
+                        (_, Err(why)) => Err(CheckFailure::from(why)),
+                        (Ok((pasted, own)), Ok(through_key)) => {
+                            let through = through.as_deref().map(|computer| Through {
+                                computer,
+                                pasted: through_key.as_deref(),
+                                own: own.as_ref(),
+                            });
                             let sign_in = SignIn {
                                 pasted: pasted.as_deref(),
                                 own: own.as_ref(),
                                 password: password.as_ref().map(|p| p.0.as_str()),
+                                through: through.as_ref(),
                             };
                             check(&dir, None, &computer, sign_in).await
                         }
@@ -620,11 +678,13 @@ impl CompanionPort for Host {
                 vehicle_id,
                 computer,
                 input,
-            } => self.run_pinned(vehicle_id, computer, Adapter::Network, input.0),
+                through,
+            } => self.run_pinned(vehicle_id, computer, through, Adapter::Network, input.0),
             CompanionOrder::Cameras {
                 vehicle_id,
                 computer,
                 input,
+                through,
             } => {
                 let mut request: serde_json::Value =
                     serde_json::from_str(&input).unwrap_or_default();
@@ -632,7 +692,13 @@ impl CompanionPort for Host {
                     request["watchdogScript"] =
                         include_str!("companions/camera_watchdog.py").into();
                 }
-                self.run_pinned(vehicle_id, computer, Adapter::Cameras, request.to_string());
+                self.run_pinned(
+                    vehicle_id,
+                    computer,
+                    through,
+                    Adapter::Cameras,
+                    request.to_string(),
+                );
             }
             CompanionOrder::Forget { computer_id } => {
                 let path = self.dir.join(format!("{computer_id}.known_hosts"));
@@ -709,13 +775,23 @@ pub(crate) async fn check(
                 &known_hosts,
                 Way::PasswordOnly(password),
                 None,
+                sign_in.through,
             )
             .await?;
             if !proven(&probe) {
                 return Err(unproven(computer, way, &probe));
             }
         }
-        let tried = run(dir, config, computer, &known_hosts, way, None).await?;
+        let tried = run(
+            dir,
+            config,
+            computer,
+            &known_hosts,
+            way,
+            None,
+            sign_in.through,
+        )
+        .await?;
         let again = !tried.output.status.success() && refused(&tried.log);
         last = Some((way, tried));
         if !again {
@@ -822,7 +898,17 @@ async fn pinned(
         ));
     }
     for way in pinned_ways(sign_in.pasted, sign_in.own) {
-        let ran = run_adapter(dir, None, computer, &trusted, way, Some((adapter, input))).await?;
+        let ran = run_adapter(
+            dir,
+            None,
+            computer,
+            &trusted,
+            way,
+            Some((adapter, input)),
+            sign_in.through,
+        )
+        .await
+        .map_err(|failure| failure.problem)?;
         let output = &ran.output;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -851,7 +937,7 @@ async fn pinned(
             let confirm = serde_json::json!({"confirm": token}).to_string();
             // A new TCP/SSH connection must reach the same pinned host after
             // reapplying routes. Otherwise the companion restores its checkpoint.
-            let confirmed = run(dir, None, computer, &trusted, way, Some(&confirm)).await
+            let confirmed = run(dir, None, computer, &trusted, way, Some(&confirm), sign_in.through).await
                 .map_err(|_| "The routing change could not be confirmed. Automatic rollback starts after 90 seconds on the companion.".to_owned())?;
             if !confirmed.output.status.success() {
                 return Err("The routing change could not be confirmed. Automatic rollback starts after 90 seconds on the companion.".into());
@@ -875,6 +961,18 @@ pub(crate) async fn trust_pinned(
     computer: &CompanionComputer,
     pinned: &str,
     trusted: &Path,
+) -> Result<bool, String> {
+    trust_as(dir, computer, pinned, trusted, PINNED_ALIAS).await
+}
+
+/// [`trust_pinned`] under `alias`, which is [`THROUGH_ALIAS`] for the
+/// computer another is reached through.
+async fn trust_as(
+    dir: &Path,
+    computer: &CompanionComputer,
+    pinned: &str,
+    trusted: &Path,
+    alias: &str,
 ) -> Result<bool, String> {
     let mut files = vec![dir.join(format!("{}.known_hosts", computer.id))];
     files.extend(
@@ -900,10 +998,7 @@ pub(crate) async fn trust_pinned(
             if fields.len() < 3 || fields[0].starts_with(['@', '#']) {
                 continue;
             }
-            write_private(
-                trusted,
-                &format!("{PINNED_ALIAS} {} {}", fields[1], fields[2]),
-            )?;
+            write_private(trusted, &format!("{alias} {} {}", fields[1], fields[2]))?;
             let output = tokio::process::Command::new("ssh-keygen")
                 .args(["-l", "-E", "sha256", "-f"])
                 .arg(trusted)
@@ -956,7 +1051,8 @@ async fn run(
     known_hosts: &Path,
     way: Way<'_>,
     network: Option<&str>,
-) -> Result<Ran, String> {
+    through: Option<&Through<'_>>,
+) -> Result<Ran, CheckFailure> {
     run_adapter(
         dir,
         config,
@@ -964,6 +1060,7 @@ async fn run(
         known_hosts,
         way,
         network.map(|input| (Adapter::Network, input)),
+        through,
     )
     .await
 }
@@ -971,6 +1068,109 @@ async fn run(
 /// The alias a pinned host key is kept under, so only that key counts
 /// whatever the computer's name or address resolves to.
 const PINNED_ALIAS: &str = "uxduck-network";
+
+/// The alias the pinned host key of the computer another is reached
+/// through is kept under, in a file of its own.
+const THROUGH_ALIAS: &str = "uxduck-through";
+
+/// The computer a route goes through, at one of its addresses, and the
+/// files its own `ssh` reads and writes: its key, written by [`ssh`], its
+/// pinned host key, written by [`trust_through`], and its log, so what it
+/// says about itself reaches neither a terminal nor a server's words.
+#[derive(Clone, Copy)]
+pub(crate) struct Hop<'a> {
+    pub through: &'a Through<'a>,
+    pub at: &'a str,
+    pub key_file: &'a Path,
+    pub known_hosts: &'a Path,
+    pub log: &'a Path,
+}
+
+/// One way to a computer: one of its own addresses, or its address as seen
+/// from the computer it goes through, reached at one of that one's.
+#[derive(Clone, Copy)]
+pub(crate) struct Route<'a> {
+    pub host: &'a str,
+    pub hop: Option<Hop<'a>>,
+}
+
+impl std::fmt::Display for Route<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.hop {
+            None => f.write_str(self.host),
+            Some(hop) => write!(
+                f,
+                "{} through {} at {}",
+                self.host, hop.through.computer.name, hop.at
+            ),
+        }
+    }
+}
+
+/// The routes to `computer` in the order they are tried: each of its own
+/// addresses, then its address through `through` at each of that one's.
+/// A password goes to its first address alone, since another address's key
+/// is checked only after signing in.
+pub(crate) fn routes<'a>(
+    computer: &'a CompanionComputer,
+    through: Option<&'a Through<'a>>,
+    key_file: &'a Path,
+    known_hosts: &'a Path,
+    log: &'a Path,
+    password: bool,
+) -> Vec<Route<'a>> {
+    let mut routes: Vec<Route<'a>> = computer
+        .hosts()
+        .map(|host| Route { host, hop: None })
+        .collect();
+    if password {
+        routes.truncate(1);
+        return routes;
+    }
+    if let Some(through) = through {
+        routes.extend(through.computer.hosts().map(|at| Route {
+            host: &computer.host,
+            hop: Some(Hop {
+                through,
+                at,
+                key_file,
+                known_hosts,
+                log,
+            }),
+        }));
+    }
+    routes
+}
+
+/// Writes the pinned host key of the computer `hop` goes through to its
+/// `known_hosts`, as [`trust_pinned`] does for the computer itself. Why not,
+/// for people, when that computer has not been checked or the key it
+/// pinned is gone.
+pub(crate) async fn trust_through(dir: &Path, hop: Hop<'_>) -> Result<(), String> {
+    let computer = hop.through.computer;
+    let unknown = format!(
+        "Through {}: check {} first, so UXDuck knows its host key",
+        computer.name, computer.name
+    );
+    let Some(pinned) = computer.check.as_ref().and_then(|c| c.host_key.as_deref()) else {
+        return Err(unknown);
+    };
+    if trust_as(dir, computer, pinned, hop.known_hosts, THROUGH_ALIAS).await? {
+        Ok(())
+    } else {
+        Err(unknown)
+    }
+}
+
+/// What a change or a terminal says when no route reached the computer:
+/// each route with why, in UXDuck's own words, and what that means.
+pub(crate) fn cannot_reach(computer: &CompanionComputer, missed: &[String], then: &str) -> String {
+    format!(
+        "Can't reach {}. {}. {then}",
+        computer.name,
+        missed.join(". ")
+    )
+}
 
 /// How one `ssh` verifies the host it reaches.
 #[derive(Clone, Copy)]
@@ -1011,7 +1211,9 @@ pub(crate) struct Ssh {
 /// `host_keys`, never adding keys to the person's agent, and running
 /// `remote` on the computer, or what it gives someone who signs in when
 /// there is none. A key or password `way` needs is written to `key_file` or
-/// `askpass_file`, which the caller removes when `ssh` has ended.
+/// `askpass_file`, which the caller removes when `ssh` has ended. It goes
+/// to `route`, through another computer when the route says so, whose key
+/// the caller removes too.
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -1022,6 +1224,7 @@ pub(crate) fn ssh(
     askpass_file: &Path,
     config: Option<&Path>,
     computer: &CompanionComputer,
+    route: Route<'_>,
     way: Way<'_>,
     host_keys: HostKeys<'_>,
     session: Session<'_>,
@@ -1136,8 +1339,17 @@ pub(crate) fn ssh(
         args.push("-l".into());
         args.push(user.into());
     }
+    if let Some(hop) = route.hop {
+        option(
+            &mut args,
+            &format!(
+                "ProxyCommand={}",
+                proxy_command(hop.through, hop.at, hop.key_file, hop.known_hosts, hop.log)?
+            ),
+        );
+    }
     args.push("--".into());
-    args.push((&computer.host).into());
+    args.push(route.host.into());
     if let Some(remote) = remote {
         args.push(remote.into());
     }
@@ -1171,11 +1383,14 @@ pub(crate) fn ssh_missing() -> String {
     )
 }
 
-/// One `ssh` to the computer, signing in one `way`.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the script and temporary credential lifetimes stay in one scope"
-)]
+/// `ssh` to the computer at each of its addresses in turn, then through
+/// the computer it goes through at each of that one's, until one is
+/// reached. Only a route that never reached the computer is left for the
+/// next ([`not_reached`]), so nothing runs on it twice. When none was
+/// reached, it says so with each route's reason. A check with only one route
+/// keeps what that route's `ssh` said, which [`check_failure`] reads. The
+/// files of the `ssh` a route goes through are in a run folder of their own
+/// ([`RunFiles`]).
 async fn run_adapter(
     dir: &Path,
     config: Option<&Path>,
@@ -1183,6 +1398,213 @@ async fn run_adapter(
     known_hosts: &Path,
     way: Way<'_>,
     adapter: Option<(Adapter, &str)>,
+    through: Option<&Through<'_>>,
+) -> Result<Ran, CheckFailure> {
+    let hop_files = RunFiles::new(dir)?;
+    let hop_key = hop_files.path.join("through_key");
+    let hop_hosts = hop_files.path.join("through_known_hosts");
+    let hop_log = hop_files.path.join("through.log");
+    let password = matches!(way, Way::Password(..) | Way::PasswordOnly(_));
+    let routes = routes(computer, through, &hop_key, &hop_hosts, &hop_log, password);
+    let alone = adapter.is_none() && routes.len() == 1;
+    let mut missed = Vec::new();
+    let mut trusted = false;
+    for route in routes {
+        if let Some(hop) = route.hop
+            && !trusted
+        {
+            if let Err(why) = trust_through(dir, hop).await {
+                missed.push(why);
+                break;
+            }
+            trusted = true;
+        }
+        // The `ssh` it goes through adds to its log: each route reads its own.
+        let _ = std::fs::remove_file(&hop_log);
+        let ran = run_route(dir, config, computer, known_hosts, way, adapter, route).await?;
+        if alone || !not_reached(ran.output.status.code(), &ran.log, &ran.hop_log) {
+            return Ok(ran);
+        }
+        missed.push(format!(
+            "{route}: {}",
+            unreached_why(
+                &format!("{}\n{}", ran.log, ran.hop_log),
+                route.hop.map(|hop| hop.through.computer.name.as_str()),
+            )
+        ));
+    }
+    Err(CheckFailure {
+        problem: cannot_reach(computer, &missed, "Nothing was changed on it."),
+        kind: CheckProblem::Unreachable,
+        detail: None,
+    })
+}
+
+/// The `ssh` that carries a connection through `through`, reached at
+/// `at`, accepting only its pinned host key from `known_hosts`. Its key, a
+/// pasted one alone or else UXDuck's own beside the person's agent, is
+/// written to `key_file`. It writes what it says about itself to `log`, so
+/// none of it reaches a terminal, and a server's banner never reaches it.
+/// OpenSSH runs it with the shell on Unix, so each word is quoted for `sh`,
+/// and `%` is doubled where the outer `ssh` would expand it. The inner
+/// `ssh` expands `%` in its key, known-hosts and log paths again, so those
+/// are doubled twice. The target is `[%h]:%p`, as OpenSSH's own `ProxyJump`
+/// writes it, so an IPv6 address keeps its port. Windows' OpenSSH starts
+/// it without a shell, so it is quoted for `CreateProcess` there, which is
+/// untested.
+pub(crate) fn proxy_command(
+    through: &Through<'_>,
+    at: &str,
+    key_file: &Path,
+    known_hosts: &Path,
+    log: &Path,
+) -> Result<String, String> {
+    const TARGET: &str = "[%h]:%p";
+    let path = |path: &Path| path.display().to_string().replace('%', "%%");
+    let mut words: Vec<String> = [
+        "ssh",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    match (through.pasted, through.own) {
+        (Some(key), _) => {
+            write_private(key_file, key)?;
+            words.extend(["-o".into(), "IdentitiesOnly=yes".into()]);
+            words.extend(["-i".into(), path(key_file)]);
+        }
+        (None, Some(own)) => {
+            write_private(key_file, &own.private)?;
+            words.extend(["-i".into(), path(key_file)]);
+        }
+        (None, None) => {}
+    }
+    for option in [
+        format!("HostKeyAlias={THROUGH_ALIAS}"),
+        format!("UserKnownHostsFile=\"{}\"", path(known_hosts)),
+        "GlobalKnownHostsFile=none".to_owned(),
+        "StrictHostKeyChecking=yes".to_owned(),
+        "CheckHostIP=no".to_owned(),
+        "ControlMaster=no".to_owned(),
+        "ControlPath=none".to_owned(),
+        "AddKeysToAgent=no".to_owned(),
+    ] {
+        words.extend(["-o".into(), option]);
+    }
+    words.extend(["-E".into(), path(log)]);
+    if let Some(port) = through.computer.port {
+        words.extend(["-p".into(), port.to_string()]);
+    }
+    if let Some(user) = &through.computer.user {
+        words.extend(["-l".into(), user.clone()]);
+    }
+    words.extend(["-W".into(), TARGET.into(), "--".into(), at.to_owned()]);
+    Ok(words
+        .iter()
+        .map(|word| {
+            let word = if word == TARGET {
+                word.clone()
+            } else {
+                word.replace('%', "%%")
+            };
+            if cfg!(windows) {
+                format!("\"{}\"", word.replace('"', "\\\""))
+            } else {
+                format!("'{}'", word.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
+/// Whether `ssh`, which ended with `code`, never reached the computer, as its
+/// own `log` and the `hop_log` of the `ssh` it went through say: its name was
+/// not found, nothing answered, or the computer it goes through could not
+/// reach it or refused UXDuck. Nothing ran on the computer, so another
+/// route may be tried. A sign-in, a refusal by the computer itself
+/// ([`refusal`]), a host key it refused and a command's own status of 255
+/// never count, nor does an address `ssh` tried before one that answered,
+/// since only its last line is read.
+pub(crate) fn not_reached(code: Option<i32>, log: &str, hop_log: &str) -> bool {
+    if code != Some(255)
+        || signed_in(log)
+        || log.contains("Authenticated to ")
+        || log.contains("Authentication succeeded")
+        || refusal(log).is_some()
+        || host_key_failed(log)
+    {
+        return false;
+    }
+    let last = last_line(log);
+    let unanswered = last.starts_with("ssh: connect to host ")
+        || last.starts_with("ssh: Could not resolve hostname ")
+        || [
+            "banner exchange",
+            "kex_exchange_identification",
+            "Connection closed by UNKNOWN",
+            "Connection to UNKNOWN",
+        ]
+        .iter()
+        .any(|said| last.contains(said));
+    let hop_missed = [
+        "stdio forwarding failed",
+        "open failed",
+        "ssh: connect to host ",
+        "Could not resolve hostname",
+        "Permission denied",
+        "Host key verification failed",
+    ]
+    .iter()
+    .any(|said| hop_log.contains(said));
+    unanswered || hop_missed
+}
+
+/// Why a route was not reached, in UXDuck's own words, chosen by what
+/// `ssh` and the `ssh` it went through wrote in their logs. Nothing they
+/// wrote is repeated, since a server can write there too (FB-268). `hop`
+/// names the computer it went through, whose own refusals show in `log` too.
+pub(crate) fn unreached_why(log: &str, hop: Option<&str>) -> String {
+    if let Some(hop) = hop {
+        if log.contains("Host key verification failed") {
+            return format!("{hop}'s host key is not the one UXDuck pinned");
+        }
+        if log.contains("Permission denied") {
+            return format!("{hop} refused UXDuck's sign-in");
+        }
+    }
+    if log.contains("Could not resolve hostname") {
+        return "name not found".to_owned();
+    }
+    [
+        ("Connection refused", "connection refused"),
+        ("No route to host", "no route to host"),
+        ("Network is unreachable", "network is unreachable"),
+        ("Host is down", "host is down"),
+        ("timed out", "timed out"),
+    ]
+    .iter()
+    .find(|(said, _)| log.contains(said))
+    .map_or("no answer", |(_, why)| why)
+    .to_owned()
+}
+
+/// One `ssh` to the computer on one route, signing in one `way`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the script and temporary credential lifetimes stay in one scope"
+)]
+async fn run_route(
+    dir: &Path,
+    config: Option<&Path>,
+    computer: &CompanionComputer,
+    known_hosts: &Path,
+    way: Way<'_>,
+    adapter: Option<(Adapter, &str)>,
+    route: Route<'_>,
 ) -> Result<Ran, String> {
     let network = adapter.map(|(_, input)| input);
     let cameras = matches!(adapter, Some((Adapter::Cameras, _)));
@@ -1241,6 +1663,7 @@ async fn run_adapter(
         &askpass_file,
         config,
         computer,
+        route,
         way,
         host_keys,
         Session::Batch,
@@ -1251,6 +1674,9 @@ async fn run_adapter(
         Err(why) => {
             for file in [&key_file, &askpass_file] {
                 let _ = std::fs::remove_file(file);
+            }
+            if let Some(hop) = route.hop {
+                let _ = std::fs::remove_file(hop.key_file);
             }
             return Err(why);
         }
@@ -1290,10 +1716,12 @@ async fn run_adapter(
     for file in [&key_file, &askpass_file] {
         let _ = std::fs::remove_file(file);
     }
+    if let Some(hop) = route.hop {
+        let _ = std::fs::remove_file(hop.key_file);
+    }
     match ran {
         Err(_) => Err(format!(
-            "{} did not answer within {} s",
-            computer.host,
+            "{route} did not answer within {} s",
             timeout.as_secs()
         )),
         Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Err(ssh_missing()),
@@ -1301,6 +1729,10 @@ async fn run_adapter(
         Ok(Ok(output)) => Ok(Ran {
             output,
             log: std::fs::read_to_string(&log_file).unwrap_or_default(),
+            hop_log: route
+                .hop
+                .and_then(|hop| std::fs::read_to_string(hop.log).ok())
+                .unwrap_or_default(),
             asked: askpass_used(&askpass_file).exists(),
             started_ns,
             ended_ns,
@@ -2075,6 +2507,8 @@ mod tests {
             host: "127.0.0.1".into(),
             user: std::env::var("USER").ok(),
             port: Some(server.port),
+            other_hosts: Vec::new(),
+            through: None,
             role: CompanionRole::Report,
             component_id: 191,
             key: true,
@@ -2421,6 +2855,7 @@ mod tests {
                 stderr: Vec::new(),
             },
             log: "debug1: Server host key: ssh-ed25519 SHA256:abc\n".to_owned(),
+            hop_log: String::new(),
             asked: false,
             started_ns,
             ended_ns,
@@ -2440,6 +2875,8 @@ mod tests {
             host: "pi".into(),
             user: None,
             port: None,
+            other_hosts: Vec::new(),
+            through: None,
             role: CompanionRole::Report,
             component_id: 192,
             key: false,
@@ -2730,6 +3167,8 @@ mod tests {
             host: "127.0.0.1".into(),
             user: None,
             port: Some(port),
+            other_hosts: Vec::new(),
+            through: None,
             role: CompanionRole::Report,
             component_id: 191,
             key: false,
@@ -2787,6 +3226,8 @@ mod tests {
             host: "pi".into(),
             user: None,
             port: None,
+            other_hosts: Vec::new(),
+            through: None,
             role: CompanionRole::Report,
             component_id: 192,
             key: false,
@@ -2844,6 +3285,8 @@ mod tests {
             host: "pi".into(),
             user: Some("pi".into()),
             port: None,
+            other_hosts: Vec::new(),
+            through: None,
             role: CompanionRole::Report,
             component_id: 191,
             key: false,
@@ -2945,6 +3388,8 @@ mod tests {
             host: "pi".into(),
             user: None,
             port: None,
+            other_hosts: Vec::new(),
+            through: None,
             role: CompanionRole::Report,
             component_id: 191,
             key: false,
@@ -2959,6 +3404,10 @@ mod tests {
                 &dir.path().join(format!("askpass{at}")),
                 None,
                 &computer,
+                Route {
+                    host: &computer.host,
+                    hop: None,
+                },
                 way,
                 HostKeys::Pinned(&dir.path().join("known_hosts")),
                 Session::Batch,
@@ -2998,6 +3447,8 @@ mod tests {
             host: "pi".into(),
             user: Some("pi".into()),
             port: None,
+            other_hosts: Vec::new(),
+            through: None,
             role: CompanionRole::Report,
             component_id: 191,
             key: false,
@@ -3052,6 +3503,8 @@ mod tests {
             host: "pi".into(),
             user: None,
             port: None,
+            other_hosts: Vec::new(),
+            through: None,
             role: CompanionRole::Report,
             component_id: 191,
             key: false,
@@ -3462,6 +3915,8 @@ mod tests {
             host: "pi.local".into(),
             user: Some("pi".into()),
             port: None,
+            other_hosts: Vec::new(),
+            through: None,
             role: CompanionRole::Report,
             component_id: 191,
             key: false,
@@ -3539,6 +3994,463 @@ mod tests {
                 "Load key \"/k\": invalid format\npi@pi.local: Permission denied (publickey).\n"
             ),
             CheckProblem::GivenKey
+        );
+    }
+
+    /// Buggy's camera Pi with the ground radio unplugged, as `ssh` wrote it in
+    /// its log.
+    const REFUSED: &str = "ssh: connect to host 192.168.50.20 port 22: Connection refused\n";
+    /// The gateway that cannot reach the camera Pi: what the outer `ssh`
+    /// wrote, then what the one it went through wrote.
+    const HOP_CLOSED: &str = "kex_exchange_identification: Connection closed by remote host\nConnection closed by UNKNOWN port 65535\n";
+    const HOP_CANNOT_REACH: &str =
+        "channel 0: open failed: connect failed: No route to host\nstdio forwarding failed\n";
+
+    #[test]
+    fn only_a_route_never_signed_in_to_is_not_reached() {
+        assert!(not_reached(Some(255), REFUSED, ""));
+        assert!(not_reached(Some(255), HOP_CLOSED, HOP_CANNOT_REACH));
+        assert!(not_reached(
+            Some(255),
+            "ssh: Could not resolve hostname cam.local: Name or service not known\n",
+            ""
+        ));
+        assert!(not_reached(
+            Some(255),
+            "Connection timed out during banner exchange\nConnection to UNKNOWN port 65535 timed out\n",
+            ""
+        ));
+        assert!(
+            !not_reached(
+                Some(255),
+                "Authenticated to 192.168.50.20 ([192.168.50.20]:22) using \"publickey\".\nssh: connect to host 192.168.50.20 port 22: No route to host\n",
+                ""
+            ),
+            "a command that ran and exited 255 is never run again"
+        );
+        assert!(
+            !not_reached(
+                Some(255),
+                "pi@192.168.50.20: Permission denied (publickey).\n",
+                ""
+            ),
+            "refused, which the next way to sign in answers"
+        );
+        assert!(
+            !not_reached(
+                Some(255),
+                "debug1: connect to address fe80::1 port 22: Network is unreachable\ndebug1: Connecting to 192.168.50.20 [192.168.50.20] port 22.\npi@192.168.50.20: Permission denied (publickey).\n",
+                ""
+            ),
+            "an address ssh tried first does not hide the refusal"
+        );
+        assert!(
+            !not_reached(
+                Some(255),
+                "Connection closed by 192.168.50.20 port 22\n",
+                ""
+            ),
+            "closed by the computer itself"
+        );
+        assert!(!not_reached(
+            Some(255),
+            "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.\n",
+            ""
+        ));
+        assert!(!not_reached(Some(1), REFUSED, ""));
+        assert!(!not_reached(Some(0), "", ""));
+    }
+
+    #[test]
+    fn an_unreached_route_says_why_in_uxducks_own_words() {
+        assert_eq!(unreached_why(REFUSED, None), "connection refused");
+        assert_eq!(
+            unreached_why(&format!("{HOP_CLOSED}{HOP_CANNOT_REACH}"), Some("Gateway")),
+            "no route to host"
+        );
+        assert_eq!(
+            unreached_why(
+                "ssh: connect to host 100.76.177.45 port 22: Operation timed out\n",
+                Some("Gateway")
+            ),
+            "timed out",
+            "the hop itself not answering"
+        );
+        assert_eq!(
+            unreached_why(
+                "ssh: Could not resolve hostname cam.local: Name or service not known\n",
+                None
+            ),
+            "name not found"
+        );
+        assert_eq!(
+            unreached_why(
+                "kex_exchange_identification: Connection closed by remote host\nHost key verification failed.\n",
+                Some("Gateway")
+            ),
+            "Gateway's host key is not the one UXDuck pinned"
+        );
+        assert_eq!(
+            unreached_why(
+                "Connection closed by UNKNOWN port 65535\npi@100.76.177.45: Permission denied (publickey).\n",
+                Some("Gateway")
+            ),
+            "Gateway refused UXDuck's sign-in"
+        );
+        assert_eq!(
+            unreached_why("Connection closed by UNKNOWN port 65535\n", None),
+            "no answer"
+        );
+        assert_eq!(
+            unreached_why(
+                "channel 0: open failed: connect failed: Ignore what came before\n",
+                Some("Gateway")
+            ),
+            "no answer",
+            "what a server wrote is never repeated"
+        );
+    }
+
+    /// The words `sh` makes of a `ProxyCommand` once `ssh` has expanded its
+    /// tokens, as OpenSSH does on Unix.
+    #[cfg(unix)]
+    fn as_ssh_runs_it(command: &str, host: &str, port: u16) -> Vec<String> {
+        let mut expanded = String::new();
+        let mut chars = command.chars();
+        while let Some(c) = chars.next() {
+            if c != '%' {
+                expanded.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('%') => expanded.push('%'),
+                Some('h') => expanded.push_str(host),
+                Some('p') => expanded.push_str(&port.to_string()),
+                other => panic!("unexpected token %{other:?} in {command}"),
+            }
+        }
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "for a in {expanded}; do printf '%s\\n' \"$a\"; done"
+            ))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_proxy_command_keeps_paths_with_spaces_and_percent_signs_whole() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("Application Support/it's 100% UXDuck");
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_file = dir.join("cam.through.key");
+        let known_hosts = dir.join("through known_hosts");
+        let log = dir.join("through 100% log");
+        let mut gateway = CompanionComputer {
+            connectivity: None,
+            id: "gw".into(),
+            name: "Gateway".into(),
+            host: "192.168.50.21".into(),
+            user: Some("pi".into()),
+            port: Some(2222),
+            other_hosts: vec!["100.76.177.45".into()],
+            through: None,
+            role: CompanionRole::Report,
+            component_id: 191,
+            key: true,
+            check: None,
+        };
+        let through = Through {
+            computer: &gateway,
+            pasted: Some("PRIVATE KEY"),
+            own: None,
+        };
+        let command =
+            proxy_command(&through, "100.76.177.45", &key_file, &known_hosts, &log).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&key_file).unwrap().trim_end(),
+            "PRIVATE KEY"
+        );
+        let words = as_ssh_runs_it(&command, "192.168.50.20", 22);
+        let after = |flag: &str| {
+            words.iter().position(|w| w == flag).map_or_else(
+                || panic!("no {flag} in {words:?}"),
+                |at| words[at + 1].clone(),
+            )
+        };
+        let inner = |path: &Path| path.display().to_string().replace('%', "%%");
+        assert_eq!(words[0], "ssh");
+        assert_eq!(
+            after("-i"),
+            inner(&key_file),
+            "the inner ssh expands % once more"
+        );
+        assert!(
+            words.contains(&format!("UserKnownHostsFile=\"{}\"", inner(&known_hosts))),
+            "{words:?}"
+        );
+        assert!(words.contains(&"HostKeyAlias=uxduck-through".to_owned()));
+        assert_eq!(after("-E"), inner(&log), "its own log");
+        assert!(words.contains(&"StrictHostKeyChecking=yes".to_owned()));
+        assert!(words.contains(&"IdentitiesOnly=yes".to_owned()));
+        assert_eq!(after("-p"), "2222");
+        assert_eq!(after("-l"), "pi");
+        assert_eq!(after("-W"), "[192.168.50.20]:22");
+        assert_eq!(words[words.len() - 2..], ["--", "100.76.177.45"]);
+
+        gateway.user = Some("o'brien".into());
+        let through = Through {
+            computer: &gateway,
+            pasted: None,
+            own: None,
+        };
+        let command =
+            proxy_command(&through, "fe80::1%en0", &key_file, &known_hosts, &log).unwrap();
+        let words = as_ssh_runs_it(&command, "fe80::2", 22);
+        assert_eq!(after_in(&words, "-l"), "o'brien");
+        assert_eq!(after_in(&words, "-W"), "[fe80::2]:22");
+        assert_eq!(words.last().unwrap(), "fe80::1%en0");
+        assert!(
+            !words.contains(&"-i".to_owned()),
+            "no key of its own: the agent's"
+        );
+    }
+
+    #[cfg(unix)]
+    fn after_in(words: &[String], flag: &str) -> String {
+        let at = words.iter().position(|w| w == flag).unwrap();
+        words[at + 1].clone()
+    }
+
+    fn reached(host_key: Option<String>) -> CompanionCheck {
+        CompanionCheck {
+            state: CheckState::Reached,
+            at_us: 1,
+            os: None,
+            arch: None,
+            uxduck: None,
+            host_key,
+            problem: None,
+            problem_kind: None,
+            detail: None,
+            clock: None,
+            reports_as: None,
+            network: None,
+            cameras: None,
+        }
+    }
+
+    /// The camera Pi with the radio unplugged: SSH never connects, so the
+    /// change says it cannot reach the computer, not that the computer
+    /// lacks `MediaMTX` or `NetworkManager`.
+    #[tokio::test]
+    async fn a_change_to_a_computer_ssh_cannot_reach_says_so() {
+        let server = start("host", None);
+        let keys = tempfile::tempdir().unwrap();
+        let config = keys.path().join("ssh_config");
+        std::fs::write(&config, "UserKnownHostsFile /dev/null\n").unwrap();
+        let mut computer = computer(&server);
+        let found = check(
+            keys.path(),
+            Some(&config),
+            &computer,
+            pasted(&client_key(&server)),
+        )
+        .await
+        .unwrap();
+        computer.check = Some(reached(found.host_key));
+        let key = client_key(&server);
+        drop(server);
+        for (what, adapter, input) in [
+            (
+                "cameras",
+                Adapter::Cameras,
+                r#"{"apply":{"path":"cam","preset":"lowLatency"},"linger":false}"#,
+            ),
+            (
+                "networks",
+                Adapter::Network,
+                r#"{"connectivity":{"uri":"https://example.test/204","interval":60}}"#,
+            ),
+        ] {
+            let error = pinned(keys.path(), &computer, pasted(&key), adapter, input)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error,
+                "Can't reach test. 127.0.0.1: connection refused. Nothing was changed on it.",
+                "{what}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_next_address_is_tried_when_one_cannot_be_reached() {
+        let server = start("host", None);
+        let keys = tempfile::tempdir().unwrap();
+        let config = keys.path().join("ssh_config");
+        std::fs::write(&config, "UserKnownHostsFile /dev/null\n").unwrap();
+        let mut computer = computer(&server);
+        computer.host = "uxduck-test-radio.invalid".into();
+        computer.other_hosts = vec!["127.0.0.1".into()];
+        let found = check(
+            keys.path(),
+            Some(&config),
+            &computer,
+            pasted(&client_key(&server)),
+        )
+        .await
+        .unwrap();
+        assert!(found.host_key.is_some(), "{found:?}");
+
+        computer.other_hosts = vec!["uxduck-test-cable.invalid".into()];
+        let why = check(
+            keys.path(),
+            Some(&config),
+            &computer,
+            pasted(&client_key(&server)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            why.problem,
+            "Can't reach test. uxduck-test-radio.invalid: name not found. uxduck-test-cable.invalid: name not found. Nothing was changed on it."
+        );
+        assert_eq!(why.kind, CheckProblem::Unreachable);
+
+        // With one address there is nothing else to try, and the check says
+        // what ssh found in its own words.
+        computer.other_hosts.clear();
+        let why = check(
+            keys.path(),
+            Some(&config),
+            &computer,
+            pasted(&client_key(&server)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            why.problem,
+            "uxduck-test-radio.invalid was not found: check its name, and that it is on this network"
+        );
+        assert_eq!(why.kind, CheckProblem::Unreachable);
+    }
+
+    /// The camera Pi behind the gateway: its own address does not answer,
+    /// so SSH jumps through the gateway, whose pinned host key is enforced.
+    #[tokio::test]
+    async fn a_computer_is_reached_through_another_when_its_own_address_is_not() {
+        let hop = start("hop", None);
+        let camera = start("camera", None);
+        let keys = tempfile::tempdir().unwrap();
+        let config = keys.path().join("ssh_config");
+        std::fs::write(&config, "UserKnownHostsFile /dev/null\n").unwrap();
+        let mut gateway = computer(&hop);
+        gateway.id = "cchop".into();
+        gateway.name = "Gateway".into();
+        let found = check(
+            keys.path(),
+            Some(&config),
+            &gateway,
+            pasted(&client_key(&hop)),
+        )
+        .await
+        .unwrap();
+        gateway.check = Some(reached(found.host_key.clone()));
+
+        // Its own address goes nowhere, as the vehicle's network does with
+        // the radio unplugged. A ProxyCommand given on the command line, as
+        // the route through the gateway is, comes before this one.
+        let unplugged = keys.path().join("unplugged_config");
+        std::fs::write(
+            &unplugged,
+            "UserKnownHostsFile /dev/null\nHost 127.0.0.1\n  ProxyCommand sh -c 'echo \"ssh: connect to host 127.0.0.1 port 22: No route to host\" >&2; exit 255'\n",
+        )
+        .unwrap();
+        let mut pi = computer(&camera);
+        pi.name = "Camera Pi".into();
+        pi.through = Some("cchop".into());
+        let hop_key = client_key(&hop);
+        let through = Through {
+            computer: &gateway,
+            pasted: Some(&hop_key),
+            own: None,
+        };
+        let camera_key = client_key(&camera);
+        let sign_in = SignIn {
+            pasted: Some(&camera_key),
+            through: Some(&through),
+            ..SignIn::default()
+        };
+        let reached_pi = check(keys.path(), Some(&unplugged), &pi, sign_in)
+            .await
+            .unwrap();
+        assert!(reached_pi.host_key.is_some());
+        assert_ne!(
+            reached_pi.host_key, found.host_key,
+            "the camera Pi's own key, not the gateway's"
+        );
+        assert!(
+            std::fs::read_dir(keys.path().join(RUNS))
+                .unwrap()
+                .next()
+                .is_none(),
+            "no key or log of the gateway's is left"
+        );
+
+        let mut wrong = gateway.clone();
+        wrong.check = Some(reached(Some("SHA256:notthegatewayskey".into())));
+        let through = Through {
+            computer: &wrong,
+            pasted: Some(&hop_key),
+            own: None,
+        };
+        let why = check(
+            keys.path(),
+            Some(&unplugged),
+            &pi,
+            SignIn {
+                pasted: Some(&camera_key),
+                through: Some(&through),
+                ..SignIn::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            why.problem,
+            "Can't reach Camera Pi. 127.0.0.1: no route to host. Through Gateway: check Gateway first, so UXDuck knows its host key. Nothing was changed on it."
+        );
+        assert_eq!(why.kind, CheckProblem::Unreachable);
+
+        drop(camera);
+        let through = Through {
+            computer: &gateway,
+            pasted: Some(&hop_key),
+            own: None,
+        };
+        let why = check(
+            keys.path(),
+            Some(&unplugged),
+            &pi,
+            SignIn {
+                pasted: Some(&camera_key),
+                through: Some(&through),
+                ..SignIn::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            why.problem,
+            "Can't reach Camera Pi. 127.0.0.1: no route to host. 127.0.0.1 through Gateway at 127.0.0.1: connection refused. Nothing was changed on it."
         );
     }
 }

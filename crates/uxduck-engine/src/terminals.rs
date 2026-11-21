@@ -137,6 +137,9 @@ impl std::fmt::Debug for PrivateCommand {
 pub struct TerminalOrder {
     pub terminal_id: String,
     pub computer: Box<CompanionComputer>,
+    /// The computer `computer` is reached through when none of its own
+    /// addresses answers (`computer/route`).
+    pub through: Option<Box<CompanionComputer>>,
     pub cols: u16,
     pub rows: u16,
     /// One command with no pseudo-terminal, instead of a session to type
@@ -517,6 +520,7 @@ impl Engine {
         let order = TerminalOrder {
             terminal_id: id.clone(),
             computer: Box::new(computer.clone()),
+            through: crate::companions::through(&vehicle, &computer.id),
             cols: 0,
             rows: 0,
             command: Some(PrivateCommand(params.command.clone())),
@@ -792,9 +796,13 @@ impl Engine {
         connection: ConnectionId,
         params: TerminalOpenParams,
     ) -> Result<TerminalOpenResult, ApiError> {
-        let (vehicle_id, computer) = {
+        let (vehicle_id, computer, through) = {
             let (vehicle, computer) = self.terminal_target(&params)?;
-            (vehicle.id.clone(), computer.clone())
+            (
+                vehicle.id.clone(),
+                computer.clone(),
+                crate::companions::through(vehicle, &computer.id),
+            )
         };
         let (client_id, client_name) = self.terminal_client(connection);
         let terminal = Terminal {
@@ -813,6 +821,7 @@ impl Engine {
         let order = TerminalOrder {
             terminal_id: terminal.id.clone(),
             computer: Box::new(computer),
+            through,
             cols: params.cols,
             rows: params.rows,
             command: params.command.map(PrivateCommand),

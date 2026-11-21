@@ -240,7 +240,8 @@ fn check(name: &str) {
             | "computer_connectivity"
             | "computer_network"
             | "computer_remove"
-            | "computer_rename",
+            | "computer_rename"
+            | "computer_route",
         ) => {
             round_trip::<Vehicle>(name, &json);
         }

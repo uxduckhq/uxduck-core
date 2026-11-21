@@ -31,6 +31,8 @@ impl From<&c::CompanionComputer> for dto::CompanionComputer {
             host: v.host.clone(),
             user: v.user.clone(),
             port: v.port,
+            other_hosts: v.other_hosts.clone(),
+            through: v.through.clone(),
             role: v.role.into(),
             component_id: v.component_id,
             key: v.key,

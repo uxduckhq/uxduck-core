@@ -142,6 +142,15 @@ pub struct CompanionComputer {
     /// The SSH port; absent, SSH's own choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Other addresses it answers at, such as its Tailscale address, tried
+    /// in order when `host` cannot be reached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_hosts: Vec<String>,
+    /// Another of its vehicle's computers, by id, that SSH goes through when
+    /// none of its own addresses can be reached, such as a camera computer
+    /// on the vehicle's own network behind the computer with the internet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through: Option<String>,
     #[serde(default)]
     pub role: CompanionRole,
     /// The onboard computer id it reports as, 191 to 194.
@@ -155,6 +164,11 @@ pub struct CompanionComputer {
 }
 
 impl CompanionComputer {
+    /// Its addresses in the order SSH tries them.
+    pub fn hosts(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.host.as_str()).chain(self.other_hosts.iter().map(String::as_str))
+    }
+
     /// The credential holding its private key.
     #[must_use]
     pub fn key_name(&self) -> String {
