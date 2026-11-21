@@ -517,11 +517,13 @@ fn shared_plan(plan: &Plan) -> Change {
 }
 
 /// What a vehicle is in the account: its profile, not where it was last
-/// heard or the connections added for it here.
+/// heard, the connections added for it here or its companion computers,
+/// which are signed in to from this computer (FB-278).
 fn profile(vehicle: &Vehicle) -> Vehicle {
     Vehicle {
         aliases: Vec::new(),
         added_links: Vec::new(),
+        companions: Vec::new(),
         link_id: String::new(),
         peer: String::new(),
         system_id: 0,
@@ -982,7 +984,10 @@ impl Engine {
     /// larger changes than when it refused, this one's size among them. One
     /// the account had no room for goes again when the account has room for
     /// what keeping it adds. Only the copy that was refused is sent again,
-    /// while it is still the copy here: a newer one goes by itself.
+    /// while it is still the copy here: a newer one goes by itself. A
+    /// vehicle refused with its companion computers, before FB-278, goes
+    /// once without them whatever the answer, for the account to measure
+    /// the smaller copy: refused again, that copy and its numbers are kept.
     #[must_use]
     pub fn sync_again(&self, answer: &PushAnswer) -> Vec<SyncChange> {
         self.state
@@ -990,32 +995,55 @@ impl Engine {
             .too_large
             .iter()
             .filter(|one| one.not_taken.is_none())
-            .filter(|one| match &one.no_room {
-                Some(room) => answer
-                    .account_bytes
-                    .zip(answer.allowance_bytes)
-                    .is_some_and(|(held, allowed)| allowed.saturating_sub(held) >= room.adds_bytes),
-                None => answer.max_change_bytes.is_some_and(|max| {
-                    one.bytes <= max && one.max_bytes.is_none_or(|was| max > was)
-                }),
+            .filter_map(|one| {
+                let takes = match &one.no_room {
+                    Some(room) => answer
+                        .account_bytes
+                        .zip(answer.allowance_bytes)
+                        .is_some_and(|(held, allowed)| {
+                            allowed.saturating_sub(held) >= room.adds_bytes
+                        }),
+                    None => answer.max_change_bytes.is_some_and(|max| {
+                        one.bytes <= max && one.max_bytes.is_none_or(|was| max > was)
+                    }),
+                };
+                if !takes && (one.entity != "vehicle" || one.copy.is_none()) {
+                    return None;
+                }
+                let change = self.refused_copy(one)?;
+                let smaller = one
+                    .copy
+                    .as_ref()
+                    .is_some_and(|copy| copy.digest != change.digest);
+                (takes || smaller).then_some(change)
             })
-            .filter_map(|one| self.refused_copy(one))
             .collect()
     }
 
     /// The change a refused entity was sent as, if it is still the copy
-    /// here and the account's to have.
+    /// here and the account's to have. A vehicle refused before FB-278 went
+    /// with its companion computers, and goes again without them.
     fn refused_copy(&self, refused: &TooLarge) -> Option<SyncChange> {
         let (entity, id) = (refused.entity.as_str(), refused.id.as_str());
         self.sync_name(entity, id)?;
         let state = &self.state;
+        let mut before_fb_278 = None;
         let (own_version, change) = match entity {
-            "vehicle" => (
-                None,
-                Change::VehicleUpserted {
-                    vehicle: profile(state.vehicles.get(id)?),
-                },
-            ),
+            "vehicle" => {
+                let here = state.vehicles.get(id)?;
+                before_fb_278 = Some(digest(&Change::VehicleUpserted {
+                    vehicle: Vehicle {
+                        companions: here.companions.clone(),
+                        ..profile(here)
+                    },
+                }));
+                (
+                    None,
+                    Change::VehicleUpserted {
+                        vehicle: profile(here),
+                    },
+                )
+            }
             "link" => (
                 None,
                 Change::LinkUpserted {
@@ -1035,7 +1063,14 @@ impl Engine {
         };
         let digest = digest(&change);
         let (version, ts_us) = match &refused.copy {
-            Some(copy) if copy.digest == digest => (copy.version, copy.ts_us),
+            Some(copy)
+                if copy.digest == digest
+                    || before_fb_278
+                        .as_ref()
+                        .is_some_and(|before| copy.digest == *before) =>
+            {
+                (copy.version, copy.ts_us)
+            }
             Some(_) => return None,
             // Listed before UXDuck kept which copy was refused: sent as it
             // is here now, when it carries its own version.

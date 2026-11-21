@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "ed4fb1f3d79c4508811f9bf1b5b08ff549ae66cb",
+  "sourceCommit": "ad6fe888130fd25fb49f8ea8c27d26dc43c243c6",
   "licenseReady": true,
   "files": [
     {
@@ -7356,7 +7356,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/sync.rs",
-      "sha256": "a0908c09b16bf722b7f3b9fde47fda5c2a5d464a41ff5617fda8d8d8fb47ba79",
+      "sha256": "671c07865576f510f72485cd1ad856fc4465902eaa746f9204480973e857a631",
       "executable": false
     },
     {
