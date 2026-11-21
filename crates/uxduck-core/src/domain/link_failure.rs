@@ -42,6 +42,9 @@ pub enum LinkFailureKind {
     /// Something this account may not open or use: a serial device, or a
     /// socket a firewall or security software refuses.
     AccessDenied,
+    /// A serial device with nothing working behind it: opening it fails
+    /// with an I/O error, or no such device (FB-287).
+    NoHardware,
     /// Anything else: shown in the system's own words.
     #[default]
     Other,
@@ -166,20 +169,51 @@ impl LinkFailure {
     /// own message after its path.
     #[must_use]
     pub fn device_words(&self, device: &str) -> String {
-        match self.kind {
-            LinkFailureKind::DeviceMissing => {
+        self.device_words_with(device, &DeviceFacts::default())
+    }
+
+    /// What happened to a serial device, with what UXDuck could learn about
+    /// it: why this account may not open it, whether anything is behind it,
+    /// and where the vehicle may be instead (FB-287).
+    #[must_use]
+    pub fn device_words_with(&self, device: &str, facts: &DeviceFacts) -> String {
+        use LinkFailureKind as K;
+        let no_hardware = facts.hardware == Some(false);
+        let words = match self.kind {
+            K::DeviceMissing => {
                 format!("{device} isn't connected. Check the cable and that the device is on.")
             }
-            LinkFailureKind::DeviceUnavailable => format!(
+            K::DeviceUnavailable => format!(
                 "UXDuck can't open {device}. It may be unplugged or in use by another program, or this account may not be allowed to open it."
             ),
-            LinkFailureKind::DeviceBusy => format!(
+            K::DeviceBusy => format!(
                 "UXDuck can't open {device}. Another program or account may be holding it, or this account may not be allowed to use it."
             ),
-            LinkFailureKind::AccessDenied => format!(
-                "UXDuck isn't allowed to open {device}. Check that this account may use serial ports."
+            K::AccessDenied if no_hardware => format!(
+                "UXDuck isn't allowed to open {device}, and no serial hardware is behind it, so no vehicle can be there."
             ),
-            _ => format!("{device}: {}", self.message),
+            K::AccessDenied => {
+                format!(
+                    "UXDuck isn't allowed to open {device}. {}",
+                    facts.why_denied()
+                )
+            }
+            K::NoHardware if no_hardware => {
+                format!("{device} has no serial hardware behind it, so no vehicle can be there.")
+            }
+            K::NoHardware => format!(
+                "Nothing answers at {device}. The system couldn't open it, which usually means no hardware is behind it."
+            ),
+            _ => return format!("{device}: {}", self.message),
+        };
+        let look_elsewhere = match self.kind {
+            K::DeviceMissing | K::NoHardware => true,
+            K::AccessDenied => no_hardware || device.starts_with("/dev/ttyS"),
+            _ => false,
+        };
+        match facts.instead(device).filter(|_| look_elsewhere) {
+            Some(instead) => format!("{words} {instead}"),
+            None => words,
         }
     }
 
@@ -191,6 +225,150 @@ impl LinkFailure {
             .os_code
             .map_or_else(String::new, |code| format!(", OS error {code}"));
         format!("{:?} during {:?}{code}", self.kind, self.operation)
+    }
+}
+
+/// What UXDuck could learn about a serial device that won't open, so the
+/// words say why and what to do (FB-287). The daemon reads it on Linux, and
+/// it stays empty where nothing could be read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeviceFacts {
+    /// The account that owns the device.
+    pub owner: Option<String>,
+    pub group: Option<DeviceGroup>,
+    /// The device's permission bits.
+    pub mode: u32,
+    /// For a port built into the computer, whether a serial chip answers
+    /// behind it: Linux lists 32 of them whether or not they exist.
+    pub hardware: Option<bool>,
+    /// Ports where a flight controller on USB shows up on this computer.
+    pub usb_ports: Vec<String>,
+    /// Flight controllers UXDuck knows by their USB id, plugged in now.
+    pub boards: Vec<KnownPort>,
+}
+
+/// A serial port with a flight controller UXDuck knows behind it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KnownPort {
+    pub device: String,
+    pub name: String,
+}
+
+/// The group that owns a serial device, and this account's place in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceGroup {
+    pub name: String,
+    /// 0 is the superuser's group and 5 usually terminals', which nobody
+    /// should join to reach a port.
+    pub gid: u32,
+    /// The system's group list names this account.
+    pub member: bool,
+    /// One of the groups UXDuck runs with now. A process keeps the groups
+    /// it started with, and UXDuck keeps running in the background after
+    /// its window closes and after a log out (FB-289).
+    pub current: bool,
+}
+
+/// The usual id of the tty group, which owns terminals and consoles.
+const TTY_GID: u32 = 5;
+
+/// A group name that goes into a typed command as it is: the shadow
+/// utilities' own rule, so nothing in it reaches the shell (FB-287).
+fn typable_group(name: &str) -> bool {
+    let body = name.strip_suffix('$').unwrap_or(name);
+    let mut chars = body.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+impl DeviceFacts {
+    /// Why this account may not open the device, and what to do about it.
+    fn why_denied(&self) -> String {
+        let Some(group) = &self.group else {
+            return if cfg!(windows) {
+                "Close any program using it, or install the board's driver.".to_owned()
+            } else {
+                "Check that this account may use serial ports.".to_owned()
+            };
+        };
+        let name = &group.name;
+        let owner = self.owner.as_deref().unwrap_or("its owner");
+        if group.gid == 0 {
+            return format!(
+                "Only {owner} and the {name} group may open it. A udev rule can give a group such as dialout read and write access to it, and then you can join that group."
+            );
+        }
+        if name == "tty" || group.gid == TTY_GID {
+            return "It belongs to the tty group, so it's a terminal, such as the computer's login console on a serial port. Joining that group would let this account write to everyone's terminals, so turn off the serial console instead. On a Raspberry Pi, run sudo raspi-config, choose Interface Options, then Serial Port, answer No to a login shell and Yes to the serial port hardware, and restart.".to_owned();
+        }
+        if self.mode & 0o060 != 0o060 {
+            return format!(
+                "Only {owner} may open it, so joining its group, {name}, won't help. A udev rule can give the {name} group read and write access to it."
+            );
+        }
+        let typable = typable_group(name);
+        match (group.member, group.current) {
+            (_, true) => format!(
+                "It belongs to the {name} group, and UXDuck runs in it, so something else is blocking it, such as a security policy."
+            ),
+            (true, false) => {
+                let restart = if typable {
+                    format!(
+                        "Restart the computer, or run uxduck daemon stop && sg {name} -c \"uxduck daemon start\" in a terminal."
+                    )
+                } else {
+                    "Restart the computer.".to_owned()
+                };
+                format!(
+                    "It belongs to the {name} group. This account joined that group after UXDuck started, and UXDuck keeps the groups it started with, even after a log out, because it runs in the background. {restart}"
+                )
+            }
+            (false, false) => {
+                let join = if typable {
+                    format!("Run sudo usermod -aG {name} $USER")
+                } else {
+                    format!("Add this account to the \u{201c}{name}\u{201d} group")
+                };
+                format!(
+                    "It belongs to the {name} group, and this account isn't in it. {join}, then restart the computer. Logging out isn't enough while UXDuck keeps running in the background."
+                )
+            }
+        }
+    }
+
+    /// Where the vehicle may be instead of `device`: a flight controller
+    /// UXDuck knows, any USB serial port, or where one usually shows up on
+    /// Linux.
+    fn instead(&self, device: &str) -> Option<String> {
+        let mut seen: Vec<(&str, Vec<&str>)> = Vec::new();
+        for board in self.boards.iter().filter(|board| board.device != device) {
+            match seen.iter_mut().find(|(name, _)| *name == board.name) {
+                Some((_, devices)) => devices.push(&board.device),
+                None => seen.push((&board.name, vec![&board.device])),
+            }
+        }
+        if !seen.is_empty() {
+            let boards = seen
+                .iter()
+                .map(|(name, devices)| format!("{name} at {}", devices.join(" or ")))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            return Some(format!(
+                "UXDuck sees {boards}, so that may be the port you want."
+            ));
+        }
+        let usb = self.usb_ports.join(" or ");
+        if !usb.is_empty() {
+            return Some(format!(
+                "A flight controller on USB shows up as {usb} here, so that may be the port you want."
+            ));
+        }
+        (cfg!(target_os = "linux") && device.starts_with("/dev/ttyS")).then(|| {
+            "A flight controller on USB usually shows up as /dev/ttyACM0 or /dev/ttyUSB0."
+                .to_owned()
+        })
     }
 }
 
@@ -299,8 +477,51 @@ const EHOSTDOWN: i32 = i32::MIN;
 
 #[cfg(test)]
 mod tests {
-    use super::{LinkFailure, LinkFailureKind, LinkOperation};
+    use super::{DeviceFacts, DeviceGroup, KnownPort, LinkFailure, LinkFailureKind, LinkOperation};
     use std::io;
+
+    /// A character device: root's, in `group`, readable and writable by
+    /// owner and group, and this account's place in that group.
+    fn device(group: &str, member: bool, current: bool) -> DeviceFacts {
+        DeviceFacts {
+            owner: Some("root".into()),
+            group: Some(DeviceGroup {
+                name: group.into(),
+                gid: 20,
+                member,
+                current,
+            }),
+            mode: 0o020_660,
+            ..DeviceFacts::default()
+        }
+    }
+
+    fn said(kind: LinkFailureKind, facts: &DeviceFacts, path: &str) -> String {
+        LinkFailure::device(kind, "the system's words".into()).device_words_with(path, facts)
+    }
+
+    fn denied(facts: &DeviceFacts, path: &str) -> String {
+        said(LinkFailureKind::AccessDenied, facts, path)
+    }
+
+    /// Where a flight controller usually shows up, said only on Linux, whose
+    /// names these are.
+    const USUAL: &str = if cfg!(target_os = "linux") {
+        " A flight controller on USB usually shows up as /dev/ttyACM0 or /dev/ttyUSB0."
+    } else {
+        ""
+    };
+
+    /// FB-287's computer: ArduPilot's two USB ports.
+    fn ardupilot() -> Vec<KnownPort> {
+        ["/dev/ttyACM0", "/dev/ttyACM1"]
+            .into_iter()
+            .map(|device| KnownPort {
+                device: device.into(),
+                name: "ArduPilot flight controller".into(),
+            })
+            .collect()
+    }
 
     fn failure(operation: LinkOperation, code: i32) -> LinkFailure {
         LinkFailure::from_io(operation, &io::Error::from_raw_os_error(code))
@@ -526,6 +747,257 @@ mod tests {
         );
     }
 
+    /// FB-287: not in the group that owns the port. The words name the
+    /// group and give the command with it.
+    #[test]
+    fn a_denied_port_names_its_group_and_the_command_to_join_it() {
+        assert_eq!(
+            denied(&device("dialout", false, false), "/dev/ttyACM0"),
+            "UXDuck isn't allowed to open /dev/ttyACM0. It belongs to the dialout group, and this account isn't in it. Run sudo usermod -aG dialout $USER, then restart the computer. Logging out isn't enough while UXDuck keeps running in the background."
+        );
+        assert!(
+            denied(&device("uucp", false, false), "/dev/ttyUSB0")
+                .contains("Run sudo usermod -aG uucp $USER, then restart the computer.")
+        );
+    }
+
+    /// FB-289: added to the group and logged out and in, but UXDuck kept
+    /// running in the background with the groups it started with.
+    #[test]
+    fn a_group_joined_after_uxduck_started_says_to_start_it_again() {
+        assert_eq!(
+            denied(&device("dialout", true, false), "/dev/ttyACM0"),
+            "UXDuck isn't allowed to open /dev/ttyACM0. It belongs to the dialout group. This account joined that group after UXDuck started, and UXDuck keeps the groups it started with, even after a log out, because it runs in the background. Restart the computer, or run uxduck daemon stop && sg dialout -c \"uxduck daemon start\" in a terminal."
+        );
+        assert!(
+            denied(&device("dialout", true, true), "/dev/ttyACM0")
+                .contains("UXDuck runs in it, so something else is blocking it")
+        );
+    }
+
+    /// Joining the group can't help when the group may not use the port.
+    #[test]
+    fn a_port_only_its_owner_may_open_says_joining_wont_help() {
+        let owner_only = DeviceFacts {
+            mode: 0o020_600,
+            ..device("dialout", true, true)
+        };
+        assert_eq!(
+            denied(&owner_only, "/dev/ttyUSB0"),
+            "UXDuck isn't allowed to open /dev/ttyUSB0. Only root may open it, so joining its group, dialout, won't help. A udev rule can give the dialout group read and write access to it."
+        );
+        let mut root_group = device("root", false, false);
+        root_group.group.as_mut().unwrap().gid = 0;
+        let words = denied(&root_group, "/dev/ttyACM0");
+        assert!(words.contains("Only root and the root group may open it."));
+        assert!(!words.contains("usermod"), "never join the root group");
+    }
+
+    /// A Pi's serial console is root:tty 0620, and joining tty would let
+    /// this account write to everyone's terminals. The words say to turn
+    /// the console off, whatever the mode, and never to join or give tty
+    /// anything (FB-287 review).
+    #[test]
+    fn a_terminal_says_to_turn_off_the_serial_console() {
+        let console = format!(
+            "UXDuck isn't allowed to open /dev/ttyS0. It belongs to the tty group, so it's a terminal, such as the computer's login console on a serial port. Joining that group would let this account write to everyone's terminals, so turn off the serial console instead. On a Raspberry Pi, run sudo raspi-config, choose Interface Options, then Serial Port, answer No to a login shell and Yes to the serial port hardware, and restart.{USUAL}"
+        );
+        for mode in [0o020_620, 0o020_660, 0o020_600] {
+            for (name, member) in [("tty", false), ("tty", true)] {
+                let facts = DeviceFacts {
+                    mode,
+                    ..device(name, member, false)
+                };
+                assert_eq!(denied(&facts, "/dev/ttyS0"), console, "{mode:o} {member}");
+            }
+        }
+        let mut by_id = device("terminals", false, false);
+        by_id.group.as_mut().unwrap().gid = 5;
+        let words = denied(&by_id, "/dev/ttyAMA0");
+        assert!(words.contains("turn off the serial console"), "{words}");
+        assert!(!words.contains("usermod") && !words.contains("udev"));
+    }
+
+    /// A group name that isn't one the shadow utilities would make goes in
+    /// words, never into a command to paste (FB-287 review).
+    #[test]
+    fn an_odd_group_name_is_never_put_in_a_command() {
+        for name in ["evil$(id)", "domain users", "-rf", ""] {
+            for member in [false, true] {
+                let words = denied(&device(name, member, false), "/dev/ttyACM0");
+                assert!(
+                    !words.contains("usermod") && !words.contains(" sg "),
+                    "{name}: {words}"
+                );
+            }
+        }
+        assert!(
+            denied(&device("domain users", false, false), "/dev/ttyACM0").contains(
+                "Add this account to the “domain users” group, then restart the computer."
+            )
+        );
+        assert!(
+            denied(&device("evil$(id)", true, false), "/dev/ttyACM0")
+                .ends_with("because it runs in the background. Restart the computer.")
+        );
+        for name in [
+            "dialout",
+            "uucp",
+            "Serial_Ports",
+            "_serial",
+            "machine$",
+            "plug-dev",
+        ] {
+            assert!(
+                denied(&device(name, false, false), "/dev/ttyACM0")
+                    .contains(&format!("Run sudo usermod -aG {name} $USER")),
+                "{name}"
+            );
+        }
+    }
+
+    /// A built-in port with hardware, and ArduPilot on USB.
+    #[test]
+    fn a_built_in_port_points_at_the_flight_controller() {
+        let with_board = DeviceFacts {
+            hardware: Some(true),
+            boards: ardupilot(),
+            ..device("dialout", false, false)
+        };
+        assert_eq!(
+            denied(&with_board, "/dev/ttyS4"),
+            "UXDuck isn't allowed to open /dev/ttyS4. It belongs to the dialout group, and this account isn't in it. Run sudo usermod -aG dialout $USER, then restart the computer. Logging out isn't enough while UXDuck keeps running in the background. UXDuck sees ArduPilot flight controller at /dev/ttyACM0 or /dev/ttyACM1, so that may be the port you want."
+        );
+        let usb_only = DeviceFacts {
+            boards: Vec::new(),
+            usb_ports: vec!["/dev/ttyUSB0".into()],
+            ..with_board.clone()
+        };
+        assert!(denied(&usb_only, "/dev/ttyS4").ends_with(
+            "A flight controller on USB shows up as /dev/ttyUSB0 here, so that may be the port you want."
+        ));
+        assert!(
+            !denied(&with_board, "/dev/ttyACM0").contains("UXDuck sees"),
+            "the board's own other port would be denied too"
+        );
+    }
+
+    /// FB-287's first words: ttyS15 with no chip behind it, as this account
+    /// may not open it.
+    #[test]
+    fn a_denied_port_with_no_hardware_says_so_instead() {
+        let empty = DeviceFacts {
+            hardware: Some(false),
+            boards: ardupilot(),
+            ..device("dialout", false, false)
+        };
+        assert_eq!(
+            denied(&empty, "/dev/ttyS15"),
+            "UXDuck isn't allowed to open /dev/ttyS15, and no serial hardware is behind it, so no vehicle can be there. UXDuck sees ArduPilot flight controller at /dev/ttyACM0 or /dev/ttyACM1, so that may be the port you want."
+        );
+        let nothing_plugged_in = DeviceFacts {
+            boards: Vec::new(),
+            ..empty
+        };
+        assert_eq!(
+            denied(&nothing_plugged_in, "/dev/ttyS15"),
+            format!(
+                "UXDuck isn't allowed to open /dev/ttyS15, and no serial hardware is behind it, so no vehicle can be there.{USUAL}"
+            )
+        );
+    }
+
+    /// FB-287 once in the group: "/dev/ttyS15: I/O error". The words say
+    /// nothing answers, with confidence when the kernel says no chip is
+    /// there.
+    #[test]
+    fn a_port_that_fails_with_an_io_error_says_nothing_answers() {
+        let unknown = DeviceFacts {
+            boards: ardupilot(),
+            ..DeviceFacts::default()
+        };
+        assert_eq!(
+            said(LinkFailureKind::NoHardware, &unknown, "/dev/ttyS15"),
+            "Nothing answers at /dev/ttyS15. The system couldn't open it, which usually means no hardware is behind it. UXDuck sees ArduPilot flight controller at /dev/ttyACM0 or /dev/ttyACM1, so that may be the port you want."
+        );
+        let empty = DeviceFacts {
+            hardware: Some(false),
+            ..DeviceFacts::default()
+        };
+        assert_eq!(
+            said(LinkFailureKind::NoHardware, &empty, "/dev/ttyS15"),
+            format!(
+                "/dev/ttyS15 has no serial hardware behind it, so no vehicle can be there.{USUAL}"
+            )
+        );
+        assert_eq!(
+            said(
+                LinkFailureKind::NoHardware,
+                &DeviceFacts::default(),
+                "/dev/cu.usbmodem1"
+            ),
+            "Nothing answers at /dev/cu.usbmodem1. The system couldn't open it, which usually means no hardware is behind it."
+        );
+    }
+
+    /// A port that isn't there names a board that is.
+    #[test]
+    fn a_missing_port_names_a_flight_controller_that_is_plugged_in() {
+        let facts = DeviceFacts {
+            boards: ardupilot(),
+            ..DeviceFacts::default()
+        };
+        assert_eq!(
+            said(LinkFailureKind::DeviceMissing, &facts, "/dev/ttyS15"),
+            "/dev/ttyS15 isn't connected. Check the cable and that the device is on. UXDuck sees ArduPilot flight controller at /dev/ttyACM0 or /dev/ttyACM1, so that may be the port you want."
+        );
+        assert!(
+            !said(LinkFailureKind::DeviceBusy, &facts, "/dev/ttyS15").contains("UXDuck sees"),
+            "a busy port is the right one"
+        );
+    }
+
+    #[test]
+    fn device_words_have_no_semicolons() {
+        let mut root_group = device("root", false, false);
+        root_group.group.as_mut().unwrap().gid = 0;
+        for facts in [
+            DeviceFacts::default(),
+            device("dialout", false, false),
+            device("dialout", true, false),
+            device("dialout", true, true),
+            DeviceFacts {
+                mode: 0o600,
+                ..device("tty", true, true)
+            },
+            root_group,
+            DeviceFacts {
+                hardware: Some(false),
+                ..DeviceFacts::default()
+            },
+            DeviceFacts {
+                hardware: Some(true),
+                usb_ports: vec!["/dev/ttyACM0".into()],
+                ..device("dialout", false, false)
+            },
+            DeviceFacts {
+                boards: ardupilot(),
+                ..device("dialout", false, false)
+            },
+        ] {
+            for kind in [
+                LinkFailureKind::AccessDenied,
+                LinkFailureKind::NoHardware,
+                LinkFailureKind::DeviceMissing,
+            ] {
+                assert!(
+                    !said(kind, &facts, "/dev/ttyS15").contains(';'),
+                    "{kind:?} {facts:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn plain_words_have_no_semicolons() {
         use LinkFailureKind as K;
@@ -544,6 +1016,7 @@ mod tests {
             K::DeviceUnavailable,
             K::DeviceBusy,
             K::AccessDenied,
+            K::NoHardware,
         ] {
             for operation in [
                 O::Connect,

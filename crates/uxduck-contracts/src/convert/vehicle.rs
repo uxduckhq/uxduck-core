@@ -559,6 +559,7 @@ impl From<&core_link::Link> for link::Link {
                     LinkFailureKind::DeviceUnavailable => link::LinkFailureKind::DeviceUnavailable,
                     LinkFailureKind::DeviceBusy => link::LinkFailureKind::DeviceBusy,
                     LinkFailureKind::AccessDenied => link::LinkFailureKind::AccessDenied,
+                    LinkFailureKind::NoHardware => link::LinkFailureKind::NoHardware,
                     LinkFailureKind::Other => link::LinkFailureKind::Other,
                 },
                 operation: match e.operation {

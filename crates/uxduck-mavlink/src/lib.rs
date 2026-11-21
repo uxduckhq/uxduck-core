@@ -65,6 +65,8 @@ pub mod xz;
 pub mod links;
 #[cfg(feature = "native")]
 pub mod probe;
+#[cfg(feature = "native")]
+pub mod serial_access;
 
 /// The daemon's own MAVLink identity when it sends: system 255, the
 /// conventional ground station, and component 190 (`MAV_COMP_ID_MISSIONPLANNER`).

@@ -454,6 +454,7 @@ pub fn serial_ports() -> Vec<SerialPortInfo> {
     ports
         .into_iter()
         .filter(|p| !p.port_name.starts_with("/dev/tty."))
+        .filter(|p| !built_in_and_empty(&p.port_name))
         .map(|p| {
             let (usb, description) = match p.port_type {
                 serialport::SerialPortType::UsbPort(info) => {
@@ -480,6 +481,20 @@ pub fn serial_ports() -> Vec<SerialPortInfo> {
             }
         })
         .collect()
+}
+
+/// A port built into the computer with no chip behind it. Linux lists
+/// ttyS0 to ttyS31 whatever the computer has, so they aren't offered
+/// (FB-287). One the kernel can't say about stays.
+fn built_in_and_empty(device: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    return device.starts_with("/dev/ttyS")
+        && crate::serial_access::hardware(device) == Some(false);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = device;
+        false
+    }
 }
 
 /// Where to open a serial link now: the port with its USB identity, wherever
@@ -514,6 +529,14 @@ fn open_serial(path: &str, baud: u32) -> serialport::Result<Box<dyn serialport::
     }
 }
 
+/// EIO, ENXIO and ENODEV on open: a device node with nothing working behind
+/// it, such as a built-in port with no chip (FB-287). The library keeps only
+/// these descriptions, which are its own and the same on every system.
+const NO_HARDWARE: [&str; 3] = ["I/O error", "No such device or address", "No such device"];
+/// EPERM on open, which the library reports only by this description: a
+/// security policy or a container's device rules (FB-287).
+const NOT_PERMITTED: &str = "Operation not permitted";
+
 /// A serial device that could not open, by the kind its library told. The
 /// library drops the system's code behind `NoDevice`: on Windows that is
 /// a port that isn't there as well as one another program holds or this
@@ -524,6 +547,12 @@ fn open_failure(error: &serialport::Error) -> LinkFailure {
         serialport::ErrorKind::NoDevice if cfg!(windows) => LinkFailureKind::DeviceUnavailable,
         serialport::ErrorKind::NoDevice => LinkFailureKind::DeviceBusy,
         serialport::ErrorKind::Io(kind) => return device_failure(kind, None, &error.description),
+        serialport::ErrorKind::Unknown if NO_HARDWARE.contains(&error.description.as_str()) => {
+            LinkFailureKind::NoHardware
+        }
+        serialport::ErrorKind::Unknown if error.description == NOT_PERMITTED => {
+            LinkFailureKind::AccessDenied
+        }
         _ => LinkFailureKind::Other,
     };
     LinkFailure::device(kind, error.description.clone())
@@ -607,7 +636,10 @@ pub fn serial(device: String, baud: u32, usb: Option<UsbId>, events: Events) -> 
                                 }
                             }
                             if let Some(failure) = failed {
-                                break (failure.device_words(&path), Some(failure));
+                                break (
+                                    crate::serial_access::words(&failure, &path),
+                                    Some(failure),
+                                );
                             }
                             if let Some(event) = pending.take() {
                                 match events.0.try_send(event) {
@@ -635,7 +667,10 @@ pub fn serial(device: String, baud: u32, usb: Option<UsbId>, events: Events) -> 
                                 Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
                                 Err(error) => {
                                     let failure = io_failure(&error);
-                                    break (failure.device_words(&path), Some(failure));
+                                    break (
+                                        crate::serial_access::words(&failure, &path),
+                                        Some(failure),
+                                    );
                                 }
                             }
                         };
@@ -647,7 +682,7 @@ pub fn serial(device: String, baud: u32, usb: Option<UsbId>, events: Events) -> 
                         report_down(
                             &events,
                             &mut last_down,
-                            failure.device_words(&path),
+                            crate::serial_access::words(&failure, &path),
                             Some(failure),
                             &stopped,
                         );
@@ -700,6 +735,74 @@ mod tests {
         assert_eq!(
             windows.device_words("COM4"),
             "UXDuck can't open COM4. It may be unplugged or in use by another program, or this account may not be allowed to open it."
+        );
+    }
+
+    /// FB-287: EACCES and EPERM are both "not allowed", and the link says
+    /// why in UXDuck's words rather than the system's.
+    #[cfg(unix)]
+    #[test]
+    fn a_serial_port_this_account_may_not_open_says_why() {
+        // As the library reports them on open: EACCES with its kind, EPERM
+        // only by its description.
+        for error in [
+            serialport::Error::from(std::io::Error::from_raw_os_error(13)),
+            serialport::Error::new(serialport::ErrorKind::Unknown, "Operation not permitted"),
+        ] {
+            let failure = open_failure(&error);
+            assert_eq!(failure.kind, LinkFailureKind::AccessDenied, "{error:?}");
+            assert!(
+                crate::serial_access::words(&failure, "/dev/ttyACM0")
+                    .starts_with("UXDuck isn't allowed to open /dev/ttyACM0."),
+            );
+        }
+    }
+
+    /// FB-287: "/dev/ttyS15: I/O error". EIO, ENXIO and ENODEV on open are
+    /// a port with nothing behind it, by the descriptions the library keeps.
+    #[test]
+    fn a_port_with_nothing_behind_it_reads_as_no_hardware() {
+        for description in ["I/O error", "No such device or address", "No such device"] {
+            let error = serialport::Error::new(serialport::ErrorKind::Unknown, description);
+            let failure = open_failure(&error);
+            assert_eq!(failure.kind, LinkFailureKind::NoHardware, "{description}");
+            assert_eq!(failure.message, description, "kept for diagnostics");
+            let words = crate::serial_access::words(&failure, "/dev/ttyS15");
+            assert!(
+                words.contains("no hardware is behind it")
+                    || words.contains("has no serial hardware behind it"),
+                "{words}"
+            );
+        }
+        let odd = serialport::Error::new(serialport::ErrorKind::Unknown, "Not a typewriter");
+        assert_eq!(open_failure(&odd).kind, LinkFailureKind::Other);
+    }
+
+    /// A device file only its owner may use, opened for real. Root may open
+    /// anything, so the check needs another account.
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_device_this_account_may_not_use_is_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = std::env::temp_dir().join(format!("uxduck-denied-{}", std::process::id()));
+        std::fs::write(&file, b"").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&file).is_ok() {
+            std::fs::remove_file(&file).unwrap();
+            eprintln!("skipped: this account may open any file, as root may");
+            return;
+        }
+        let path = file.to_str().unwrap().to_owned();
+        let opened = open_serial(&path, 115_200);
+        std::fs::remove_file(&file).unwrap();
+        let Err(error) = opened else {
+            panic!("{path} opened although this account may not read it");
+        };
+        let failure = open_failure(&error);
+        assert_eq!(failure.kind, LinkFailureKind::AccessDenied);
+        assert!(
+            crate::serial_access::words(&failure, &path)
+                .starts_with(&format!("UXDuck isn't allowed to open {path}."))
         );
     }
 

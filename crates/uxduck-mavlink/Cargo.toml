@@ -26,9 +26,10 @@ base64.workspace = true
 # Dialect files: plugins' (S60) and people's own (S252, custom.rs).
 quick-xml.workspace = true
 
-# A serial port's settings, put back after baud detection (FB-286).
+# A serial port's settings, put back after baud detection (FB-286), and who
+# owns a serial device that won't open and this account's groups (FB-287).
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, optional = true }
+nix = { workspace = true, optional = true, features = ["user"] }
 
 [features]
 default = ["native"]

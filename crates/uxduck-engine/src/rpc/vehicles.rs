@@ -836,6 +836,24 @@ fn disable_link(
     to_value(&LinkDto::from(&link))
 }
 
+/// The link `link/update` changes, refused when it has moved on from the
+/// version the caller saw, so a change made meanwhile elsewhere isn't undone
+/// (FB-287). No version, no check.
+fn link_to_update(engine: &Engine, id: &str, expected: Option<u64>) -> Result<Link, ApiError> {
+    let Some(link) = engine.state.links.get(id) else {
+        return Err(ApiError::new(ErrorKind::NotFound, format!("no link {id}")));
+    };
+    if expected.is_some_and(|expected| expected != link.version) {
+        let mut error = ApiError::new(
+            ErrorKind::VersionConflict,
+            "This link changed. Check it and try again.",
+        );
+        error.data.current_version = Some(link.version);
+        return Err(error);
+    }
+    Ok(link.clone())
+}
+
 /// `link/update`: changes a link in place. A new kind is checked as a new
 /// link's is, leaving this link out; the link keeps its id, so its vehicles
 /// stay its vehicles. A new kind reopens it (its vehicles go offline until
@@ -850,12 +868,7 @@ fn update_link(
     connection: ConnectionId,
     params: LinkUpdateParams,
 ) -> Result<Value, ApiError> {
-    let Some(before) = engine.state.links.get(&params.id).cloned() else {
-        return Err(ApiError::new(
-            ErrorKind::NotFound,
-            format!("no link {}", params.id),
-        ));
-    };
+    let before = link_to_update(engine, &params.id, params.expected_version)?;
     let more_than_name = params.kind.is_some()
         || params.policy.is_some()
         || params.topology.is_some()
@@ -1002,6 +1015,14 @@ fn serial_ports(engine: &Engine) -> SerialListResult {
             .serial_ports()
             .into_iter()
             .map(|p| SerialPort {
+                board: p
+                    .usb
+                    .as_ref()
+                    .and_then(|usb| uxduck_mavlink::usb_ids::lookup(usb.vendor_id, usb.product_id))
+                    .filter(|known| {
+                        known.kind == uxduck_mavlink::usb_ids::UsbKind::FlightController
+                    })
+                    .map(|known| known.name.to_owned()),
                 device: p.device,
                 usb: p.usb.as_ref().map(Into::into),
                 description: p.description,

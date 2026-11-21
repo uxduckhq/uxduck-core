@@ -299,6 +299,7 @@ pub enum LinkFailureKind {
     DeviceUnavailable,
     DeviceBusy,
     AccessDenied,
+    NoHardware,
     Other,
 }
 
@@ -489,6 +490,12 @@ pub struct LinkUpdateParams {
     pub vehicle_filter: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<bool>,
+    /// Refused with `version-conflict` unless it is the link's version now,
+    /// so a change made meanwhile elsewhere isn't undone. Left out, the
+    /// update applies whatever the version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub expected_version: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -508,6 +515,10 @@ pub struct SerialPort {
     /// Maker and product, when the system reports them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The flight controller UXDuck knows by its USB id, such as
+    /// "ArduPilot flight controller" (FB-287).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

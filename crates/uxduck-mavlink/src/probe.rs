@@ -96,7 +96,7 @@ pub enum Outcome {
     SilentKnownBoard,
     /// Another program has it.
     Busy,
-    /// Not allowed: the platform's fix.
+    /// Not allowed: why, and what to do, as a link that won't open says it.
     Permission(String),
     /// Anything else, as the system said it.
     Failed(String),
@@ -121,17 +121,6 @@ impl Default for Timing {
     }
 }
 
-fn permission_fix() -> String {
-    if cfg!(target_os = "linux") {
-        "Add yourself to the dialout group (sudo usermod -aG dialout $USER), then log out and back in"
-            .into()
-    } else if cfg!(windows) {
-        "Close any program using it, or install the board's driver".into()
-    } else {
-        "Allow UXDuck to use it in the system's privacy settings".into()
-    }
-}
-
 fn open(path: &str, baud: u32) -> Result<Box<dyn serialport::SerialPort>, Outcome> {
     let try_open = |baud| {
         serialport::new(path, baud)
@@ -152,7 +141,7 @@ fn open(path: &str, baud: u32) -> Result<Box<dyn serialport::SerialPort>, Outcom
             if cfg!(windows) && text.contains("denied") {
                 Outcome::Busy
             } else {
-                Outcome::Permission(permission_fix())
+                Outcome::Permission(crate::serial_access::denied(path))
             }
         } else {
             Outcome::Failed(error.description)

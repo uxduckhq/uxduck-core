@@ -10267,7 +10267,7 @@ export type LinkFailure = {
  * What kind of failure stopped a link, whatever the operating system
  * (FB-267).
  */
-export type LinkFailureKind = 'no-answer' | 'refused' | 'reset' | 'aborted' | 'host-unreachable' | 'network-unreachable' | 'address-not-available' | 'address-in-use' | 'name-not-found' | 'device-missing' | 'device-unavailable' | 'device-busy' | 'access-denied' | 'other';
+export type LinkFailureKind = 'no-answer' | 'refused' | 'reset' | 'aborted' | 'host-unreachable' | 'network-unreachable' | 'address-not-available' | 'address-in-use' | 'name-not-found' | 'device-missing' | 'device-unavailable' | 'device-busy' | 'access-denied' | 'no-hardware' | 'other';
 
 /**
  * How the link to a vehicle is doing (S261, ADR-0004 2026-11-01), as
@@ -10440,6 +10440,12 @@ export type LinkStatus = 'configured' | 'up' | 'down' | 'port-in-use' | 'disable
  * its name and its vehicles. A simulated vehicle's link takes only `name`.
  */
 export type LinkUpdateParams = {
+    /**
+     * Refused with `version-conflict` unless it is the link's version now,
+     * so a change made meanwhile elsewhere isn't undone. Left out, the
+     * update applies whatever the version.
+     */
+    expectedVersion?: number | null;
     id: string;
     keepAlive?: boolean | null;
     kind?: LinkKind | null;
@@ -15809,6 +15815,11 @@ export type SerialListResult = {
  * A serial port the system has, for the add-link screen.
  */
 export type SerialPort = {
+    /**
+     * The flight controller UXDuck knows by its USB id, such as
+     * "ArduPilot flight controller" (FB-287).
+     */
+    board?: string | null;
     /**
      * Maker and product, when the system reports them.
      */
