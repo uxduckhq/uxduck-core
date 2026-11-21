@@ -114,10 +114,13 @@ pub(crate) fn handle(
             if !granted.contains(&Capability::Read) {
                 return denied(&Capability::Read.denied_message());
             }
-            let folder = engine
-                .system
-                .reveal_storage(params.category.map(Into::into))
-                .map_err(|why| ApiError::new(ErrorKind::Internal, why))?;
+            let folder = match &params.log_folder {
+                Some(id) => engine.system.reveal_flight_folder(id),
+                None => engine
+                    .system
+                    .reveal_storage(params.category.map(Into::into)),
+            }
+            .map_err(|why| ApiError::new(ErrorKind::Internal, why))?;
             to_value(&uxduck_contracts::dto::video::VideoRevealResult { folder })
         }
         ClientRequest::StorageClearSimulatorLogs(_) => {

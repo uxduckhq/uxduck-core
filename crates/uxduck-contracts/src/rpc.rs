@@ -1069,9 +1069,9 @@ pub enum ClientRequest {
     #[serde(rename = "storage/clearSimulatorLogs")]
     StorageClearSimulatorLogs(Empty),
     /// Shows UXDuck's app folder (`~/.uxduck` on a Mac, `~/.local/share/uxduck`
-    /// on Linux) in the computer's file manager (S150), or where one
-    /// storage category keeps its files. Only on the computer UXDuck runs
-    /// on. Needs `read`. Result: `VideoRevealResult`.
+    /// on Linux) in the computer's file manager (S150), where one storage
+    /// category keeps its files, or one of the Log folders. Only on the
+    /// computer UXDuck runs on. Needs `read`. Result: `VideoRevealResult`.
     #[serde(rename = "storage/reveal")]
     StorageReveal(StorageRevealParams),
     /// How often each of the daemon's tasks has woken since it started.

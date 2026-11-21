@@ -643,6 +643,22 @@ impl System for Host {
         self.found_flights.change(params)
     }
 
+    fn reveal_flight_folder(&mut self, id: &str) -> Result<String, String> {
+        let folder = self
+            .found_flights
+            .folders(None)
+            .into_iter()
+            .find(|f| f.id == id)
+            .ok_or("UXDuck does not look in that folder.")?;
+        let path = std::path::Path::new(&folder.path);
+        if !path.is_dir() {
+            return Err(format!("{} is not on this computer.", folder.path));
+        }
+        super::browser::reveal(path, None)
+            .map_err(|e| format!("UXDuck can't open the folder: {e}"))?;
+        Ok(folder.path)
+    }
+
     fn probe_video(&mut self, path: &str) -> Result<uxduck_engine::runtime::VideoProbe, String> {
         let path = std::path::Path::new(path);
         let size = std::fs::metadata(path)

@@ -864,6 +864,15 @@ pub trait System: Send {
         let _ = params;
         Err("Flights from other apps are found by UXDuck Desktop.".into())
     }
+    /// Shows a Log folder, by its id, in the computer's file manager: what
+    /// was shown.
+    ///
+    /// # Errors
+    /// Why not, in words.
+    fn reveal_flight_folder(&mut self, id: &str) -> Result<String, String> {
+        let _ = id;
+        Err("Flights from other apps are found by UXDuck Desktop.".into())
+    }
     /// A folder looked in or not, added or removed (S215).
     ///
     /// # Errors

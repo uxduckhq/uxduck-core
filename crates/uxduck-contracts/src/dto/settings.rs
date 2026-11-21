@@ -397,6 +397,11 @@ pub struct StorageRevealParams {
     /// directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<StorageCategory>,
+    /// Shows a Log folder, by its id from `flights/found`, instead: one of
+    /// QGroundControl's, Mission Planner's or a person's own. UXDuck
+    /// Desktop only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_folder: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

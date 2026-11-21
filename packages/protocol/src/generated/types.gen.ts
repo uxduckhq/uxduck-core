@@ -17236,6 +17236,12 @@ export type StorageRevealParams = {
      * directory.
      */
     category?: StorageCategory | null;
+    /**
+     * Shows a Log folder, by its id from `flights/found`, instead: one of
+     * QGroundControl's, Mission Planner's or a person's own. UXDuck
+     * Desktop only.
+     */
+    logFolder?: string | null;
 };
 
 export type StorageUsage = {
