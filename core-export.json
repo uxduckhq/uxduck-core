@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "c926cc8122deeabb53cb5b2e9def82eadc94f40d",
+  "sourceCommit": "de4e34368b4d8c071589411a117b64dc19e89fa5",
   "licenseReady": true,
   "files": [
     {
@@ -51,12 +51,12 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "6db823f514ede24c5081d8261d065a4e98b47b1c6e207eafd023dbf97f9d4282",
+      "sha256": "44c3eb7afea7478ce929ef40c848487da1340acd0bed120341d45bcda87a5f42",
       "executable": false
     },
     {
       "path": "Cargo.toml",
-      "sha256": "df7a6bdcfeeae01d0790186b9ab1df4aa0a1cc2bb73ec3d7d617a6341b3b1a75",
+      "sha256": "15eb65d918926f72cd53821014b888143237564612cb1f42ba94554d3eeb5a4b",
       "executable": false
     },
     {
@@ -9341,7 +9341,7 @@
     },
     {
       "path": "docs/releases/suggestions.json",
-      "sha256": "af8406be8373b3b3308605e5b09253e01a25283be5a75526fcfcab77f7d7b067",
+      "sha256": "9f200c098c98e48e18643ec8a6678a69509a4b229f9f2fc868173d141c55061b",
       "executable": false
     },
     {
@@ -9511,7 +9511,7 @@
     },
     {
       "path": "plugins/Cargo.lock",
-      "sha256": "14570166d604c7e79f176fc8918ff03472d9b2e0736b2c5a218bf5a581891668",
+      "sha256": "621c815684f9fe819a81bce1c5722c0c70366a650dbb7c862174a26d8ee9f038",
       "executable": false
     },
     {
