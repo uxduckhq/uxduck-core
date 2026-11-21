@@ -111,8 +111,8 @@ pub fn without_ground_stations(records: Vec<(u64, &[u8])>) -> Vec<(u64, &[u8])> 
         .collect()
 }
 
-/// Reads records back, for replay and tests. Stops at the first record that
-/// is not a whole frame.
+/// Reads records back, for replay and tests. A frame whose checksum is wrong
+/// is skipped and reading goes on; it stops at a record cut short at the end.
 #[must_use]
 pub fn read(bytes: &[u8]) -> Vec<(u64, &[u8])> {
     records(bytes).collect()
@@ -121,20 +121,40 @@ pub fn read(bytes: &[u8]) -> Vec<(u64, &[u8])> {
 /// The records [`read`] gives, one at a time: a long log has millions, and
 /// most of its readers only pass over them.
 pub fn records(bytes: &[u8]) -> impl Iterator<Item = (u64, &[u8])> {
+    use mavlink_tlog::{CrcPolicy, FrameError, FrameRef};
     let mut at = 0;
+    let mut skipped = false;
     std::iter::from_fn(move || {
-        if at + 8 >= bytes.len() {
-            return None;
+        loop {
+            if at + 8 >= bytes.len() {
+                return None;
+            }
+            let mut stamp = [0u8; 8];
+            stamp.copy_from_slice(&bytes[at..at + 8]);
+            let start = at + 8;
+            // After damage, only a frame with a checked CRC starts records again.
+            let policy = if skipped {
+                CrcPolicy::Strict
+            } else {
+                CrcPolicy::Lenient
+            };
+            match FrameRef::parse(&bytes[start..], policy) {
+                Ok(frame) => {
+                    skipped = false;
+                    at = start + frame.len();
+                    return Some((u64::from_be_bytes(stamp), frame.as_bytes()));
+                }
+                // A record cut short at the end. No frame is longer than 280
+                // bytes, so a longer remainder means a damaged length byte.
+                Err(FrameError::Incomplete { .. }) if !skipped && bytes.len() - start < 280 => {
+                    return None;
+                }
+                Err(_) => {
+                    skipped = true;
+                    at += 1;
+                }
+            }
         }
-        let mut stamp = [0u8; 8];
-        stamp.copy_from_slice(&bytes[at..at + 8]);
-        let start = at + 8;
-        let len = crate::framing::frame_len(&bytes[start..])?;
-        if start + len > bytes.len() {
-            return None;
-        }
-        at = start + len;
-        Some((u64::from_be_bytes(stamp), &bytes[start..start + len]))
     })
 }
 
@@ -375,5 +395,19 @@ mod tests {
         record(&mut log, 1_000, &a).unwrap_or_default();
         record(&mut log, 2_000, &b).unwrap_or_default();
         assert_eq!(read(&log), [(1_000, a.as_slice()), (2_000, b.as_slice())]);
+    }
+
+    #[test]
+    fn damaged_frames_are_skipped_and_the_rest_is_read() {
+        let a = sim::heartbeat_frame(1, 1, 0);
+        let b = sim::autopilot_version_frame(1, 1, 1, 42, 0);
+        let mut bad = a.clone();
+        bad[10] ^= 1;
+        let mut log = Vec::new();
+        record(&mut log, 1_000, &a).unwrap_or_default();
+        record(&mut log, 2_000, &bad).unwrap_or_default();
+        log.extend_from_slice(&[0xFD, 0x20, 0x00, 0x01]);
+        record(&mut log, 3_000, &b).unwrap_or_default();
+        assert_eq!(read(&log), [(1_000, a.as_slice()), (3_000, b.as_slice())]);
     }
 }
