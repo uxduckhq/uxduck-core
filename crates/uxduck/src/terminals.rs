@@ -1128,9 +1128,19 @@ mod tests {
             .iter()
             .find_map(|w| w.strip_prefix("ProxyCommand="))
             .unwrap();
-        assert!(proxy.contains("'-E'"), "{proxy}");
+        let quoted = |word: &str| {
+            if cfg!(windows) {
+                format!("\"{word}\"")
+            } else {
+                format!("'{word}'")
+            }
+        };
+        assert!(proxy.contains(&quoted("-E")), "{proxy}");
         assert!(proxy.contains(&hop_log.display().to_string()), "{proxy}");
-        assert!(proxy.ends_with("'--' '192.168.50.21'"), "{proxy}");
+        assert!(
+            proxy.ends_with(&format!("{} {}", quoted("--"), quoted("192.168.50.21"))),
+            "{proxy}"
+        );
         assert_eq!(words.last().unwrap(), "camera.local");
         let _ = std::fs::remove_file(&hop_key);
     }

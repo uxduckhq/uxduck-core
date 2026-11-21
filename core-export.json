@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "94b2033b2914a14d8db61a91cb824902e62fc842",
+  "sourceCommit": "885e1d58e84823756d6d5cb79cac34a98a3e89e7",
   "licenseReady": true,
   "files": [
     {
@@ -9161,7 +9161,7 @@
     },
     {
       "path": "crates/uxduck/src/terminals.rs",
-      "sha256": "a7f7a6767b0e4a4ab90a5ae84c470601c1daed244514fae3a1886b5adb263414",
+      "sha256": "69eccab80a0ca5fa917b4aa1ca693d772ce0aeafd29f569bf0bb790d9969109d",
       "executable": false
     },
     {
