@@ -437,17 +437,65 @@ fn capped(output: String) -> String {
     }
 }
 
-fn tool_arguments(name: String, arguments: &str) -> Option<(String, Value)> {
-    let params: Value = serde_json::from_str(arguments).ok()?;
+const NOT_AN_OBJECT: &str = "Tool arguments must be a valid JSON object. For tool_call, provide a tool name and a JSON object for params. No action was taken; correct the arguments before retrying.";
+
+/// A call's tool and params, or why it was not run. `tool_call` takes the
+/// tool's own params inside `params` (FB-283): a model that put them beside
+/// `name`, or left out the params a tool needs, ran it with none, and
+/// `place_area`'s own `name` read as missing.
+fn tool_arguments(
+    tools: &[Tool],
+    name: String,
+    arguments: &str,
+) -> Result<(String, Value), String> {
+    let params: Value = serde_json::from_str(arguments).map_err(|_| NOT_AN_OBJECT.to_owned())?;
     if !params.is_object() {
-        return None;
+        return Err(NOT_AN_OBJECT.into());
     }
     if name != TOOL_CALL {
-        return Some((name, params));
+        return Ok((name, params));
     }
-    let name = params["name"].as_str()?.to_owned();
-    let params = params.get("params").cloned().unwrap_or_else(|| json!({}));
-    params.is_object().then_some((name, params))
+    let called = params["name"].as_str().ok_or(NOT_AN_OBJECT)?.to_owned();
+    let beside: Vec<&str> = params
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.keys())
+        .map(String::as_str)
+        .filter(|key| !matches!(*key, "name" | "params"))
+        .collect();
+    let needed: Vec<&str> = tools
+        .iter()
+        .find(|tool| tool.name == called)
+        .and_then(|tool| tool.parameters["required"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let shape = |fields: &[&str]| {
+        let fields: Vec<String> = fields
+            .iter()
+            .map(|field| format!("\"{field}\": …"))
+            .collect();
+        format!(
+            "{{\"name\": \"{called}\", \"params\": {{{}}}}}",
+            fields.join(", ")
+        )
+    };
+    if !beside.is_empty() {
+        return Err(format!(
+            "tool_call takes {called}'s params inside params, not beside name: {}. It was not run. Call it again in that shape.",
+            shape(&beside)
+        ));
+    }
+    match params.get("params") {
+        None if !needed.is_empty() => Err(format!(
+            "{called} needs params, given inside params: {}. It was not run. Call it again in that shape.",
+            shape(&needed)
+        )),
+        None => Ok((called, json!({}))),
+        Some(given) if given.is_object() => Ok((called, given.clone())),
+        Some(_) => Err(NOT_AN_OBJECT.into()),
+    }
 }
 
 /// Calls the tools a round asked for, in order, recording each in the chat.
@@ -470,15 +518,18 @@ async fn run_tools(
             continue;
         }
         stats.tool_calls += 1;
-        let Some((name, mut params)) = tool_arguments(name, &arguments) else {
-            stats.tool_errors += 1;
-            results.push(ToolResult {
-                call_id,
-                output: json!({ "error": "Tool arguments must be a valid JSON object. For tool_call, provide a tool name and a JSON object for params. No action was taken; correct the arguments before retrying." }).to_string(),
-                failed: true,
-                images: Vec::new(),
-            });
-            continue;
+        let (name, mut params) = match tool_arguments(tools, name, &arguments) {
+            Ok(called) => called,
+            Err(error) => {
+                stats.tool_errors += 1;
+                results.push(ToolResult {
+                    call_id,
+                    output: json!({ "error": error }).to_string(),
+                    failed: true,
+                    images: Vec::new(),
+                });
+                continue;
+            }
         };
         let mut shown = Vec::new();
         let (output, failed) = match Tool::method_for(tools, &name) {
@@ -1948,6 +1999,80 @@ mod tests {
             let error: Value = serde_json::from_str(&results[0].output).unwrap();
             assert!(error["error"].as_str().unwrap().contains("JSON object"));
         }
+    }
+
+    /// FB-283: the model called `place_area` through `tool_call` with no
+    /// params, and the daemon was asked for an outline of no name. Params
+    /// beside `name`, or none for a tool that needs them, now run nothing and
+    /// say the shape to call it in.
+    #[test]
+    fn tool_call_says_where_params_go_when_they_are_beside_name_or_missing() {
+        for (arguments, shape) in [
+            (
+                r#"{"name":"place_area","near":{"latitudeDeg":37.76,"longitudeDeg":-122.39}}"#,
+                r#"{"name": "place_area", "params": {"near": …}}"#,
+            ),
+            (
+                r#"{"name":"place_area"}"#,
+                r#"{"name": "place_area", "params": {"name": …}}"#,
+            ),
+        ] {
+            let host = Recorder::default();
+            let mut stats = TurnStats::default();
+            let results = run_tools(
+                &host,
+                &tools(),
+                vec![("c1".into(), TOOL_CALL.into(), arguments.into())],
+                &mut stats,
+                &mut Images::default(),
+            )
+            .now_or_never()
+            .unwrap();
+            assert!(host.0.lock().unwrap().is_empty(), "{arguments}");
+            assert!(results[0].failed);
+            assert_eq!(stats.tool_errors, 1);
+            let error: Value = serde_json::from_str(&results[0].output).unwrap();
+            let error = error["error"].as_str().unwrap();
+            assert!(error.contains(shape), "{error}");
+            assert!(error.contains("It was not run."), "{error}");
+        }
+        let host = Noisy::default();
+        let results = run_tools(
+            &host,
+            &tools(),
+            vec![
+                (
+                    "c1".into(),
+                    TOOL_CALL.into(),
+                    r#"{"name":"place_area","params":{"name":"Dogpatch, San Francisco"}}"#.into(),
+                ),
+                (
+                    "c2".into(),
+                    TOOL_CALL.into(),
+                    r#"{"name":"daemon_about"}"#.into(),
+                ),
+            ],
+            &mut TurnStats::default(),
+            &mut Images::default(),
+        )
+        .now_or_never()
+        .unwrap();
+        let log: Vec<String> = host
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("call "))
+            .cloned()
+            .collect();
+        assert_eq!(
+            log,
+            [
+                r#"call place/area {"name":"Dogpatch, San Francisco"}"#,
+                "call daemon/about {}"
+            ],
+            "{results:?}"
+        );
     }
 
     #[test]

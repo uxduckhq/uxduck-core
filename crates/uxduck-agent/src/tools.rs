@@ -854,9 +854,9 @@ pub fn model_tools() -> Vec<Tool> {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "The tool's name, as tool_search gave it." },
-                "params": { "type": "object", "description": "Its params, as its schema says." }
+                "params": { "type": "object", "description": "The tool's own params as one object, as its schema says, even one also called name. {} for a tool with none." }
             },
-            "required": ["name"]
+            "required": ["name", "params"]
         }),
     });
     for tool in &mut sent {
@@ -1849,6 +1849,38 @@ mod deferred_tests {
         ] {
             assert!(sent.iter().any(|t| t.name == kept), "{kept}");
         }
+    }
+
+    /// FB-283: found for a survey of a named area, `place_area` says its
+    /// `name` is required, and `tool_call` says the params go inside `params`.
+    #[test]
+    fn place_area_is_found_with_its_name_required_and_tool_call_takes_params() {
+        let found = find_deferred(
+            "named area outline Dogpatch area OpenStreetMap outline map plan mission survey waypoints placeAreas altitude above terrain",
+            10,
+        );
+        let area = found.iter().find(|t| t.name == "place_area").unwrap();
+        assert_eq!(area.parameters["required"], serde_json::json!(["name"]));
+        assert!(
+            area.parameters["properties"]["name"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("The area's name")
+        );
+        let call = model_tools()
+            .into_iter()
+            .find(|t| t.name == TOOL_CALL)
+            .unwrap();
+        assert_eq!(
+            call.parameters["required"],
+            serde_json::json!(["name", "params"])
+        );
+        assert!(
+            call.parameters["properties"]["params"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("even one also called name")
+        );
     }
 
     /// FB-214: asked to move a simulated vehicle home, put it back or reset
