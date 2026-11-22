@@ -1191,6 +1191,7 @@ fn operator_create(
         control_actions: Vec::new(),
         me_marker_id: None,
         display: None,
+        arrangements: None,
         account_id: None,
         controller_mappings: Vec::new(),
         terms: None,
@@ -1407,6 +1408,9 @@ fn operator_update(
     }
     if let Some(document) = &params.display {
         operator.display = Some(display_document(document)?);
+    }
+    if let Some(document) = &params.arrangements {
+        operator.arrangements = Some(display_document(document)?);
     }
     operator.version += 1;
     let result = OperatorDto::from(&operator);

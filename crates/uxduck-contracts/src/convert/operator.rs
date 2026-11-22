@@ -161,6 +161,7 @@ impl From<&core::Operator> for dto::Operator {
             control_actions: value.control_actions.iter().map(Into::into).collect(),
             me_marker_id: value.me_marker_id.clone(),
             display: value.display.clone(),
+            arrangements: value.arrangements.clone(),
             account_id: value.account_id.clone(),
             controller_mappings: value
                 .controller_mappings

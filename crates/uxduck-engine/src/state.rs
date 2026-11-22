@@ -721,6 +721,7 @@ mod tests {
                     control_actions: Vec::new(),
                     me_marker_id: None,
                     display: None,
+                    arrangements: None,
                     account_id: None,
                     controller_mappings: Vec::new(),
                     terms: None,

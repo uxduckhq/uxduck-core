@@ -11891,6 +11891,12 @@ export type Operator = {
      * otherwise. Telemetry tiles name their own frame.
      */
     altitudeFrame?: AltitudeFrame;
+    /**
+     * What each of the operator's computers and browsers last had on
+     * screen, as the app writes it (`uxduck.operator-arrangements/1`),
+     * synced with the operator. None until the app first writes it.
+     */
+    arrangements?: string | null;
     basemap: Basemap;
     /**
      * Values the operator works out from telemetry (ADR-0056), synced
@@ -12020,6 +12026,11 @@ export type OperatorRemoveParams = {
  */
 export type OperatorUpdateParams = {
     altitudeFrame?: AltitudeFrame | null;
+    /**
+     * What each computer last had on screen; replaces the document saved.
+     * A JSON object.
+     */
+    arrangements?: string | null;
     basemap?: Basemap | null;
     /**
      * Every calculated value (ADR-0056); replaces the ones saved. A key

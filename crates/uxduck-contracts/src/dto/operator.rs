@@ -623,6 +623,11 @@ pub struct Operator {
     /// the app first writes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
+    /// What each of the operator's computers and browsers last had on
+    /// screen, as the app writes it (`uxduck.operator-arrangements/1`),
+    /// synced with the operator. None until the app first writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrangements: Option<String>,
     /// The verified account this operator last signed in as, recorded by
     /// UXDuck; read only. Switching to an operator of the account already
     /// signed in keeps the sign-in.
@@ -759,6 +764,10 @@ pub struct OperatorUpdateParams {
     /// object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
+    /// What each computer last had on screen; replaces the document saved.
+    /// A JSON object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrangements: Option<String>,
     /// The marker that is this operator; `null` makes none.
     #[serde(
         default,

@@ -1614,6 +1614,14 @@ pub struct Operator {
     /// the fields above it that hold display choices are its old copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
+    /// The tabs and panes each of their computers and browsers last had
+    /// on screen (maintainer, 2026-11-21): a JSON document the app writes,
+    /// synced with the operator so a new computer can start from one and
+    /// any can take another's. Opaque here. Kept apart from the display
+    /// document so an app too old to know it, rewriting that one, never
+    /// drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrangements: Option<String>,
     /// The verified account this operator last signed in as, recorded by
     /// UXDuck from the server's answer and never set by a client; synced
     /// with the operator. Choosing another operator of the account signed
@@ -3567,6 +3575,7 @@ mod tests {
             }],
             me_marker_id: None,
             display: None,
+            arrangements: None,
             account_id: None,
             controller_mappings: Vec::new(),
             terms: None,
