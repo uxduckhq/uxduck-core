@@ -63,6 +63,15 @@ pub struct FlightMission {
     pub run_id: String,
 }
 
+/// Another connection a flight was heard on, and where its log was then.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightLink {
+    pub link_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tlog: Option<FlightTlog>,
+}
+
 /// Where a flight's log begins: the tlog's file name and the offset of its
 /// first record after arming.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +181,12 @@ pub struct Flight {
     /// when UXDuck stopped, and flights from before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tlog_end: Option<FlightTlog>,
+    /// The other connections it was heard on while it flew (ADR-0039 R10,
+    /// 2026-11-22), such as 4G beside a radio, each with where its log was
+    /// when the flight first heard it there. Its replay merges what each
+    /// brought, so a connection that dropped out leaves no gap.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_links: Vec<FlightLink>,
     /// Its flight log in the account on its own (2026-10-24): asked for
     /// while "Store flight logs and videos" is off, then stored.
     #[serde(default, skip_serializing_if = "FlightLog::is_none")]

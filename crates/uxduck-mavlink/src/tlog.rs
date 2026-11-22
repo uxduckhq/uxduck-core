@@ -200,12 +200,202 @@ pub fn seek(bytes: &[u8], from_us: u64) -> Option<usize> {
     Some(at)
 }
 
+/// How long after one connection brought a frame the same frame on another
+/// is still that frame. A vehicle's router sends every frame down each of
+/// its connections, and a 4G modem in poor coverage holds them for seconds
+/// before delivering them all. A later frame that matches only because its
+/// 8-bit sequence wrapped round says the same as the one before, so taking
+/// it for a copy loses nothing.
+pub const COPY_WITHIN_US: u64 = 30_000_000;
+
+/// How far a vehicle's own time may go back between connections and still
+/// be a copy or a late frame rather than the vehicle starting again: a
+/// reboot sets it back to nearly zero, and a vehicle is up much longer
+/// than this in flight.
+pub const BACK_IS_REBOOT_US: u64 = 60_000_000;
+
+/// The vehicle's own time a frame carries, in microseconds, for the
+/// messages the maps place and turn a vehicle by: `GPS_RAW_INT`'s
+/// `time_usec`, and the `time_boot_ms` that begins `ATTITUDE`,
+/// `ATTITUDE_QUATERNION`, `LOCAL_POSITION_NED` and `GLOBAL_POSITION_INT`.
+/// MAVLink 2 drops trailing zeros, so a short payload reads as zeros.
+fn vehicle_time_us(message_id: u32, payload: &[u8]) -> Option<u64> {
+    let field = |n: usize| {
+        let mut bytes = [0u8; 8];
+        let have = payload.len().min(n);
+        bytes[..have].copy_from_slice(&payload[..have]);
+        u64::from_le_bytes(bytes)
+    };
+    match message_id {
+        24 => Some(field(8)),
+        30..=33 => Some(field(4) * 1_000),
+        _ => None,
+    }
+}
+
+/// One vehicle's logs from several connections as one (ADR-0039 R10,
+/// 2026-11-22). A vehicle heard on a radio and on 4G at once is in both
+/// connections' logs, each frame at the time it arrived there, and each log
+/// misses what its connection dropped. Records offered in time order come
+/// out once each: a frame another log brought within [`COPY_WITHIN_US`] is
+/// its copy, and a position or attitude older than the last one taken from
+/// another log arrived late and would step the vehicle back. Each log's own
+/// records are never compared with each other, so one log comes out whole.
+#[derive(Debug, Default)]
+pub struct Merge {
+    /// Each frame taken lately, by its sender, message, sequence and
+    /// payload: which log brought it and when.
+    recent: std::collections::HashMap<Vec<u8>, (usize, u64)>,
+    /// The same, oldest first, to let them go.
+    order: std::collections::VecDeque<(u64, Vec<u8>)>,
+    /// By sender and message: the vehicle's own time of the last taken,
+    /// and its log.
+    timed: std::collections::HashMap<(u8, u8, u32), (u64, usize)>,
+}
+
+impl Merge {
+    /// Whether the record from log `log` at `stamp` is kept. Records are
+    /// offered in time order.
+    pub fn keeps(&mut self, log: usize, stamp: u64, frame: &[u8]) -> bool {
+        while self
+            .order
+            .front()
+            .is_some_and(|(at, _)| at.saturating_add(COPY_WITHIN_US) < stamp)
+        {
+            if let Some((at, key)) = self.order.pop_front()
+                && self.recent.get(&key).is_some_and(|(_, kept)| *kept == at)
+            {
+                self.recent.remove(&key);
+            }
+        }
+        let (Some(header), Some(payload)) = (
+            crate::framing::header(frame),
+            crate::framing::payload(frame),
+        ) else {
+            return true;
+        };
+        let mut key = Vec::with_capacity(6 + payload.len());
+        key.extend_from_slice(&[header.system_id, header.component_id, header.sequence]);
+        key.extend_from_slice(&header.message_id.to_le_bytes()[..3]);
+        key.extend_from_slice(payload);
+        if self.recent.get(&key).is_some_and(|(from, _)| *from != log) {
+            return false;
+        }
+        if let Some(time) = vehicle_time_us(header.message_id, payload) {
+            let sender = (header.system_id, header.component_id, header.message_id);
+            if let Some(&(last, from)) = self.timed.get(&sender)
+                && from != log
+                && time <= last
+                && last - time < BACK_IS_REBOOT_US
+            {
+                return false;
+            }
+            self.timed.insert(sender, (time, log));
+        }
+        self.recent.insert(key.clone(), (log, stamp));
+        self.order.push_back((stamp, key));
+        true
+    }
+}
+
+/// Several connections' logs of the same vehicles as one log, in time
+/// order, as [`Merge`] keeps them. Records at the same time come in the
+/// order of `logs`.
+#[must_use]
+pub fn merge(logs: &[&[u8]]) -> Vec<u8> {
+    let mut all: Vec<(u64, usize, &[u8])> = logs
+        .iter()
+        .enumerate()
+        .flat_map(|(i, log)| records(log).map(move |(stamp, frame)| (stamp, i, frame)))
+        .collect();
+    all.sort_by_key(|&(stamp, i, _)| (stamp, i));
+    let mut merge = Merge::default();
+    let mut out = Vec::with_capacity(logs.iter().map(|l| l.len()).max().unwrap_or(0));
+    for (stamp, i, frame) in all {
+        if merge.keeps(i, stamp, frame) {
+            let _ = record(&mut out, stamp, frame);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sim;
 
     const T0: u64 = 1_760_000_000_000_000;
+
+    /// A position `ms` into the flight, as sequence `seq`.
+    fn at(seq: u8, ms: u32) -> Vec<u8> {
+        sim::global_position_at_frame((1, seq), (i32::try_from(ms).unwrap_or(0), 0), (0, 0), ms)
+    }
+
+    /// The positions' times since boot, in the order they come.
+    fn times(log: &[u8]) -> Vec<u32> {
+        read(log)
+            .iter()
+            .filter_map(|(_, f)| crate::framing::payload(f))
+            .map(|p| u32::from_le_bytes(p[..4].try_into().unwrap_or_default()))
+            .collect()
+    }
+
+    #[test]
+    fn a_connection_that_alone_hears_the_vehicle_fills_the_others_gap_once() {
+        // The radio drops 3 to 6. 4G brings every one 100 ms behind it.
+        let (mut radio, mut cell) = (Vec::new(), Vec::new());
+        for i in 0..10u8 {
+            let ms = u32::from(i) * 1_000;
+            let stamp = T0 + u64::from(ms) * 1_000;
+            if !(3..=6).contains(&i) {
+                record(&mut radio, stamp, &at(i, ms)).unwrap_or_default();
+            }
+            record(&mut cell, stamp + 100_000, &at(i, ms)).unwrap_or_default();
+        }
+        assert_eq!(
+            times(&merge(&[&radio, &cell])),
+            [
+                0, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 8_000, 9_000
+            ]
+        );
+    }
+
+    #[test]
+    fn a_position_that_arrives_after_a_newer_one_is_left_out() {
+        // The radio drops 4 to 6, and 4G brings them 400 ms late, after
+        // the radio's 7: taking them would step the vehicle back.
+        let (mut radio, mut cell) = (Vec::new(), Vec::new());
+        for i in 0..10u8 {
+            let ms = u32::from(i) * 100;
+            if !(4..=6).contains(&i) {
+                record(&mut radio, T0 + u64::from(ms) * 1_000, &at(i, ms)).unwrap_or_default();
+            }
+            record(&mut cell, T0 + (u64::from(ms) + 400) * 1_000, &at(i, ms)).unwrap_or_default();
+        }
+        assert_eq!(
+            times(&merge(&[&radio, &cell])),
+            [0, 100, 200, 300, 700, 800, 900]
+        );
+    }
+
+    #[test]
+    fn one_log_merged_alone_comes_out_whole() {
+        let mut log = Vec::new();
+        for i in 0..5u64 {
+            // The same heartbeat again and again, and a repeated position.
+            record(&mut log, T0 + i, &sim::heartbeat_frame(1, 1, 0)).unwrap_or_default();
+            record(&mut log, T0 + i, &at(0, 0)).unwrap_or_default();
+        }
+        assert_eq!(merge(&[&log]), log);
+    }
+
+    #[test]
+    fn a_reboot_heard_on_the_other_connection_starts_the_vehicle_again() {
+        let (mut radio, mut cell) = (Vec::new(), Vec::new());
+        record(&mut radio, T0, &at(0, 120_000)).unwrap_or_default();
+        record(&mut cell, T0 + 5_000_000, &at(1, 500)).unwrap_or_default();
+        assert_eq!(times(&merge(&[&radio, &cell])), [120_000, 500]);
+    }
 
     #[test]
     fn replay_rejects_commands_without_a_ground_station_heartbeat() {

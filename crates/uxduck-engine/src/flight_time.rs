@@ -340,7 +340,7 @@ impl Engine {
         };
         // By its link, its own word or the person's (ADR-0039 R14).
         let simulated = self.is_simulated(&vehicle);
-        let flight = Flight {
+        let mut flight = Flight {
             copies: Vec::new(),
             id: format!("fl{}", &self.random.token()[..16]),
             vehicle_id: vehicle.id.clone(),
@@ -372,6 +372,7 @@ impl Engine {
                 .tlog_position(&vehicle.link_id)
                 .map(|(file, offset)| uxduck_core::domain::flight::FlightTlog { file, offset }),
             tlog_end: None,
+            other_links: Vec::new(),
             log: uxduck_core::domain::flight::FlightLog::None,
             sync_video: false,
             mission: None,
@@ -379,11 +380,64 @@ impl Engine {
             checklist: None,
             version: 1,
         };
+        self.add_heard_links(&mut flight, &vehicle);
         if let Some(timer) = self.flight_times.0.get_mut(&vehicle.id) {
             timer.flight = Some(flight.id.clone());
             timer.modes.clone_from(&flight.modes);
         }
         self.commit_as(flight_actor(), Change::FlightUpserted { flight });
+    }
+
+    /// Adds to a flight the connections its vehicle is heard on in this run
+    /// besides its own (ADR-0039 R10, 2026-11-22), each with where its log
+    /// is now. Whether it added any.
+    fn add_heard_links(
+        &self,
+        flight: &mut Flight,
+        vehicle: &uxduck_core::domain::vehicle::Vehicle,
+    ) -> bool {
+        let Some(connections) = &vehicle.connections else {
+            return false;
+        };
+        let mut added = false;
+        for route in connections.routes.iter().filter(|r| !r.remembered) {
+            let link = route.link_id.as_str();
+            if flight.link_id.as_deref() == Some(link)
+                || flight.other_links.iter().any(|l| l.link_id == link)
+            {
+                continue;
+            }
+            flight
+                .other_links
+                .push(uxduck_core::domain::flight::FlightLink {
+                    link_id: link.to_owned(),
+                    tlog: self.system.tlog_position(link).map(|(file, offset)| {
+                        uxduck_core::domain::flight::FlightTlog { file, offset }
+                    }),
+                });
+            added = true;
+        }
+        added
+    }
+
+    /// A vehicle was heard: its open flight takes any connection it is
+    /// heard on now that the flight has not yet (ADR-0039 R10, 2026-11-22).
+    pub(crate) fn flight_heard_on(&mut self, vehicle: &uxduck_core::domain::vehicle::Vehicle) {
+        let Some(flight_id) = self
+            .flight_times
+            .0
+            .get(&vehicle.id)
+            .and_then(|t| t.flight.clone())
+        else {
+            return;
+        };
+        let Some(mut flight) = self.state.flights.get(&flight_id).cloned() else {
+            return;
+        };
+        if self.add_heard_links(&mut flight, vehicle) {
+            flight.version += 1;
+            self.commit_as(flight_actor(), Change::FlightUpserted { flight });
+        }
     }
 
     /// Who acted on the vehicle since `from_us`: commands they sent and the

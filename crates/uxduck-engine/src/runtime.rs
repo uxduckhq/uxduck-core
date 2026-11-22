@@ -488,6 +488,11 @@ pub enum ReplayRead {
         from_us: u64,
         to_us: u64,
     },
+    /// The logs of one flight's connections as one (ADR-0039 R10,
+    /// 2026-11-22), each read as itself, merged by
+    /// [`uxduck_mavlink::tlog::merge`]: the first is the flight's own.
+    /// One that has nothing of the flight adds nothing.
+    Merged { reads: Vec<ReplayRead> },
     /// A tlog file, whole.
     File { path: String },
     /// A file in a `.uxflight` (ADR-0062), whole: its `telemetry.tlog`.

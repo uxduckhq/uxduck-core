@@ -2596,12 +2596,74 @@ impl Engine {
                 entry: crate::offload::TELEMETRY.to_owned(),
             });
         };
-        Some(ReplayRead::Link {
+        let own = ReplayRead::Link {
             link_id,
             from_us,
             to_us,
             start: flight.tlog.as_ref().map(|t| (t.file.clone(), t.offset)),
-        })
+        };
+        Some(self.with_other_links(flight, own, (from_us, to_us)))
+    }
+
+    /// Every connection a flight's telemetry is read from (ADR-0039 R10,
+    /// 2026-11-22), each with where its log was when the flight began
+    /// there: its own first, then each other it was heard on. A flight
+    /// recorded before those were kept also takes the connections its
+    /// vehicle is known on now, whose logs hold nothing of the flight
+    /// unless it was heard there. Only a flight recorded here has them.
+    pub(crate) fn flight_links(
+        &self,
+        flight: &uxduck_core::domain::flight::Flight,
+    ) -> Vec<(String, Option<(String, u64)>)> {
+        let Some(own) = flight.link_id.clone().filter(|_| flight.recorded_here) else {
+            return Vec::new();
+        };
+        let at = |t: &uxduck_core::domain::flight::FlightTlog| (t.file.clone(), t.offset);
+        let mut links = vec![(own, flight.tlog.as_ref().map(at))];
+        for link in &flight.other_links {
+            links.push((link.link_id.clone(), link.tlog.as_ref().map(at)));
+        }
+        let known = self
+            .state
+            .vehicles
+            .get(&flight.vehicle_id)
+            .and_then(|v| v.connections.as_ref());
+        for route in known.into_iter().flat_map(|c| &c.routes) {
+            if !links.iter().any(|(id, _)| *id == route.link_id) {
+                links.push((route.link_id.clone(), None));
+            }
+        }
+        links
+    }
+
+    /// `own`, a flight's telemetry from its own connection, merged with
+    /// the same span, `from_us` to `to_us`, of every other connection it
+    /// was heard on (ADR-0039 R10, 2026-11-22): a radio that dropped out
+    /// leaves no gap where 4G heard the vehicle. `own` alone when there is
+    /// no other.
+    pub(crate) fn with_other_links(
+        &self,
+        flight: &uxduck_core::domain::flight::Flight,
+        own: ReplayRead,
+        (from_us, to_us): (u64, u64),
+    ) -> ReplayRead {
+        let others: Vec<ReplayRead> = self
+            .flight_links(flight)
+            .into_iter()
+            .skip(1)
+            .map(|(link_id, start)| ReplayRead::Link {
+                link_id,
+                from_us,
+                to_us,
+                start,
+            })
+            .collect();
+        if others.is_empty() {
+            return own;
+        }
+        ReplayRead::Merged {
+            reads: std::iter::once(own).chain(others).collect(),
+        }
     }
 
     /// The part of its log a flight's replay plays by default: from 10 s
@@ -2634,10 +2696,17 @@ impl Engine {
             .values()
             .filter(|f| f.recorded_here && f.link_id.is_some())
             .collect();
+        let reads: BTreeMap<&str, BTreeSet<String>> = here
+            .iter()
+            .map(|f| {
+                let links = self.flight_links(f).into_iter().map(|(id, _)| id);
+                (f.id.as_str(), links.collect())
+            })
+            .collect();
         let links: BTreeSet<&str> = here
             .iter()
             .filter(|f| ids.contains(f.id.as_str()))
-            .filter_map(|f| f.link_id.as_deref())
+            .flat_map(|f| reads[f.id.as_str()].iter().map(String::as_str))
             .collect();
         let mut freed = Vec::new();
         let mut kept = 0;
@@ -2648,7 +2717,7 @@ impl Engine {
                 let to = logs.get(i + 1).map_or(u64::MAX, |next| next.start_us);
                 let reaching: Vec<bool> = here
                     .iter()
-                    .filter(|f| f.link_id.as_deref() == Some(link))
+                    .filter(|f| reads[f.id.as_str()].contains(link))
                     .filter(|f| {
                         let (from, end) = self.flight_span(f, false);
                         from < to && log.start_us <= end
@@ -2909,6 +2978,15 @@ impl Engine {
                 start: tlog.as_ref().map(|t| (t.file.clone(), t.offset)),
             },
         };
+        // On the ground its own file may run on for hours: the other
+        // connections bring what they heard while it flew.
+        let others = if ground {
+            let (from, to) = self.flight_span(&flight, false);
+            (from_us.max(from), to_us.min(to))
+        } else {
+            (from_us, to_us)
+        };
+        let read = self.with_other_links(&flight, read, others);
         let bytes = match self.system.replay_read(&read) {
             Ok(bytes) => bytes,
             // Its log here is gone: its `.uxflight` has it (ADR-0062).
@@ -4093,6 +4171,7 @@ impl Engine {
                 link_id: None,
                 tlog: None,
                 tlog_end: None,
+                other_links: Vec::new(),
                 // Its log with it unless "What to sync" keeps summaries only
                 // (ADR-0046 B11).
                 log: if self.state.settings.sync_content

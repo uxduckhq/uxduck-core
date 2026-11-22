@@ -70,6 +70,10 @@ fn too_long(what: &str, bytes: u64) -> String {
         gigabytes(most())
     )
 }
+/// Why a log gave nothing: it has no record in the span asked for. One of
+/// several connections a flight was heard on (`ReplayRead::Merged`) may
+/// have heard nothing then, and adds nothing.
+const NOT_HERE: &str = "This flight's log is not on this computer any more.";
 /// Read before a flight's start offset for its lead-in: ten seconds of a
 /// busy link with room to spare.
 const LEAD_BYTES: u64 = 8 << 20;
@@ -218,6 +222,7 @@ pub fn read(tlogs: &Path, what: &ReplayRead) -> Result<Vec<u8>, String> {
             before(&tlogs.join(file), *offset, (*bytes).min(most()))
                 .map_err(|e| format!("Cannot read this flight's log: {e}"))
         }
+        ReplayRead::Merged { reads } => read_merged(tlogs, reads),
         ReplayRead::LinkFile {
             link_id,
             file,
@@ -235,7 +240,7 @@ pub fn read(tlogs: &Path, what: &ReplayRead) -> Result<Vec<u8>, String> {
             )
             .map_err(|e| unread(tlogs, what, &e))?;
             if out.is_empty() {
-                return Err("This flight's log is not on this computer any more.".into());
+                return Err(NOT_HERE.into());
             }
             Ok(out)
         }
@@ -280,11 +285,33 @@ pub fn read(tlogs: &Path, what: &ReplayRead) -> Result<Vec<u8>, String> {
             )
             .map_err(|e| unread(tlogs, what, &e))?;
             if bytes.is_empty() {
-                return Err("This flight's log is not on this computer any more.".into());
+                return Err(NOT_HERE.into());
             }
             Ok(bytes)
         }
     }
+}
+
+/// What several connections' logs of a flight hold, merged (ADR-0039 R10,
+/// 2026-11-22). One with nothing in the span adds nothing.
+fn read_merged(tlogs: &Path, reads: &[ReplayRead]) -> Result<Vec<u8>, String> {
+    let mut logs = Vec::new();
+    for one in reads {
+        match read(tlogs, one) {
+            Ok(bytes) => logs.push(bytes),
+            Err(why) if why == NOT_HERE => {}
+            Err(why) => return Err(why),
+        }
+    }
+    if logs.len() < 2 {
+        return logs.pop().ok_or_else(|| NOT_HERE.into());
+    }
+    let logs: Vec<&[u8]> = logs.iter().map(Vec::as_slice).collect();
+    let merged = uxduck_mavlink::tlog::merge(&logs);
+    if merged.len() as u64 > most() {
+        return Err(too_long("flight's log", merged.len() as u64));
+    }
+    Ok(merged)
 }
 
 /// Writes a flight's log to `out` as it is read, however long it is, for
@@ -337,6 +364,28 @@ pub fn stream(tlogs: &Path, what: &ReplayRead, out: &mut dyn Write) -> Result<u6
         ReplayRead::File { path } => File::open(path)
             .and_then(|mut f| std::io::copy(&mut f, out))
             .map_err(|e| format!("Cannot read {path}: {e}"))?,
+        ReplayRead::Merged { reads } => {
+            let mut logs = Vec::new();
+            for one in reads {
+                let mut file = tempfile::tempfile()
+                    .map_err(|e| format!("Cannot merge this flight's logs: {e}"))?;
+                let mut writer = std::io::BufWriter::new(&mut file);
+                let streamed = stream(tlogs, one, &mut writer);
+                writer
+                    .flush()
+                    .map_err(|e| format!("Cannot merge this flight's logs: {e}"))?;
+                drop(writer);
+                match streamed {
+                    Ok(_) => {}
+                    Err(why) if why == NOT_HERE => continue,
+                    Err(why) => return Err(why),
+                }
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|e| format!("Cannot merge this flight's logs: {e}"))?;
+                logs.push(std::io::BufReader::new(file));
+            }
+            merge_streams(logs, out).map_err(|e| format!("Cannot merge this flight's logs: {e}"))?
+        }
         ReplayRead::VehicleFile { .. } | ReplayRead::LinkBefore { .. } => {
             let bytes = read(tlogs, what)?;
             out.write_all(&bytes).map_err(|e| e.to_string())?;
@@ -344,7 +393,7 @@ pub fn stream(tlogs: &Path, what: &ReplayRead, out: &mut dyn Write) -> Result<u6
         }
     };
     if written == 0 {
-        return Err("This flight's log is not on this computer any more.".into());
+        return Err(NOT_HERE.into());
     }
     Ok(written)
 }
@@ -449,6 +498,53 @@ pub fn remove_link_log(tlogs: &Path, link_id: &str, name: &str) -> Result<(), St
     }
 }
 
+/// Merges logs read whole into files (`ReplayRead::Merged`), a record at
+/// a time from each, as [`uxduck_mavlink::tlog::merge`] does in memory, so
+/// a flight's file is written however long its logs are. The bytes written.
+fn merge_streams(mut logs: Vec<impl Read>, out: &mut dyn Write) -> std::io::Result<u64> {
+    let mut next: Vec<Option<(u64, Vec<u8>)>> = Vec::with_capacity(logs.len());
+    for log in &mut logs {
+        next.push(next_record(log)?);
+    }
+    let mut merge = uxduck_mavlink::tlog::Merge::default();
+    let mut written = 0u64;
+    loop {
+        let Some(i) = (0..next.len())
+            .filter_map(|i| next[i].as_ref().map(|(stamp, _)| (*stamp, i)))
+            .min()
+            .map(|(_, i)| i)
+        else {
+            return Ok(written);
+        };
+        if let Some((stamp, frame)) = next[i].take()
+            && merge.keeps(i, stamp, &frame)
+        {
+            out.write_all(&stamp.to_be_bytes())?;
+            out.write_all(&frame)?;
+            written += 8 + frame.len() as u64;
+        }
+        next[i] = next_record(&mut logs[i])?;
+    }
+}
+
+/// The next whole record of a log written by [`stream`], or none at its end.
+fn next_record(log: &mut impl Read) -> std::io::Result<Option<(u64, Vec<u8>)>> {
+    let mut stamp = [0u8; 8];
+    match log.read_exact(&mut stamp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let mut frame = vec![0u8; 3];
+    log.read_exact(&mut frame)?;
+    let len = uxduck_mavlink::framing::frame_len(&frame).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "not a MAVLink frame")
+    })?;
+    frame.resize(len, 0);
+    log.read_exact(&mut frame[3..])?;
+    Ok(Some((u64::from_be_bytes(stamp), frame)))
+}
+
 /// A link's files, oldest first, by the start time in their names
 /// (`<link id>-<unix seconds>.tlog`).
 fn link_files(tlogs: &Path, link_id: &str) -> Vec<(u64, PathBuf)> {
@@ -504,6 +600,12 @@ pub fn telemetry_bytes(tlogs: &Path, what: &ReplayRead) -> Option<(u64, u64)> {
                 most = most.saturating_add(len(path)?.saturating_sub(from));
             }
             Some((0, most))
+        }
+        ReplayRead::Merged { reads } => {
+            reads.iter().try_fold((0u64, 0u64), |(least, most), one| {
+                let (l, m) = telemetry_bytes(tlogs, one)?;
+                Some((least.max(l), most.saturating_add(m)))
+            })
         }
         ReplayRead::LinkFile { file, .. } => Some((0, len(&tlogs.join(file))?)),
         ReplayRead::LinkBefore { bytes, .. } => Some((0, *bytes)),
@@ -665,6 +767,52 @@ mod tests {
             uxduck_mavlink::tlog::record(&mut log, from_us + i * 1_000_000, &frame).unwrap();
         }
         std::fs::write(dir.join(name), log).unwrap();
+    }
+
+    /// ADR-0039 R10, 2026-11-22: a plane heard on a radio and on 4G, whose
+    /// radio dropped out, replays and is written to its file from both
+    /// connections' logs, each position once, and a connection that heard
+    /// nothing of it adds nothing.
+    #[test]
+    fn a_flight_heard_on_two_connections_is_read_and_written_from_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let t0 = T0 * 1_000_000;
+        let (mut radio, mut cell) = (Vec::new(), Vec::new());
+        for i in 0..10u8 {
+            let ms = u32::from(i) * 1_000;
+            let at = t0 + u64::from(ms) * 1_000;
+            let frame = sim::global_position_at_frame((1, i), (0, 0), (0, 0), ms);
+            if !(3..=6).contains(&i) {
+                uxduck_mavlink::tlog::record(&mut radio, at, &frame).unwrap();
+            }
+            uxduck_mavlink::tlog::record(&mut cell, at + 150_000, &frame).unwrap();
+        }
+        std::fs::write(dir.path().join(format!("li1-{T0}.tlog")), radio).unwrap();
+        std::fs::write(dir.path().join(format!("li2-{T0}.tlog")), cell).unwrap();
+        let link = |id: &str| ReplayRead::Link {
+            link_id: id.into(),
+            from_us: t0,
+            to_us: t0 + 20_000_000,
+            start: None,
+        };
+        let what = ReplayRead::Merged {
+            reads: vec![link("li1"), link("li2"), link("li3")],
+        };
+        let merged = read(dir.path(), &what).unwrap();
+        let sequences: Vec<u8> = uxduck_mavlink::tlog::read(&merged)
+            .iter()
+            .filter_map(|(_, f)| uxduck_mavlink::framing::header(f).map(|h| h.sequence))
+            .collect();
+        assert_eq!(sequences, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let mut written = Vec::new();
+        let n = stream(dir.path(), &what, &mut written).unwrap();
+        assert_eq!(written, merged);
+        assert_eq!(n, merged.len() as u64);
+        // None of them has anything then.
+        let none = ReplayRead::Merged {
+            reads: vec![link("li3"), link("li4")],
+        };
+        assert_eq!(read(dir.path(), &none), Err(NOT_HERE.to_owned()));
     }
 
     /// Counts what is read of a log.

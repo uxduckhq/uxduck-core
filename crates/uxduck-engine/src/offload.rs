@@ -248,12 +248,13 @@ impl Engine {
         match &flight.link_id {
             Some(link_id) => {
                 let (from_us, to_us) = self.armed_span(flight);
-                Some(ReplayRead::Link {
+                let own = ReplayRead::Link {
                     link_id: link_id.clone(),
                     from_us,
                     to_us,
                     start: flight.tlog.as_ref().map(|t| (t.file.clone(), t.offset)),
-                })
+                };
+                Some(self.with_other_links(flight, own, (from_us, to_us)))
             }
             None => self.present_copy(flight).map(|path| ReplayRead::Packed {
                 path,
@@ -721,6 +722,7 @@ impl Engine {
                 link_id: None,
                 tlog: None,
                 tlog_end: None,
+                other_links: Vec::new(),
                 log: uxduck_core::domain::flight::FlightLog::None,
                 sync_video: false,
                 copies: vec![FlightCopy {

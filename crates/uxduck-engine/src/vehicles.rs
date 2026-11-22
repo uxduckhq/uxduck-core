@@ -396,6 +396,7 @@ impl Engine {
         let after = vehicle.clone();
         self.commit_as(data_plane(), Change::VehicleUpserted { vehicle });
         self.vehicle_upserted(before.as_ref(), &after, presence_changed);
+        self.flight_heard_on(&after);
         let bindings: Vec<_> = self
             .state
             .controllers

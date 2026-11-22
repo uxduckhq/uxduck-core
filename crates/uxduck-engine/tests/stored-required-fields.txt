@@ -1086,3 +1086,6 @@ ComputerRun.vehicle_name
 # an optional field of a link, a type no release has stored.
 LinkFailure.kind
 LinkFailure.message
+# Another connection a flight was heard on (ADR-0039 R10, 2026-11-22):
+# a new type inside an optional field, which no release has stored.
+FlightLink.link_id

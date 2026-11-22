@@ -536,6 +536,14 @@ impl System for Host {
                     .unwrap_or_else(PoisonError::into_inner)
                     .available(link_id, *from_us, *to_us),
             ),
+            ReplayRead::Merged { reads } => reads
+                .iter()
+                .map(|one| self.replay_available(one))
+                .reduce(|a, b| match (a, b) {
+                    (Some(a), Some(b)) => Some(a || b),
+                    (a, b) => a.or(b),
+                })
+                .flatten(),
             _ => None,
         }
     }
@@ -551,6 +559,25 @@ impl System for Host {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .read(link_id, *from_us, *to_us),
+            // What one connection has, or the merge of what several do
+            // (ADR-0039 R10, 2026-11-22).
+            ReplayRead::Merged { reads } => {
+                let mut logs = Vec::new();
+                let mut first = None;
+                for one in reads {
+                    match self.replay_read(one) {
+                        Ok(bytes) => logs.push(bytes),
+                        Err(why) => {
+                            first.get_or_insert(why);
+                        }
+                    }
+                }
+                if logs.len() < 2 {
+                    return logs.pop().ok_or_else(|| first.unwrap_or_default());
+                }
+                let logs: Vec<&[u8]> = logs.iter().map(Vec::as_slice).collect();
+                Ok(uxduck_mavlink::tlog::merge(&logs))
+            }
             _ => Err("UXDuck Web opens a log from its file: Flights › Open a log….".into()),
         }
     }
