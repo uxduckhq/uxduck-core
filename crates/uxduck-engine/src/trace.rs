@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 use uxduck_contracts::dto::trace::{FrameKind, RequestId};
 
 /// Object keys whose string values are never shown by the tap.
-const SENSITIVE_KEYS: [&str; 14] = [
+const SENSITIVE_KEYS: [&str; 15] = [
     "token",
     // A command an agent asks to run or ran on a vehicle's computer
     // (ADR-0065 T14), in an approval and in a run's record.
@@ -14,6 +14,8 @@ const SENSITIVE_KEYS: [&str; 14] = [
     // What opens a terminal's socket (ADR-0065 T4).
     "ticket",
     "followUpKey",
+    // What adds to a person's own report, as `account/feedback` lists it.
+    "addKey",
     "bootstrap",
     "session",
     "password",
@@ -177,6 +179,20 @@ mod tests {
         assert_eq!(redacted["result"]["uiUrl"], "http://127.0.0.1:45000/");
         assert_eq!(redacted["error"]["code"], -32601);
         assert_eq!(redacted["params"]["code"], REDACTED);
+    }
+
+    /// The key that adds to a person's own report, as `account/feedback`
+    /// lists them, never reaches the inspector or a report's trace.
+    #[test]
+    fn a_reports_add_key_is_redacted() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "result": { "reports": [{ "id": "r1", "addKey": "owner-follow-up-secret" }] }
+        });
+        let redacted = redact(&frame);
+        assert_eq!(redacted["result"]["reports"][0]["addKey"], REDACTED);
+        assert_eq!(redacted["result"]["reports"][0]["id"], "r1");
     }
 
     #[test]

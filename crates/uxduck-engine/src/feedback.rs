@@ -20,14 +20,14 @@ use uxduck_contracts::dto::feedback::{
     FeedbackSendResult, FeedbackSuggestParams, FeedbackUi, FeedbackVoiceNote, LeftOut,
     SuggestionCard,
 };
-use uxduck_contracts::dto::trace::TraceFrame;
+use uxduck_contracts::dto::trace::{TraceFrame, Transport};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::{ClientRequest, ServerNotification};
 use uxduck_core::domain::client::ClientKind;
 use uxduck_core::domain::link::LinkKind;
 use uxduck_core::domain::link_failure::LinkFailure;
 use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
-use uxduck_core::domain::thread::ItemKind;
+use uxduck_core::domain::thread::{ItemKind, ItemStatus};
 use uxduck_core::domain::video::without_login;
 
 use crate::rpc::handlers::to_value;
@@ -296,9 +296,10 @@ pub fn fit(bundle: &mut Value, mut left_out: FeedbackLeftOut) -> FeedbackLeftOut
 }
 
 /// Field names whose values are secrets.
-const SECRET_KEYS: [&str; 13] = [
+const SECRET_KEYS: [&str; 14] = [
     "token",
     "followupkey",
+    "addkey",
     "bootstrap",
     "session",
     "password",
@@ -1314,7 +1315,7 @@ pub(crate) fn file(
     connection: ConnectionId,
     params: &FeedbackFileParams,
 ) -> Result<Value, ApiError> {
-    let chat = filed_from(engine, connection, params.thread_id.as_deref())?;
+    let chat = filed_from(engine, connection, params.thread_id.as_deref(), false)?;
     let title = scrub_text(params.title.trim());
     let text = scrub_text(params.text.trim());
     if title.is_empty() || title.chars().count() > MAX_TITLE {
@@ -1324,14 +1325,7 @@ pub(crate) fn file(
         return Err(invalid("the text must be 1 to 2,000 characters"));
     }
     let filed = match &chat {
-        Some(thread) => {
-            calls_in(engine, thread, "feedback/file")
-                + engine
-                    .agent_filing
-                    .values()
-                    .filter(|t| t.as_ref() == Some(thread))
-                    .count()
-        }
+        Some(thread) => calls_before(engine, connection, thread, "feedback/file"),
         None => outside(engine, connection).map_or(0, |agent| agent.filed.len()),
     };
     if filed >= MAX_FILED {
@@ -1390,11 +1384,11 @@ pub(crate) fn add(
     params: &FeedbackAddParams,
     operator: bool,
 ) -> Result<Value, ApiError> {
-    let chat = filed_from(engine, connection, params.thread_id.as_deref())?;
+    let chat = filed_from(engine, connection, params.thread_id.as_deref(), operator)?;
     let (known, added) = match &chat {
         Some(thread) => (
             filed_in(engine, thread).contains(&params.report_id),
-            calls_in(engine, thread, "feedback/add"),
+            calls_before(engine, connection, thread, "feedback/add"),
         ),
         None => outside(engine, connection).map_or((false, 0), |agent| {
             (agent.filed.contains(&params.report_id), agent.added)
@@ -1464,11 +1458,15 @@ pub(crate) fn add(
 
 /// The chat a report is filed from, where reports go out from here. None
 /// for an agent outside UXDuck, such as an MCP client, which names no chat:
-/// the report is its connection's.
+/// the report is its connection's. A chat is named only by UXDuck's agent on
+/// that chat's turn, or, adding to a report, by the person who sees it, so
+/// nobody else spends the chat's reports or passes theirs off as its own
+/// (UXD-338).
 fn filed_from(
     engine: &Engine,
     connection: ConnectionId,
     thread: Option<&str>,
+    operator: bool,
 ) -> Result<Option<String>, ApiError> {
     if !engine.feedback.sends() {
         return Err(ApiError::new(
@@ -1477,11 +1475,34 @@ fn filed_from(
              to prepare a draft for the person to review and send. Nothing has been sent.",
         ));
     }
+    let outside = outside(engine, connection).is_some();
     match thread {
-        None if outside(engine, connection).is_some() => Ok(None),
-        Some(id) if engine.state.threads.contains_key(id) => Ok(Some(id.to_owned())),
-        _ => Err(invalid("reports are filed from a UXDuck chat")),
+        None if outside => Ok(None),
+        None => Err(invalid("reports are filed from a UXDuck chat")),
+        Some(_) if outside => Err(invalid(
+            "a report from outside UXDuck is filed for its own connection, so leave out threadId",
+        )),
+        Some(id)
+            if runs_turn_in(engine, connection, id)
+                || (operator && crate::rpc::threads::sees_thread(engine, connection, id)) =>
+        {
+            Ok(Some(id.to_owned()))
+        }
+        Some(_) => Err(invalid(
+            "only UXDuck's agent on this chat's turn files from it, and only the person adds to it",
+        )),
     }
+}
+
+/// Whether a connection is UXDuck's agent host on a chat's turn: each turn
+/// connects inside the daemon on its own and says which chat it answers.
+fn runs_turn_in(engine: &Engine, connection: ConnectionId, thread: &str) -> bool {
+    engine
+        .connections
+        .get(&connection)
+        .is_some_and(|c| c.transport == Transport::Internal)
+        && engine.state.threads.contains_key(thread)
+        && engine.agent_thread(connection) == Some(thread)
 }
 
 fn outside(engine: &Engine, connection: ConnectionId) -> Option<&crate::OutsideAgent> {
@@ -1492,14 +1513,27 @@ fn outside_mut(engine: &mut Engine, connection: ConnectionId) -> Option<&mut cra
     engine.connections.get_mut(&connection)?.outside.as_mut()
 }
 
-/// How many calls of a method a chat holds, whatever became of them.
-fn calls_in(engine: &Engine, thread: &str, method: &str) -> usize {
-    engine
+/// How many calls of a method a chat holds, whatever became of them, those
+/// still being sent included. The agent host records a call in its chat
+/// before it makes it, so the call being made is not counted.
+fn calls_before(engine: &Engine, connection: ConnectionId, thread: &str, method: &str) -> usize {
+    let Some(client_id) = engine.connections.get(&connection).map(|c| &c.client_id) else {
+        return 0;
+    };
+    let calls: Vec<_> = engine
         .state
         .items_of(thread)
         .into_iter()
         .filter(|item| item.tool_call.as_ref().is_some_and(|c| c.method == method))
-        .count()
+        .collect();
+    let own = calls.iter().any(|item| {
+        item.status == ItemStatus::InProgress
+            && item
+                .tool_call
+                .as_ref()
+                .is_some_and(|c| &c.client_id == client_id)
+    });
+    calls.len() - usize::from(own)
 }
 
 /// The reports the agent filed in a chat, from its calls' results.
@@ -1908,6 +1942,19 @@ mod tests {
             bundle["note"],
             "sent to [address] from [device], mail [email], key [redacted]"
         );
+    }
+
+    /// A report's add key, as `account/feedback` lists the person's own,
+    /// is a secret wherever a bundle holds it.
+    #[test]
+    fn scrubbing_redacts_a_reports_add_key() {
+        let mut bundle = json!({
+            "reports": [{ "id": "r1", "addKey": "owner-follow-up-secret", "add_key": "again" }]
+        });
+        scrub(&mut bundle);
+        assert_eq!(bundle["reports"][0]["addKey"], "[redacted]");
+        assert_eq!(bundle["reports"][0]["add_key"], "[redacted]");
+        assert_eq!(bundle["reports"][0]["id"], "r1");
     }
 
     /// FB-267: a link's host name has no address's shape, so its endpoint
