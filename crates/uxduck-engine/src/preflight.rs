@@ -1405,12 +1405,24 @@ impl Engine {
         let ids: BTreeSet<&str> = std::iter::once(vehicle.id.as_str())
             .chain(vehicle.aliases.iter().map(String::as_str))
             .collect();
-        let cameras: Vec<_> = self
+        let (cameras, left_out): (Vec<_>, Vec<_>) = self
             .state
             .video_sources
             .values()
-            .filter(|s| !s.record_alone && s.vehicle_id.as_deref().is_some_and(|v| ids.contains(v)))
-            .collect();
+            .filter(|s| s.vehicle_id.as_deref().is_some_and(|v| ids.contains(v)))
+            .partition(|s| !s.record_alone);
+        if cameras.is_empty() && !left_out.is_empty() {
+            let names: Vec<String> = left_out.iter().map(|s| s.name.clone()).collect();
+            let (verb, starts) = if names.len() == 1 {
+                ("is", "its own Record starts it")
+            } else {
+                ("are", "each camera's own Record starts it")
+            };
+            return pass(format!(
+                "{} {verb} left out of automatic recording, so arming {name} records nothing. Only {starts}.",
+                and_list(&names)
+            ));
+        }
         if cameras.is_empty() {
             return pass(format!("No camera records with {name}."));
         }

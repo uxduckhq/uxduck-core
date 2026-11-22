@@ -2,6 +2,8 @@
 //! policy and by hand, the recordings as entities, recovery after a crash,
 //! and playback tokens. The daemon writes the files.
 
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 use uxduck_contracts::dto::Empty;
 use uxduck_contracts::dto::state::{EntityChange, EntityType};
@@ -15,7 +17,9 @@ use uxduck_core::domain::video::{
 };
 use uxduck_core::events::{Actor, Change};
 
-use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
+use uxduck_core::domain::notification::{
+    Action, NotificationAction, NotificationKind, NotificationState, Severity, Subject,
+};
 
 use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
@@ -34,6 +38,17 @@ pub struct SpoolVideo {
     /// Whether its segments go now: once it ended, or while it records
     /// with "Upload video while flying" on.
     pub cut: bool,
+}
+
+/// The condition of a camera's "isn't recording" on arming (FB-311).
+const LEFT_OUT: &str = "recording-left-out:";
+
+/// The camera settings switch that leaves a camera out of Record all and
+/// automatic recording, as the "isn't recording" notice names it.
+const RECORD_ALL_SWITCH: &str = "Include in Record all";
+
+fn left_out_condition(source_id: &str) -> String {
+    format!("{LEFT_OUT}{source_id}")
 }
 
 /// `m:ss` into a recording.
@@ -290,6 +305,7 @@ impl Engine {
                 _ => {}
             }
         }
+        self.review_cameras_left_out();
     }
 
     fn start_recording(&mut self, source: &VideoSource, trigger: RecordingTrigger) {
@@ -739,6 +755,83 @@ impl Engine {
             .collect();
         for id in stopped {
             self.video.by_hand.remove(&id);
+        }
+        self.say_cameras_left_out(vehicle_id);
+    }
+
+    /// A vehicle arms with a camera that "Include in Record all" leaves out:
+    /// the recording setting skips it without a word, so say so where the
+    /// person is (FB-311). Resolved when it records, is included again or
+    /// the vehicle disarms.
+    fn say_cameras_left_out(&mut self, vehicle_id: &str) {
+        if self.video.port.is_none() || self.state.settings.video_recording == RecordPolicy::ByHand
+        {
+            return;
+        }
+        let Some(vehicle) = self.state.vehicles.get(vehicle_id) else {
+            return;
+        };
+        let vehicle_name = vehicle.name.clone();
+        let left_out: Vec<VideoSource> = self
+            .state
+            .video_sources
+            .values()
+            .filter(|s| s.vehicle_id.as_deref() == Some(vehicle_id))
+            .filter(|s| s.record_alone && s.state != VideoState::Unsupported)
+            .filter(|s| s.capture.as_ref().is_none_or(|c| c.enabled))
+            .filter(|s| self.video.by_hand.get(&s.id) != Some(&true))
+            .cloned()
+            .collect();
+        for source in left_out {
+            self.raise(Raise {
+                severity: Severity::Warning,
+                kind: NotificationKind::Transient,
+                subject: Subject::VideoSource {
+                    id: source.id.clone(),
+                },
+                title: format!("{} isn't recording", source.name),
+                body: Some(format!(
+                    "{RECORD_ALL_SWITCH} is off in its camera settings, so arming {vehicle_name} doesn't record it. Press its Record to record it now."
+                )),
+                actions: vec![NotificationAction {
+                    label: "Open video".into(),
+                    action: Action::OpenVideo {
+                        source_id: source.id.clone(),
+                    },
+                }],
+                condition: Some(left_out_condition(&source.id)),
+                report: None,
+            });
+        }
+    }
+
+    /// Resolves "isn't recording" once its camera records, is included
+    /// again, or its vehicle disarms. A dismissed notice is resolved too, so
+    /// the next arming says it again.
+    fn review_cameras_left_out(&mut self) {
+        let held: BTreeSet<String> = self
+            .state
+            .notifications
+            .values()
+            .filter(|n| n.state != NotificationState::Resolved)
+            .filter_map(|n| n.condition.as_deref())
+            .chain(self.dismissed.keys().map(String::as_str))
+            .filter_map(|condition| condition.strip_prefix(LEFT_OUT))
+            .map(str::to_owned)
+            .collect();
+        for source_id in held {
+            let still = self.state.video_sources.get(&source_id).is_some_and(|s| {
+                s.record_alone
+                    && !self.video.recording.contains_key(&s.id)
+                    && self.video.by_hand.get(&s.id) != Some(&true)
+                    && s.vehicle_id
+                        .as_ref()
+                        .and_then(|id| self.state.vehicles.get(id))
+                        .is_some_and(|v| v.armed)
+            });
+            if !still {
+                self.resolve(&left_out_condition(&source_id));
+            }
         }
     }
 
