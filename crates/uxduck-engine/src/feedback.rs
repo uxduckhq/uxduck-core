@@ -1428,7 +1428,7 @@ pub(crate) fn add(
     {
         return Err(invalid("attach up to 10 files, 25 MB together"));
     }
-    if added >= MAX_ADDED {
+    if !operator && added >= MAX_ADDED {
         return Err(ApiError::new(
             ErrorKind::Busy,
             if chat.is_some() {

@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -147,9 +147,13 @@ enum Sent {
     Done(Box<FeedbackSendResult>),
     /// Offline, or the API cannot take it now: kept for later.
     Later,
-    /// The API takes no more reports from this address for now (429): kept,
-    /// and nothing is tried again for this long.
-    Limited(Duration),
+    /// The API takes this report not now (429): kept, and tried again after
+    /// `wait`. When the API limits this whole address, nothing else is tried
+    /// before then either. Otherwise the others still go (UXD-338).
+    Limited {
+        wait: Duration,
+        address: bool,
+    },
     /// The API refused it for good, saying why.
     Refused(String),
 }
@@ -157,20 +161,25 @@ enum Sent {
 async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<Job>) {
     let engine = sender.engine.clone();
     // While the API is limiting this address, kept reports wait until then.
+    // A report the API limited on its own waits in its folder (`defer`).
     let mut paused_until: Option<Instant> = None;
     loop {
-        let waiting = sender.waiting();
-        let job = if waiting.is_empty() {
-            rx.recv().await
+        let paused = paused_until.filter(|until| *until > Instant::now());
+        let wake = if sender.waiting().is_empty() {
+            next_due(&sender.outbox).map(|at| {
+                let due = Instant::now() + at.duration_since(SystemTime::now()).unwrap_or_default();
+                paused.map_or(due, |until| until.max(due))
+            })
         } else {
-            let wake = paused_until
-                .filter(|until| *until > Instant::now())
-                .unwrap_or_else(|| Instant::now() + sender.retry);
-            tokio::select! {
+            Some(paused.unwrap_or_else(|| Instant::now() + sender.retry))
+        };
+        let job = match wake {
+            None => rx.recv().await,
+            Some(wake) => tokio::select! {
                 job = rx.recv() => job,
                 () = tokio::time::sleep_until(wake) => {
                     crate::wakes::count("feedback: retry");
-                    for dir in waiting {
+                    for dir in sender.waiting() {
                         if let Some(wait) = sender.retry(&dir).await {
                             paused_until = Some(Instant::now() + wait);
                             break;
@@ -178,7 +187,7 @@ async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<Job>) {
                     }
                     continue;
                 }
-            }
+            },
         };
         let order = match job {
             None => return,
@@ -218,8 +227,12 @@ async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<Job>) {
                     limited: false,
                     left_out,
                 }),
-                Sent::Limited(wait) => {
-                    paused_until = Some(Instant::now() + wait);
+                Sent::Limited { wait, address } => {
+                    if address {
+                        paused_until = Some(Instant::now() + wait);
+                    } else {
+                        defer(&dir, wait);
+                    }
                     Ok(FeedbackSendResult {
                         status: FeedbackStatus::Queued,
                         issue: None,
@@ -243,29 +256,11 @@ async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<Job>) {
 impl Sender {
     /// Reports waiting to go, oldest first; ones older than a week are dropped.
     fn waiting(&self) -> Vec<PathBuf> {
-        let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&self.outbox)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| entry.path().join("report.json").exists())
-            .filter_map(|entry| {
-                let modified = entry.metadata().ok()?.modified().ok()?;
-                Some((modified, entry.path()))
-            })
-            .collect();
-        dirs.retain(|(modified, dir)| {
-            let stale = modified.elapsed().is_ok_and(|age| age > KEEP_FOR);
-            if stale {
-                let _ = std::fs::remove_dir_all(dir);
-            }
-            !stale
-        });
-        dirs.sort();
-        dirs.into_iter().map(|(_, dir)| dir).collect()
+        waiting(&self.outbox)
     }
 
     /// Tries a kept report again; how long to wait when the API is limiting
-    /// this address.
+    /// this address. A report limited on its own waits in its folder.
     async fn retry(&self, dir: &Path) -> Option<Duration> {
         match self.send(dir).await {
             Sent::Done(result) => {
@@ -278,7 +273,11 @@ impl Sender {
                 let _ = std::fs::remove_dir_all(dir);
             }
             Sent::Later => {}
-            Sent::Limited(wait) => return Some(wait),
+            Sent::Limited {
+                wait,
+                address: true,
+            } => return Some(wait),
+            Sent::Limited { wait, .. } => defer(dir, wait),
         }
         None
     }
@@ -636,58 +635,119 @@ impl Sender {
             .and_then(|value| value.trim().parse::<u64>().ok())
             .map(|seconds| Duration::from_secs(seconds.min(LONGEST_PAUSE.as_secs())));
         let answer: Value = response.json().await.unwrap_or(Value::Null);
-        self.outcome(status.as_u16(), retry_after, &answer)
+        outcome(status.as_u16(), retry_after, &answer, self.retry)
     }
+}
 
-    /// What the API's answer to a report means for it.
-    fn outcome(&self, status: u16, retry_after: Option<Duration>, answer: &Value) -> Sent {
-        match status {
-            // Not set up on the server: no retry will help, so say so now.
-            503 if answer["code"] == "not-configured" => Sent::Refused(
-                answer["error"]
-                    .as_str()
-                    .unwrap_or("feedback isn't set up on UXDuck's servers")
-                    .to_owned(),
-            ),
-            200..=299 => {
-                let status = match answer["status"].as_str() {
-                    Some("received") => FeedbackStatus::Received,
-                    Some("duplicate") => FeedbackStatus::Duplicate,
-                    Some("held") => FeedbackStatus::Held,
-                    _ => FeedbackStatus::Filed,
-                };
-                Sent::Done(Box::new(FeedbackSendResult {
-                    status,
-                    issue: answer["issue"].as_str().map(str::to_owned),
-                    transcript: answer["transcript"].as_str().map(str::to_owned),
-                    limited: false,
-                    left_out: None,
-                }))
-            }
-            429 => {
-                let wait = retry_after.unwrap_or(self.retry).max(self.retry);
-                tracing::warn!(
-                    seconds = wait.as_secs(),
-                    "feedback: the API takes no more reports from this address for now; kept"
-                );
-                Sent::Limited(wait)
-            }
-            // A redirect is a network that wants a sign-in first, or
-            // something else in the way: keep the report for later.
-            300..=399 | 500..=599 => {
-                tracing::warn!(
-                    status,
-                    "feedback: the API could not take the report now; kept"
-                );
-                Sent::Later
-            }
-            _ => Sent::Refused(
-                answer["error"]
-                    .as_str()
-                    .unwrap_or("the report was refused")
-                    .to_owned(),
-            ),
+/// The file in a report's folder saying when the API will take it again,
+/// as seconds since 1970, when the API limited that report on its own.
+const NOT_BEFORE: &str = "not-before";
+
+/// Keeps a report back for `wait` while the others still go.
+fn defer(dir: &Path, wait: Duration) {
+    let until = (SystemTime::now() + wait)
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let _ = std::fs::write(dir.join(NOT_BEFORE), until.to_string());
+}
+
+/// When a deferred report may go again.
+fn not_before(dir: &Path) -> Option<SystemTime> {
+    let seconds = std::fs::read_to_string(dir.join(NOT_BEFORE)).ok()?;
+    Some(UNIX_EPOCH + Duration::from_secs(seconds.trim().parse().ok()?))
+}
+
+/// The kept reports that may go now, oldest first. Ones older than a week
+/// are dropped.
+fn waiting(outbox: &Path) -> Vec<PathBuf> {
+    let now = SystemTime::now();
+    kept(outbox)
+        .into_iter()
+        .filter(|dir| not_before(dir).is_none_or(|at| at <= now))
+        .collect()
+}
+
+/// When the first deferred report may go again.
+fn next_due(outbox: &Path) -> Option<SystemTime> {
+    kept(outbox).iter().filter_map(|dir| not_before(dir)).min()
+}
+
+/// Every kept report, oldest first. Ones older than a week are dropped.
+fn kept(outbox: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(outbox)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().join("report.json").exists())
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    dirs.retain(|(modified, dir)| {
+        let stale = modified.elapsed().is_ok_and(|age| age > KEEP_FOR);
+        if stale {
+            let _ = std::fs::remove_dir_all(dir);
         }
+        !stale
+    });
+    dirs.sort();
+    dirs.into_iter().map(|(_, dir)| dir).collect()
+}
+
+/// What the API's answer to a report means for it. A 429 waits as long as
+/// the API asks, at least `retry`. A 413, or any other 4xx, is refused for
+/// good, because sending the same report again can never be taken.
+fn outcome(status: u16, retry_after: Option<Duration>, answer: &Value, retry: Duration) -> Sent {
+    match status {
+        // Not set up on the server: no retry will help, so say so now.
+        503 if answer["code"] == "not-configured" => Sent::Refused(
+            answer["error"]
+                .as_str()
+                .unwrap_or("feedback isn't set up on UXDuck's servers")
+                .to_owned(),
+        ),
+        200..=299 => {
+            let status = match answer["status"].as_str() {
+                Some("received") => FeedbackStatus::Received,
+                Some("duplicate") => FeedbackStatus::Duplicate,
+                Some("held") => FeedbackStatus::Held,
+                _ => FeedbackStatus::Filed,
+            };
+            Sent::Done(Box::new(FeedbackSendResult {
+                status,
+                issue: answer["issue"].as_str().map(str::to_owned),
+                transcript: answer["transcript"].as_str().map(str::to_owned),
+                limited: false,
+                left_out: None,
+            }))
+        }
+        429 => {
+            let wait = retry_after.unwrap_or(retry).max(retry);
+            tracing::warn!(
+                seconds = wait.as_secs(),
+                "feedback: the API takes no more reports from this address for now; kept"
+            );
+            Sent::Limited {
+                wait,
+                address: answer["code"] == "address-limited",
+            }
+        }
+        // A redirect is a network that wants a sign-in first, or
+        // something else in the way: keep the report for later.
+        300..=399 | 500..=599 => {
+            tracing::warn!(
+                status,
+                "feedback: the API could not take the report now; kept"
+            );
+            Sent::Later
+        }
+        _ => Sent::Refused(
+            answer["error"]
+                .as_str()
+                .unwrap_or("the report was refused")
+                .to_owned(),
+        ),
     }
 }
 
@@ -1040,6 +1100,48 @@ impl Multipart {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_report_too_large_ever_is_refused_and_a_limit_waits_as_asked() {
+        let retry = Duration::from_secs(60);
+        let too_large = json!({ "error": "These files come to 48.0 MB, more than UXDuck's servers take from everyone in a day, 10.0 MB, so they can never be sent." });
+        assert!(
+            matches!(outcome(413, None, &too_large, retry), Sent::Refused(why) if why.starts_with("These files come to 48.0 MB"))
+        );
+        let tomorrow = Duration::from_hours(9);
+        assert!(matches!(
+            outcome(429, Some(tomorrow), &json!({}), retry),
+            Sent::Limited { wait, address: false } if wait == tomorrow
+        ));
+        assert!(matches!(
+            outcome(429, None, &json!({ "code": "address-limited" }), retry),
+            Sent::Limited { wait, address: true } if wait == retry
+        ));
+    }
+
+    #[test]
+    fn a_report_limited_on_its_own_waits_while_the_others_go() {
+        let outbox = tempfile::tempdir().unwrap();
+        for id in ["first", "second"] {
+            std::fs::create_dir(outbox.path().join(id)).unwrap();
+            std::fs::write(outbox.path().join(id).join("report.json"), "{}").unwrap();
+        }
+        let first = outbox.path().join("first");
+        let second = outbox.path().join("second");
+        assert_eq!(waiting(outbox.path()).len(), 2);
+        assert_eq!(next_due(outbox.path()), None);
+
+        defer(&first, Duration::from_hours(9));
+        assert_eq!(waiting(outbox.path()), std::slice::from_ref(&second));
+        let due = next_due(outbox.path()).expect("the first is due later");
+        let wait = due.duration_since(SystemTime::now()).unwrap();
+        assert!(wait > Duration::from_hours(8) && wait <= Duration::from_hours(9));
+
+        defer(&first, Duration::ZERO);
+        let mut both = waiting(outbox.path());
+        both.sort();
+        assert_eq!(both, [first, second]);
+    }
 
     #[test]
     fn base64_decodes_standard_and_data_urls() {

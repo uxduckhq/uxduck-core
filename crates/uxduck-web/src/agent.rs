@@ -191,6 +191,9 @@ impl Host for BrowserHost {
         ) && let Some(fields) = params.as_object_mut()
         {
             fields.insert("threadId".into(), Value::String(self.scope.thread.clone()));
+            if method.starts_with("feedback/") {
+                fields.remove("attachments");
+            }
         }
         let (tx, rx) = oneshot::channel();
         push(
