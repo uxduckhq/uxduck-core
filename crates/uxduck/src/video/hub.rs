@@ -210,6 +210,8 @@ struct Inner {
     playback: HashMap<String, Playback>,
     /// Photo tokens (S144): the photo's id and file, and when given.
     photos: HashMap<String, (String, String, Instant)>,
+    /// Thumbnail tokens: each photo's file by its id, and when given.
+    thumbnails: HashMap<String, (HashMap<String, String>, Instant)>,
     /// Sources re-encoded for browsers now, and those whose re-encode
     /// failed, until when not to try again.
     reencoded: std::collections::HashSet<String>,
@@ -218,6 +220,15 @@ struct Inner {
 
 /// How long a playback token lasts.
 const PLAYBACK_LIFETIME: Duration = Duration::from_secs(3600);
+
+/// Why a thumbnail token gives no photo.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ThumbnailRefused {
+    /// Unknown, or older than a photo's token lasts.
+    Lapsed,
+    /// It names other photos.
+    NotNamed,
+}
 
 /// A playback token: the recording, where its bytes are, whether it was
 /// still being written when the token was given and whether the token has
@@ -320,6 +331,36 @@ impl Hub {
             token.to_owned(),
             (photo_id.to_owned(), file_name.to_owned(), now),
         );
+    }
+
+    /// `/thumbnails/<photo id>.jpg?token=` for each photo named, by its id
+    /// and file, for as long as a photo's token lasts.
+    pub fn allow_thumbnails(&self, token: &str, photos: &[(String, String)]) {
+        let mut inner = self.lock();
+        let now = Instant::now();
+        inner
+            .thumbnails
+            .retain(|_, (_, at)| now.duration_since(*at) < PLAYBACK_LIFETIME);
+        inner
+            .thumbnails
+            .insert(token.to_owned(), (photos.iter().cloned().collect(), now));
+    }
+
+    /// The file of a photo a thumbnail token names, while it lasts.
+    ///
+    /// # Errors
+    /// The token is unknown or lapsed, or it does not name the photo.
+    pub fn thumbnail(&self, token: &str, photo_id: &str) -> Result<String, ThumbnailRefused> {
+        let inner = self.lock();
+        let (photos, _) = inner
+            .thumbnails
+            .get(token)
+            .filter(|(_, at)| at.elapsed() < PLAYBACK_LIFETIME)
+            .ok_or(ThumbnailRefused::Lapsed)?;
+        photos
+            .get(photo_id)
+            .cloned()
+            .ok_or(ThumbnailRefused::NotNamed)
     }
 
     /// The photo a token is for, while it lasts: its id and file.

@@ -17,6 +17,7 @@ pub mod reencode;
 pub mod rtsp;
 pub mod slice;
 pub mod socket;
+pub mod thumbnail;
 pub mod whep;
 
 use std::collections::HashMap;
@@ -370,6 +371,10 @@ impl uxduck_engine::video::VideoPort for VideoHost {
 
     fn allow_photo(&mut self, token: &str, photo_id: &str, file_name: &str) {
         self.hub.allow_photo(token, photo_id, file_name);
+    }
+
+    fn allow_thumbnails(&mut self, token: &str, photos: &[(String, String)]) {
+        self.hub.allow_thumbnails(token, photos);
     }
 
     fn reveal_photo(&mut self, file_name: &str) -> Result<String, String> {

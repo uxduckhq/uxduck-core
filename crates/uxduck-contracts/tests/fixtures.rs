@@ -599,6 +599,9 @@ fn check(name: &str) {
         ("result", "video_playback" | "video_photo_show") => {
             round_trip::<uxduck_contracts::dto::video::VideoPlaybackResult>(name, &json);
         }
+        ("result", "video_photo_thumbnails") => {
+            round_trip::<uxduck_contracts::dto::video::VideoPhotoThumbnailsResult>(name, &json);
+        }
         ("result", "video_reveal" | "storage_reveal") => {
             round_trip::<uxduck_contracts::dto::video::VideoRevealResult>(name, &json);
         }

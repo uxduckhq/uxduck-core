@@ -4343,6 +4343,9 @@ export type ClientRequest = {
     method: 'video/photo/show';
     params: VideoPhotoShowParams;
 } | {
+    method: 'video/photo/thumbnails';
+    params: VideoPhotoThumbnailsParams;
+} | {
     method: 'video/frame';
     params: VideoFrameParams;
 } | {
@@ -21321,6 +21324,36 @@ export type VideoPhotoParams = {
 
 export type VideoPhotoShowParams = {
     photoId: string;
+};
+
+export type VideoPhotoThumbnail = {
+    /**
+     * A JPEG at most 320 px on its long edge, on the daemon's origin, good
+     * for an hour. Made from the photo when first asked for, and again
+     * when the photo's file changes. One that can't be made answers with
+     * why, in words.
+     */
+    path: string;
+    photoId: string;
+};
+
+/**
+ * Photos whose small previews a list shows, all at once, so a list of
+ * many photos needs one request rather than one each.
+ */
+export type VideoPhotoThumbnailsParams = {
+    photoIds: Array<string>;
+};
+
+export type VideoPhotoThumbnailsResult = {
+    /**
+     * The photos asked for that UXDuck no longer has, deleted since.
+     */
+    missing?: Array<string>;
+    /**
+     * One for each photo asked for that UXDuck has.
+     */
+    thumbnails: Array<VideoPhotoThumbnail>;
 };
 
 export type VideoPlaybackParams = {

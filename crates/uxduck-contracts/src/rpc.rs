@@ -99,9 +99,9 @@ use crate::dto::vehicle::{
 use crate::dto::video::{
     VideoAddParams, VideoAddressesParams, VideoAssignParams, VideoCaptureEnableParams,
     VideoCaptureParams, VideoCaptureSettingsParams, VideoDemosParams, VideoFileParams,
-    VideoFrameParams, VideoPhotoParams, VideoPhotoShowParams, VideoPlaybackParams,
-    VideoRecordAllParams, VideoRecordParams, VideoRecordWithOthersParams, VideoRemoveParams,
-    VideoRenameParams, VideoRevealParams, VideoServedByParams, VideoTrackParams,
+    VideoFrameParams, VideoPhotoParams, VideoPhotoShowParams, VideoPhotoThumbnailsParams,
+    VideoPlaybackParams, VideoRecordAllParams, VideoRecordParams, VideoRecordWithOthersParams,
+    VideoRemoveParams, VideoRenameParams, VideoRevealParams, VideoServedByParams, VideoTrackParams,
     VideoUnwatchParams, VideoVehicleCameraParams, VideoWatchParams,
 };
 
@@ -2098,6 +2098,11 @@ pub enum ClientRequest {
     /// hour. Needs `read`. Result: `VideoPlaybackResult`.
     #[serde(rename = "video/photo/show")]
     VideoPhotoShow(VideoPhotoShowParams),
+    /// Small previews of photos, for a list: a JPEG path on the daemon's
+    /// origin for each, good for an hour, from one request however many
+    /// photos it names. Needs `read`. Result: `VideoPhotoThumbnailsResult`.
+    #[serde(rename = "video/photo/thumbnails")]
+    VideoPhotoThumbnails(VideoPhotoThumbnailsParams),
     /// Looks through a live camera, for the assistant to see what it shows
     /// (FB-244): the picture now as a JPEG, or a clip of as many frames over
     /// as many seconds as asked, in time order with when each was seen.
@@ -2441,7 +2446,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 424] = [
+    pub const METHODS: [&'static str; 425] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2771,6 +2776,7 @@ impl ClientRequest {
         "video/reveal",
         "video/photo",
         "video/photo/show",
+        "video/photo/thumbnails",
         "video/frame",
         "video/vehicleCamera",
         "video/servedBy",

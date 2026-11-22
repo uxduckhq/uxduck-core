@@ -220,6 +220,9 @@ pub trait VideoPort: Send + std::fmt::Debug {
     }
     /// `/photos/<photo id>.jpg?token=` answers with that file for an hour.
     fn allow_photo(&mut self, _token: &str, _photo_id: &str, _file_name: &str) {}
+    /// `/thumbnails/<photo id>.jpg?token=` answers with a small preview
+    /// of each photo named, by its id and file, for an hour.
+    fn allow_thumbnails(&mut self, _token: &str, _photos: &[(String, String)]) {}
     /// Shows the pictures folder with a photo selected: the folder.
     ///
     /// # Errors
@@ -3461,6 +3464,10 @@ pub(crate) fn handle(
         ClientRequest::VideoPhotoShow(params) => {
             require(Capability::Read)?;
             crate::photos::show(engine, &params)
+        }
+        ClientRequest::VideoPhotoThumbnails(params) => {
+            require(Capability::Read)?;
+            crate::photos::thumbnails(engine, &params)
         }
         ClientRequest::VideoVehicleCamera(params) => {
             require(Capability::Config)?;

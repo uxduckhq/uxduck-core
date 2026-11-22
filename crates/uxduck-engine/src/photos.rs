@@ -8,6 +8,7 @@ use serde_json::Value;
 use uxduck_contracts::dto::state::{EntityChange, EntityType};
 use uxduck_contracts::dto::video::{
     PHOTO_MAX, VideoPhoto as VideoPhotoDto, VideoPhotoParams, VideoPhotoShowParams,
+    VideoPhotoThumbnail, VideoPhotoThumbnailsParams, VideoPhotoThumbnailsResult,
     VideoPlaybackResult,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
@@ -284,6 +285,42 @@ impl Engine {
         })
     }
 
+    /// One address for each photo's preview, from one token, so a list of
+    /// many photos asks once. Photos UXDuck no longer has are named as
+    /// missing, so the list can say so.
+    fn video_photo_thumbnails(
+        &mut self,
+        params: &VideoPhotoThumbnailsParams,
+    ) -> Result<VideoPhotoThumbnailsResult, ApiError> {
+        let (known, missing): (Vec<&String>, Vec<&String>) = params
+            .photo_ids
+            .iter()
+            .partition(|id| self.state.video_photos.contains_key(*id));
+        let photos: Vec<(String, String)> = known
+            .iter()
+            .filter_map(|id| self.state.video_photos.get(*id))
+            .map(|photo| (photo.id.clone(), photo.file_name.clone()))
+            .collect();
+        let token = format!("vt{}", &self.random.token()[..32]);
+        let Some(port) = self.video.port.as_mut() else {
+            return Err(ApiError::new(
+                ErrorKind::InvalidRequest,
+                "Photos need UXDuck Desktop.",
+            ));
+        };
+        port.allow_thumbnails(&token, &photos);
+        Ok(VideoPhotoThumbnailsResult {
+            thumbnails: photos
+                .into_iter()
+                .map(|(id, _)| VideoPhotoThumbnail {
+                    path: format!("/thumbnails/{id}.jpg?token={token}"),
+                    photo_id: id,
+                })
+                .collect(),
+            missing: missing.into_iter().cloned().collect(),
+        })
+    }
+
     /// Shows a photo in the file manager: the pictures folder.
     pub(crate) fn reveal_photo(&mut self, photo_id: &str) -> Result<String, ApiError> {
         let photo =
@@ -305,6 +342,13 @@ pub(crate) fn photo(engine: &mut Engine, params: &VideoPhotoParams) -> Result<Va
 
 pub(crate) fn show(engine: &mut Engine, params: &VideoPhotoShowParams) -> Result<Value, ApiError> {
     to_value(&engine.video_photo_show(params)?)
+}
+
+pub(crate) fn thumbnails(
+    engine: &mut Engine,
+    params: &VideoPhotoThumbnailsParams,
+) -> Result<Value, ApiError> {
+    to_value(&engine.video_photo_thumbnails(params)?)
 }
 
 pub(crate) fn entity_changes(change: &Change) -> Vec<EntityChange> {

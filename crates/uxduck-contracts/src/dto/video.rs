@@ -644,6 +644,35 @@ pub struct VideoPhotoShowParams {
     pub photo_id: String,
 }
 
+/// Photos whose small previews a list shows, all at once, so a list of
+/// many photos needs one request rather than one each.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPhotoThumbnailsParams {
+    pub photo_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPhotoThumbnailsResult {
+    /// One for each photo asked for that UXDuck has.
+    pub thumbnails: Vec<VideoPhotoThumbnail>,
+    /// The photos asked for that UXDuck no longer has, deleted since.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPhotoThumbnail {
+    pub photo_id: String,
+    /// A JPEG at most 320 px on its long edge, on the daemon's origin, good
+    /// for an hour. Made from the photo when first asked for, and again
+    /// when the photo's file changes. One that can't be made answers with
+    /// why, in words.
+    pub path: String,
+}
+
 /// A photo from the video (S144, ADR-0017 V19), kept in the platform's
 /// pictures folder.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

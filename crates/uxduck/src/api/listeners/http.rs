@@ -203,6 +203,7 @@ pub fn router(
         .route("/sim-camera", get(sim_camera_socket))
         .route("/recordings/{file}", get(recording))
         .route("/photos/{file}", get(photo))
+        .route("/thumbnails/{file}", get(thumbnail))
         .route("/api/vehicle-files/{file}", get(vehicle_file))
         // A page's start (S109): never with a session, since the pairing
         // screen is a start too; the guard keeps other sites out.
@@ -247,6 +248,7 @@ pub fn network_router(
         // Not live video: a page on plain HTTP cannot decode it (S97).
         .route("/recordings/{file}", get(recording))
         .route("/photos/{file}", get(photo))
+        .route("/thumbnails/{file}", get(thumbnail))
         .route("/api/vehicle-files/{file}", get(vehicle_file))
         .route("/interface/ready", post(interface_ready))
         .route("/interface/boot-failed", post(interface_boot_failed))
@@ -1202,6 +1204,68 @@ async fn photo(
         .await
     {
         Ok(response) => response.map(Body::new).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Thumbnails made at once (`thumbnail::AT_ONCE`): a list asks for
+/// hundreds together, and each holds a photo decoded whole while it is made.
+static THUMBNAILS_AT_ONCE: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(crate::video::thumbnail::AT_ONCE);
+
+/// A photo's small preview, with an address `video/photo/thumbnails` gave:
+/// made the first time and kept in the app folder's cache. One that can't
+/// be made answers with why, in words a list shows under the photo.
+async fn thumbnail(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+    Query(query): Query<VideoQuery>,
+    request: Request,
+) -> Response {
+    use crate::video::hub::ThumbnailRefused;
+    use crate::video::thumbnail::{self, Failure};
+    let Some(id) = file.strip_suffix(".jpg") else {
+        return (StatusCode::UNAUTHORIZED, "ask for the thumbnails first").into_response();
+    };
+    let name = match state.video.thumbnail(&query.token, id) {
+        Ok(name) => name,
+        Err(ThumbnailRefused::Lapsed) => {
+            return (StatusCode::UNAUTHORIZED, "ask for the thumbnails first").into_response();
+        }
+        Err(ThumbnailRefused::NotNamed) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let Ok(_turn) = THUMBNAILS_AT_ONCE.acquire().await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let media = state.video.dir().to_owned();
+    let id = id.to_owned();
+    let made = tokio::task::spawn_blocking(move || {
+        thumbnail::get(&media, &thumbnail::cache_dir(&media), &id, &name)
+    })
+    .await;
+    let path = match made {
+        Ok(Ok(path)) => path,
+        Ok(Err(Failure::Gone)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                "The photo isn't in the pictures folder any more.",
+            )
+                .into_response();
+        }
+        Ok(Err(Failure::Unreadable(why))) => {
+            return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    match ServeFile::new(path).try_call(request).await {
+        Ok(response) => {
+            let mut response = response.map(Body::new).into_response();
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, max-age=3600"),
+            );
+            response
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

@@ -48,14 +48,24 @@ pub fn watch(dir: PathBuf, cache: PathBuf, engine: EngineHandle) {
             else {
                 continue;
             };
-            let Ok(gone) = engine.run(move |e| e.forget_missing_media(&names)).await else {
+            let Ok((gone, photos)) = engine
+                .run(move |e| {
+                    let gone = e.forget_missing_media(&names);
+                    let photos: HashSet<String> = e.state().video_photos.keys().cloned().collect();
+                    (gone, photos)
+                })
+                .await
+            else {
                 return;
             };
             let cache = cache.clone();
+            let thumbnails = super::thumbnail::cache_dir(&dir);
             tokio::task::spawn_blocking(move || {
                 for path in orphans {
                     let _ = std::fs::remove_file(path);
                 }
+                // Previews of photos deleted, in Finder or in UXDuck.
+                super::thumbnail::sweep(&thumbnails, &photos);
                 for id in &gone {
                     super::playback::remove_copies(&cache, id);
                 }

@@ -613,6 +613,7 @@ pub(crate) fn handle(
         | ClientRequest::VideoReveal(_)
         | ClientRequest::VideoPhoto(_)
         | ClientRequest::VideoPhotoShow(_)
+        | ClientRequest::VideoPhotoThumbnails(_)
         | ClientRequest::VideoFrame(_)
         | ClientRequest::VideoVehicleCamera(_)
         | ClientRequest::VideoServedBy(_)) => {

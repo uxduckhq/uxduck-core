@@ -607,6 +607,8 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "video/reveal",
     "video/photo",
     "video/photo/show",
+    // Previews for a list on screen: addresses only a page can load.
+    "video/photo/thumbnails",
     "video/vehicleCamera",
     "find/start",
     "find/stop",
