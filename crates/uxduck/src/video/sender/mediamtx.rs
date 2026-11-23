@@ -86,12 +86,22 @@ impl Api {
     }
 
     async fn json(&self, path: &str) -> Result<serde_json::Value, String> {
+        self.json_if_any(path)
+            .await?
+            .ok_or_else(|| format!("MediaMTX's API answered {path} with 404 Not Found"))
+    }
+
+    /// The JSON at `path`, or None when `MediaMTX` has nothing there.
+    async fn json_if_any(&self, path: &str) -> Result<Option<serde_json::Value>, String> {
         let response = self
             .request(reqwest::Method::GET, path)
             .send()
             .await
             .map_err(|e| format!("MediaMTX's API at {} did not answer: {e}", self.base))?;
         let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         let body = response.text().await.unwrap_or_default();
         if !status.is_success() {
             return Err(format!(
@@ -100,6 +110,7 @@ impl Api {
             ));
         }
         serde_json::from_str(&body)
+            .map(Some)
             .map_err(|e| format!("MediaMTX's API answered {path} with something not JSON: {e}"))
     }
 
@@ -154,6 +165,55 @@ impl Api {
     /// No answer, or no such path.
     pub async fn path(&self, path: &str) -> Result<serde_json::Value, String> {
         self.json(&format!("/v3/config/paths/get/{path}")).await
+    }
+
+    /// The whole configuration of the path at `path`, or None when
+    /// `MediaMTX` has no such path, as after a restart forgot one the API
+    /// added.
+    ///
+    /// # Errors
+    /// No answer.
+    pub async fn path_if_any(&self, path: &str) -> Result<Option<serde_json::Value>, String> {
+        self.json_if_any(&format!("/v3/config/paths/get/{path}"))
+            .await
+    }
+
+    /// Whether someone publishes to the path at `path` now, its tracks ready
+    /// to read or record.
+    ///
+    /// # Errors
+    /// No answer.
+    pub async fn ready(&self, path: &str) -> Result<bool, String> {
+        Ok(self
+            .json_if_any(&format!("/v3/paths/get/{path}"))
+            .await?
+            .and_then(|p| p.get("ready").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false))
+    }
+
+    /// Adds a path live, which `MediaMTX` keeps until it restarts.
+    ///
+    /// # Errors
+    /// No answer, or a refusal.
+    pub async fn add(&self, path: &str, conf: &serde_json::Value) -> Result<(), String> {
+        let response = self
+            .request(
+                reqwest::Method::POST,
+                &format!("/v3/config/paths/add/{path}"),
+            )
+            .json(conf)
+            .send()
+            .await
+            .map_err(|e| format!("MediaMTX's API at {} did not answer: {e}", self.base))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let body = response.text().await.unwrap_or_default();
+        Err(format!(
+            "MediaMTX refused to add the path {path} with {status}: {}",
+            body.trim()
+        ))
     }
 
     /// Sets the camera's encoder live. Only these three settings, which

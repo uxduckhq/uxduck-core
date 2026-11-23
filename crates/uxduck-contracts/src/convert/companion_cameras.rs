@@ -75,6 +75,10 @@ fn camera_path(v: &cc::CompanionCameraPath) -> dto::CompanionCameraPath {
             mode: r.mode.into(),
             settings: r.settings.as_ref().map(picture),
         }),
+        microphone: v.microphone.as_ref().map(|m| dto::CompanionMicrophone {
+            choice: m.choice.clone(),
+            device: m.device.clone(),
+        }),
     }
 }
 
@@ -128,6 +132,17 @@ impl From<&cc::CompanionCameras> for dto::CompanionCameras {
             }),
             problem: v.problem.clone(),
             record_problem: v.record_problem.clone(),
+            microphones: v
+                .microphones
+                .iter()
+                .map(|m| dto::CompanionMicrophoneDevice {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    card: m.card.clone(),
+                    usb: m.usb,
+                })
+                .collect(),
+            sound_problem: v.sound_problem.clone(),
         }
     }
 }

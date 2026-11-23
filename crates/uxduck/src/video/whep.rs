@@ -20,6 +20,18 @@
 //! streams, so the hub keeps one source. The RTSP worker opens a new session
 //! when the PATCH fails, then falls back to RTSP (`rtsp.rs`).
 //!
+//! Sound (ADR-0067 M9, M10): UXDuck's sender, known by its `Server`
+//! header, is offered an Opus audio m-line in every session, which starts
+//! silent. While this computer wants the camera's sound (a window listens
+//! or a recording takes it, `Hub::sound_wanted`) the session is asked for
+//! it with a JSON PATCH, `{"sound": true}`, and `{"sound": false}` when
+//! not, and the session's sound is read with a GET every 2 s, which is how
+//! a microphone plugged in or pulled out is heard. Another server, such as
+//! `MediaMTX`, is offered sound only while it is wanted, and its session is
+//! opened again when that changes, unless its address was last answered
+//! by UXDuck's sender. The sound is dated on the pictures' clock by both
+//! streams' sender reports, else by its arrival, as RTSP's is (S149).
+//!
 //! A slow connection keeps the session. While ICE holds and the sender
 //! still sends RTP or RTCP, pictures that come late or not at all only make
 //! the picture say the connection is slow, in the sender's own words when
@@ -35,25 +47,28 @@
 //! pin, the system's certificates decide. A user and password in the
 //! address go as HTTP Basic authentication, as `MediaMTX` reads them.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use str0m::change::SdpAnswer;
-use str0m::media::{Direction, MediaKind};
+use str0m::media::{Direction, MediaKind, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use uxduck_core::domain::video::{AddressReason, is_whep, redact};
+use uxduck_engine::video_sound::{SenderSound, SoundSeen};
+use uxduck_media::audio::{AudioConfig, AudioUnit};
 use uxduck_media::latency::Arrival;
 use uxduck_media::nal::{Codec, split_annex_b};
-use uxduck_media::rtcp::SenderReport;
+use uxduck_media::opus::{OpusConfig, packet_samples};
+use uxduck_media::rtcp::{AudioSync, SenderReport};
 use uxduck_media::rtp::Picture;
-use uxduck_media::source::Source;
+use uxduck_media::source::{Sound, Source};
 
 use super::listener::{item, metadata_due, report};
 use super::rtsp::{
@@ -83,6 +98,194 @@ const ICE_LOST: &str = "WebRTC lost its connection to the camera for 5 s";
 const SENDER_QUIET: &str = "nothing from the WebRTC sender for 5 s";
 /// Seconds from 1900, NTP's epoch, to 1970.
 const NTP_TO_UNIX_S: u64 = 2_208_988_800;
+/// How often UXDuck's sender is asked for a playing session's sound
+/// (ADR-0067 M9): a microphone plugged in or pulled out is heard within it.
+const SOUND_EVERY: Duration = Duration::from_secs(2);
+/// Sound that came within this long is still coming.
+const FLOWING_FOR: Duration = Duration::from_secs(1);
+
+/// What UXDuck's sender at each address, by host and port, said when its
+/// session was asked for its sound, in this daemon's memory (ADR-0067
+/// M10). `true` when it answered: its sessions are offered sound always,
+/// so only the first session to a new address can need opening again for
+/// it. `false` when it refused, as a sender older than sound does: it is
+/// never offered sound, because such a sender sends its pictures on
+/// whichever stream the offer named last. Another server is forgotten.
+static UXDUCK_SENDERS: LazyLock<Mutex<HashMap<String, bool>>> = LazyLock::new(Mutex::default);
+
+fn server_key(address: &Address) -> String {
+    format!("{}:{}", address.host.to_ascii_lowercase(), address.port)
+}
+
+fn senders() -> std::sync::MutexGuard<'static, HashMap<String, bool>> {
+    UXDUCK_SENDERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Whether UXDuck's sender at this address answered for its sound, or
+/// refused, when it was asked last.
+fn sender_answers(address: &Address) -> Option<bool> {
+    senders().get(&server_key(address)).copied()
+}
+
+/// Remembers what UXDuck's sender at an address said of its sound, or
+/// forgets the address when another server answered it.
+fn remember(address: &Address, answers: Option<bool>) {
+    let key = server_key(address);
+    match answers {
+        Some(answers) => senders().insert(key, answers),
+        None => senders().remove(&key),
+    };
+}
+
+/// Whether a session to this address is offered sound: always to UXDuck's
+/// sender that answers for it, never to one that refused, and to anything
+/// else only while it is wanted.
+fn offer_sound(address: &Address, want: bool) -> bool {
+    sender_answers(address).unwrap_or(want)
+}
+
+/// Whether another server's session is to be opened again for its sound,
+/// which it is offered only while wanted (ADR-0067 M10). UXDuck's sender's
+/// is opened again only once what it says of its sound is known.
+fn reopen_for_sound(uxduck: bool, offered_sound: bool, want: bool) -> bool {
+    !uxduck && offered_sound != want
+}
+
+/// Whether an answer takes the offered sound: its audio m-line kept and
+/// sending Opus, and how many channels the sender says it sends
+/// (`sprop-stereo`, RFC 7587, mono when it does not say).
+fn answered_sound(answer: &str) -> Option<u8> {
+    let mut in_audio = false;
+    let (mut kept, mut opus, mut stereo) = (false, false, false);
+    for line in answer.lines() {
+        if let Some(media) = line.strip_prefix("m=") {
+            in_audio = media.starts_with("audio ");
+            if in_audio {
+                kept = media
+                    .split_whitespace()
+                    .nth(1)
+                    .is_some_and(|port| port != "0");
+            }
+            continue;
+        }
+        if !in_audio {
+            continue;
+        }
+        if line == "a=inactive" || line == "a=recvonly" {
+            kept = false;
+        }
+        if line.strip_prefix("a=rtpmap:").is_some_and(|map| {
+            map.split_once(' ')
+                .is_some_and(|(_, codec)| codec.to_ascii_lowercase().starts_with("opus/48000"))
+        }) {
+            opus = true;
+        }
+        if line.starts_with("a=fmtp:") && line.contains("sprop-stereo=1") {
+            stereo = true;
+        }
+    }
+    (kept && opus).then_some(if stereo { 2 } else { 1 })
+}
+
+/// The JSON UXDuck's sender answers a session's PATCH and GET with.
+#[derive(serde::Deserialize)]
+struct SessionSound {
+    sound: SenderSound,
+}
+
+/// Why UXDuck's sender did not say what its session's sound is.
+enum SoundAsk {
+    /// It answered without the sound, as a sender older than sound does.
+    Refused(String),
+    /// It could not be reached, or failed, and is asked again.
+    Failed(String),
+}
+
+/// Asks UXDuck's sender for the session's sound, with a PATCH that turns it
+/// on or off, or a GET that only reads it (ADR-0067 M9).
+fn ask_sound(
+    session: &Session,
+    on: Option<bool>,
+) -> impl Future<Output = Result<SenderSound, SoundAsk>> + Send + 'static {
+    let request = match on {
+        Some(on) => session
+            .client
+            .patch(&session.url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(serde_json::json!({ "sound": on }).to_string()),
+        None => session.client.get(&session.url),
+    };
+    let request = authorized(request, &session.address);
+    async move {
+        let response = request
+            .send()
+            .await
+            .map_err(|e| SoundAsk::Failed(why(&e)))?;
+        let status = response.status();
+        if status.is_server_error() {
+            return Err(SoundAsk::Failed(refused(response, "sound request").await));
+        }
+        if !status.is_success() {
+            return Err(SoundAsk::Refused(refused(response, "sound request").await));
+        }
+        let said: SessionSound = response.json().await.map_err(|e| {
+            SoundAsk::Refused(format!("the sender's sound is not JSON UXDuck reads: {e}"))
+        })?;
+        Ok(said.sound)
+    }
+}
+
+/// The session's sound while it comes (ADR-0067 M9, M10): Opus on its own
+/// mid, dated on the pictures' clock by both streams' sender reports once
+/// both came. Until then it is lined up by its arrival at once, not after
+/// RTSP's 3 s (S149), because a WebRTC sender reports on its sound only
+/// every few seconds (str0m every 5 s by default) and someone who unmuted
+/// is listening now.
+struct SoundIn {
+    mid: Mid,
+    config: OpusConfig,
+    sync: AudioSync,
+    /// When the last came, for whether it is coming.
+    last: Option<Instant>,
+}
+
+impl SoundIn {
+    fn new(mid: Mid, channels: u8) -> Self {
+        Self {
+            mid,
+            config: OpusConfig { channels },
+            sync: AudioSync::new(uxduck_media::opus::RATE),
+            last: None,
+        }
+    }
+
+    /// A packet on the pictures' clock. Sound not yet lined up, or before
+    /// any picture, is left out.
+    fn push(&mut self, timestamp: u32, packet: &[u8], source: &Source) -> Option<AudioUnit> {
+        self.last = Some(Instant::now());
+        if self.sync.alignment().is_none()
+            && let Some(video_rtp) = source.video_rtp()
+        {
+            self.sync.arrival(video_rtp, timestamp);
+        }
+        let at = self
+            .sync
+            .video_timestamp(timestamp)
+            .and_then(|t| source.video_us_at(t))?;
+        Some(AudioUnit {
+            data: packet.to_vec(),
+            timestamp_us: at,
+            config: AudioConfig::Opus(self.config),
+            samples: packet_samples(packet)?,
+        })
+    }
+
+    fn flowing(&self) -> bool {
+        self.last.is_some_and(|at| at.elapsed() < FLOWING_FOR)
+    }
+}
 
 /// A WHEP address, taken apart.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -528,6 +731,7 @@ fn rtc() -> Rtc {
     RtcConfig::new()
         .clear_codecs()
         .enable_h264(true)
+        .enable_opus(true, false)
         .set_stats_interval(Some(Duration::from_secs(1)))
         .build(Instant::now())
 }
@@ -556,16 +760,24 @@ struct Opened {
     session: Session,
     answer: String,
     server: Option<String>,
+    video: Mid,
+    /// The sound offered, and taken, when it was.
+    sound: Option<SoundIn>,
+    /// Sound was offered.
+    offered_sound: bool,
 }
 
-/// The offer, the answer, and the answer's candidates on the address's host.
-async fn open(address: &Address) -> Result<Opened, String> {
+/// The offer, with sound when `sound` (ADR-0067 M9, M10), the answer, and
+/// the answer's candidates on the address's host.
+async fn open(address: &Address, sound: bool) -> Result<Opened, String> {
     let client = client(address)?;
     let link = Link::towards(hosts(address).await?).await?;
     let mut rtc = rtc();
     rtc.add_local_candidate(link.candidate()?);
     let mut change = rtc.sdp_api();
-    change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+    let video = change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+    let audio =
+        sound.then(|| change.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None));
     let (offer, pending) = change
         .apply()
         .ok_or_else(|| "UXDuck made no WebRTC offer".to_owned())?;
@@ -611,13 +823,39 @@ async fn open(address: &Address) -> Result<Opened, String> {
     rtc.sdp_api()
         .accept_answer(pending, parsed)
         .map_err(|e| format!("the WHEP answer was refused: {e}"))?;
+    let sound =
+        audio.and_then(|mid| answered_sound(&answer).map(|channels| SoundIn::new(mid, channels)));
     Ok(Opened {
         rtc,
         link,
         session,
         answer,
         server,
+        video,
+        sound,
+        offered_sound: audio.is_some(),
     })
+}
+
+/// A new `Source` for a session, its sender reports read as its server
+/// sends them.
+fn new_source(server: Option<&str>, sound: Option<&SoundIn>) -> Source {
+    // `MediaMTX`'s WebRTC output sends gortsplib's sender reports, which date
+    // pictures as its RTSP server's do (S355).
+    let mut source = Source::rtp(Codec::H264, &[]).over_rtsp(server.map(|s| {
+        if s.eq_ignore_ascii_case("mediamtx") {
+            "gortsplib"
+        } else {
+            s
+        }
+    }));
+    if let Some(sound) = sound {
+        source.sound_track(Sound {
+            name: sound.config.describe(),
+            recorded: true,
+        });
+    }
+    source
 }
 
 /// A WHEP session opened beside the address playing and played, unseen, up
@@ -645,7 +883,7 @@ pub(super) async fn warm(url: &str) -> Result<Warm, String> {
     let address = address(url)?;
     let offered_us = wall_us();
     let warming = async {
-        let mut opened = open(&address).await?;
+        let mut opened = open(&address, offer_sound(&address, false)).await?;
         let mut early = Vec::new();
         let mut buf = vec![0u8; 2048];
         loop {
@@ -667,7 +905,7 @@ pub(super) async fn warm(url: &str) -> Result<Warm, String> {
                         {
                             stream.suppress_nack(false);
                         }
-                        if keyframe(&data.data) {
+                        if data.mid == opened.video && keyframe(&data.data) {
                             early.push(Event::MediaData(data));
                             return Ok(Warm {
                                 opened,
@@ -831,14 +1069,17 @@ pub(super) async fn play(
     let source_id = camera.id;
     let mut address = address(url)?;
     let mut playing_url = url.to_owned();
+    let mut wanted = camera.hub.sound_wanted(source_id);
+    let mut want = *wanted.borrow_and_update();
     // The offer asks for the pictures, as PLAY does over RTSP.
     let (opened, early, offered_us) = if let Some(warm) = warm {
         (warm.opened, warm.early, warm.offered_us)
     } else {
         let offered_us = wall_us();
-        let opened = tokio::time::timeout(START_WITHIN, open(&address))
-            .await
-            .map_err(|_| "the camera did not start within 15 s".to_owned())??;
+        let opened =
+            tokio::time::timeout(START_WITHIN, open(&address, offer_sound(&address, want)))
+                .await
+                .map_err(|_| "the camera did not start within 15 s".to_owned())??;
         (opened, Vec::new(), offered_us)
     };
     let mut early = VecDeque::from(early);
@@ -848,24 +1089,48 @@ pub(super) async fn play(
         mut session,
         mut answer,
         server,
+        mut video,
+        mut sound,
+        mut offered_sound,
     } = opened;
-    let asks_sender = uxduck_sender(server.as_deref());
     if let Some(moving) = progress.moving.as_mut() {
         moving.play_sent_us = Some(offered_us);
     }
-    // `MediaMTX`'s WebRTC output sends gortsplib's sender reports, which date
-    // pictures as its RTSP server's do (S355).
-    let mut source = Source::rtp(Codec::H264, &[]).over_rtsp(server.as_deref().map(|s| {
-        if s.eq_ignore_ascii_case("mediamtx") {
-            "gortsplib"
-        } else {
-            s
-        }
-    }));
+    let mut uxduck = uxduck_sender(server.as_deref());
+    if !uxduck {
+        remember(&address, None);
+    }
+    let mut server = server;
+    let mut source = new_source(server.as_deref(), sound.as_ref());
+    let mut reopen = reopen_for_sound(uxduck, offered_sound, want);
+    // UXDuck's sender's answers about the sound, by the order they were
+    // asked in, and whether a PATCH is on its way.
+    let (said, mut answers) =
+        mpsc::unbounded_channel::<(u64, bool, Result<SenderSound, SoundAsk>)>();
+    let mut asked = 0u64;
+    let mut heard = 0u64;
+    let mut patching = false;
+    let mut sender_sound: Option<SenderSound> = None;
+    // Whether this session's sender answered for its sound, or refused.
+    let mut answers_sound: Option<bool> = None;
+    let ask = |session: &Session, on: Option<bool>, asked: &mut u64| {
+        *asked += 1;
+        let (n, said) = (*asked, said.clone());
+        let request = ask_sound(session, on);
+        tokio::spawn(async move {
+            let _ = said.send((n, on.is_some(), request.await));
+        });
+    };
+    if uxduck {
+        patching = want;
+        ask(&session, want.then_some(true), &mut asked);
+    }
+    let mut sound_check =
+        tokio::time::interval_at(tokio::time::Instant::now() + SOUND_EVERY, SOUND_EVERY);
     let mut peer = SocketAddr::new(link.hosts[0], address.port);
     let mut nacking = false;
     let mut next_sequence: Option<u64> = None;
-    let mut answered = 0u64;
+    let mut responses = 0u64;
     let mut last_picture = tokio::time::Instant::now();
     // When anything at all last came, for a stall.
     let mut last_heard = last_picture;
@@ -884,6 +1149,65 @@ pub(super) async fn play(
     let mut klv_posted = None;
     let mut buf = vec![0u8; 2048];
     loop {
+        if reopen {
+            want = *wanted.borrow_and_update();
+            tracing::info!(
+                source = %source_id,
+                sound = want,
+                "a WHEP camera opens its session again for its sound"
+            );
+            drop(session);
+            let with_sound = offer_sound(&address, want);
+            let opened = tokio::time::timeout(START_WITHIN, open(&address, with_sound))
+                .await
+                .map_err(|_| "the camera did not start again within 15 s".to_owned())??;
+            (
+                rtc,
+                link,
+                session,
+                answer,
+                server,
+                video,
+                sound,
+                offered_sound,
+            ) = (
+                opened.rtc,
+                opened.link,
+                opened.session,
+                opened.answer,
+                opened.server,
+                opened.video,
+                opened.sound,
+                opened.offered_sound,
+            );
+            uxduck = uxduck_sender(server.as_deref());
+            if !uxduck {
+                remember(&address, None);
+            }
+            sender_sound = None;
+            answers_sound = None;
+            // What the last session's sender says comes too late to count.
+            heard = asked;
+            source = new_source(server.as_deref(), sound.as_ref());
+            camera.hub.restart_source(source_id);
+            peer = SocketAddr::new(link.hosts[0], address.port);
+            nacking = false;
+            next_sequence = None;
+            responses = 0;
+            early.clear();
+            last_picture = tokio::time::Instant::now();
+            last_heard = last_picture;
+            last_sent = last_picture;
+            ice_lost = None;
+            slow = false;
+            sender_says = None;
+            next_ask = None;
+            reopen = reopen_for_sound(uxduck, offered_sound, want);
+            if uxduck {
+                patching = want;
+                ask(&session, want.then_some(true), &mut asked);
+            }
+        }
         let deadline = loop {
             let output = match early.pop_front() {
                 Some(event) => Output::Event(event),
@@ -899,7 +1223,29 @@ pub(super) async fn play(
                         let _ = link.socket.send_to(&t.contents, t.destination).await;
                     }
                 }
-                Output::Event(Event::MediaData(data)) => {
+                Output::Event(Event::MediaData(data))
+                    if sound.as_ref().is_some_and(|s| s.mid == data.mid) =>
+                {
+                    let Some(sound) = sound.as_mut() else {
+                        continue;
+                    };
+                    // Sound nobody wants, such as from a sender that has not
+                    // stopped yet, is not passed on.
+                    if !want {
+                        continue;
+                    }
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "RTP's 32-bit timestamp, as the packets had it"
+                    )]
+                    let timestamp = data.time.numer() as u32;
+                    if let Some(unit) = sound.push(timestamp, &data.data, &source) {
+                        camera
+                            .hub
+                            .publish(source_id, &item(source.audio_unit(unit)));
+                    }
+                }
+                Output::Event(Event::MediaData(data)) if data.mid == video => {
                     // `MediaMTX` offers no RTX, which str0m would wait for
                     // before asking again for lost packets.
                     if !nacking
@@ -955,17 +1301,36 @@ pub(super) async fn play(
                         ntp: ntp(feedback.sender_info.ntp_time),
                         rtp: feedback.sender_info.rtp_time.numer() as u32,
                     };
-                    source.server_report(report, arrival(feedback.received_at));
+                    // The video's and the sound's line them up (S149), the
+                    // video's dates its pictures by the server's clock (S355).
+                    // A sender reports on a stream it has sent nothing on yet,
+                    // as UXDuck's does on its sound until asked for it, with
+                    // an RTP time that means nothing.
+                    let sent = feedback.sender_info.sender_packet_count > 0;
+                    match sound.as_mut() {
+                        Some(sound) if sound.mid == feedback.mid => {
+                            if sent {
+                                sound.sync.audio_report(report);
+                            }
+                        }
+                        _ if feedback.mid == video => {
+                            source.server_report(report, arrival(feedback.received_at));
+                            if let Some(sound) = sound.as_mut() {
+                                sound.sync.video_report(report);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 // ICE's consent check, a round trip on the pair the video
                 // takes, times the server's clock (S355).
                 Output::Event(Event::PeerStats(stats)) => {
                     if let Some(pair) = stats.selected_candidate_pair {
                         peer = pair.remote.addr;
-                        if pair.responses_received != answered
+                        if pair.responses_received != responses
                             && let Some(rtt) = pair.current_round_trip_time
                         {
-                            answered = pair.responses_received;
+                            responses = pair.responses_received;
                             let now = Instant::now();
                             source.round_trip(now.checked_sub(rtt).unwrap_or(now), now);
                         }
@@ -1029,10 +1394,66 @@ pub(super) async fn play(
                 status.counters.pictures,
                 heard_bytes,
             );
+            let seen = SoundSeen {
+                sender: sender_sound.clone().filter(|_| uxduck),
+                unasked: if uxduck {
+                    sender_sound.is_none()
+                } else {
+                    !offered_sound
+                },
+                flowing: want && sound.as_ref().is_some_and(SoundIn::flowing),
+            };
+            camera.post(move |e, id| e.video_sound_seen(id, seen));
             camera.post(move |e, _| e.rtsp_observed(observed));
         }
         tokio::select! {
             biased;
+            Ok(()) = wanted.changed() => {
+                want = *wanted.borrow_and_update();
+                reopen = reopen_for_sound(uxduck, offered_sound, want);
+                if uxduck && answers_sound != Some(false) {
+                    patching = true;
+                    ask(&session, Some(want), &mut asked);
+                }
+            }
+            Some((n, patch, result)) = answers.recv() => {
+                patching &= !patch;
+                match result {
+                    Ok(said) if n > heard => {
+                        heard = n;
+                        answers_sound = Some(true);
+                        remember(&address, Some(true));
+                        // The first session to a new address of it, opened
+                        // without sound, is opened again with it.
+                        reopen = !offered_sound;
+                        // A sender that lost what it was asked, or a PATCH
+                        // that failed, is asked again.
+                        if uxduck && said.on != want && !patching {
+                            patching = true;
+                            ask(&session, Some(want), &mut asked);
+                        }
+                        sender_sound = Some(said);
+                    }
+                    Err(SoundAsk::Refused(error)) if n > heard => {
+                        heard = n;
+                        tracing::info!(
+                            source = %source_id,
+                            %error,
+                            "a WHEP camera's sender is older than sound, so it is not offered any"
+                        );
+                        answers_sound = Some(false);
+                        remember(&address, Some(false));
+                        reopen = offered_sound;
+                    }
+                    Err(SoundAsk::Failed(error)) => {
+                        tracing::debug!(source = %source_id, %error, "a WHEP camera's sound request failed");
+                    }
+                    Ok(_) | Err(SoundAsk::Refused(_)) => {}
+                }
+            }
+            _ = sound_check.tick(), if uxduck && answers_sound != Some(false) => {
+                ask(&session, None, &mut asked);
+            }
             Some(Follow { url, reason, decided_us, done }) = follows.recv() => {
                 let last_picture_us = progress.last_picture.map(wall_us_at);
                 let patched_us = wall_us();
@@ -1049,11 +1470,14 @@ pub(super) async fn play(
                             to = %redact(&url),
                             "a WHEP camera restarted ICE to follow its vehicle"
                         );
+                        if uxduck && let Some(answers) = answers_sound {
+                            remember(&to, Some(answers));
+                        }
                         address = to;
                         link = moved;
                         answer = restarted;
                         peer = SocketAddr::new(link.hosts[0], address.port);
-                        answered = 0;
+                        responses = 0;
                         // The pictures may stop from now: the old connection
                         // is the one the vehicle left.
                         last_picture = tokio::time::Instant::now();
@@ -1131,7 +1555,7 @@ pub(super) async fn play(
                     source = %source_id,
                     "a WHEP camera's pictures run late, so it keeps its session and says the connection is slow"
                 );
-                next_ask = asks_sender.then(tokio::time::Instant::now);
+                next_ask = uxduck.then(tokio::time::Instant::now);
             }
             () = async move {
                 match next_ask {
@@ -1152,5 +1576,7 @@ pub(super) async fn play(
     }
 }
 
+#[cfg(test)]
+mod sound_tests;
 #[cfg(test)]
 pub(super) mod tests;

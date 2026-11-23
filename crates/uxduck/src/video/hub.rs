@@ -3,6 +3,15 @@
 //! than 200 ms old the queue is dropped and it waits for the next keyframe,
 //! marked as a discontinuity, so a slow client freezes briefly and catches
 //! up rather than falling behind.
+//!
+//! Sound (ADR-0067 M8, M11) goes only to the sockets that said `sound on`,
+//! after their first picture, in the same queue as the pictures, so it
+//! waits behind them as the app plays it. A drop at 200 ms drops the
+//! queued sound with the pictures, since it is as late as they are, but
+//! sound keeps coming while the pictures wait for their next keyframe:
+//! it needs none. The first sound after a drop is marked as one. A
+//! source's sound is wanted while one of its sockets listens or a
+//! recording takes it, and its worker hears that from `sound_wanted`.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -31,7 +40,8 @@ pub enum Item {
         timestamp_us: u64,
         data: Arc<[u8]>,
     },
-    /// A frame of the camera's sound: for recordings only (S147).
+    /// A frame of the camera's sound: for recordings (S147), and for the
+    /// sockets that listen (ADR-0067 M11).
     Audio(Arc<AudioUnit>),
     /// A camera's MPEG-TS bytes as they arrived, ahead of the pictures
     /// they bring: for recordings only, which keep them (S151).
@@ -57,6 +67,13 @@ struct Queue {
     closed: bool,
     dropped: u64,
     sent: u64,
+    /// The socket said `sound on` and not `sound off` since.
+    sound: bool,
+    /// Each `sound on` counts one, so the socket says the sound's codec
+    /// again with the first sound after it.
+    sound_epoch: u64,
+    /// The next sound follows dropped sound.
+    sound_gap: bool,
 }
 
 /// One `/video` socket's queue.
@@ -120,8 +137,14 @@ impl Watcher {
             q.items.clear();
             q.skipping = true;
             q.recoveries_waited = 0;
+            q.sound_gap = true;
         }
-        if let Item::Unit(unit) = &item {
+        if matches!(item, Item::Audio(_)) {
+            // Sound waits for the first picture, whose clock it plays on.
+            if !(q.sound && q.started) {
+                return;
+            }
+        } else if let Item::Unit(unit) = &item {
             if q.skipping {
                 if !(unit.key || (q.from_recovery && unit.recovery)) {
                     q.recoveries_waited += u32::from(unit.recovery);
@@ -153,6 +176,32 @@ impl Watcher {
     pub fn close(&self) {
         self.lock().closed = true;
         self.ready.notify_one();
+    }
+
+    /// The socket said `sound on` or `sound off` (ADR-0067 M11). Sound
+    /// still queued when it stops is not sent.
+    fn listen(&self, on: bool) {
+        let mut q = self.lock();
+        if q.sound == on {
+            return;
+        }
+        q.sound = on;
+        q.sound_gap = false;
+        if on {
+            q.sound_epoch += 1;
+        } else {
+            q.items.retain(|(_, item)| !matches!(item, Item::Audio(_)));
+        }
+    }
+
+    fn listening(&self) -> bool {
+        self.lock().sound
+    }
+
+    /// Which `sound on` the socket is in: its codec is said again with the
+    /// first sound after each.
+    pub fn sound_epoch(&self) -> u64 {
+        self.lock().sound_epoch
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, Window> {
@@ -187,7 +236,11 @@ impl Watcher {
                 }
                 if let Some((_, item)) = q.items.pop_front() {
                     q.sent += 1;
-                    let gap = matches!(item, Item::Unit(_)) && std::mem::take(&mut q.discontinuity);
+                    let gap = match item {
+                        Item::Unit(_) => std::mem::take(&mut q.discontinuity),
+                        Item::Audio(_) => std::mem::take(&mut q.sound_gap),
+                        _ => false,
+                    };
                     return Some((item, gap));
                 }
             }
@@ -216,6 +269,32 @@ struct Inner {
     /// failed, until when not to try again.
     reencoded: std::collections::HashSet<String>,
     reencode_failed: HashMap<String, Instant>,
+    /// Whether each source's sound is wanted, for its worker (ADR-0067 M8).
+    sound_wanted: HashMap<String, tokio::sync::watch::Sender<bool>>,
+    /// Sources the engine records or is about to: their sound is wanted
+    /// before the recording takes its first picture, so a camera is not
+    /// opened again for it once the pictures come (ADR-0067 M8, M10).
+    recording_asked: std::collections::HashSet<String>,
+}
+
+impl Inner {
+    /// Whether a source's sound is wanted now: one of its sockets listens,
+    /// or a recording takes it or is asked of it (ADR-0067 M8).
+    fn wants_sound(&self, source_id: &str) -> bool {
+        self.open
+            .values()
+            .any(|(s, w)| s == source_id && w.listening())
+            || self.recorders.values().any(|(s, _)| s == source_id)
+            || self.recording_asked.contains(source_id)
+    }
+
+    /// Tells a source's worker when whether its sound is wanted changed.
+    fn rethink_sound(&self, source_id: &str) {
+        if let Some(wanted) = self.sound_wanted.get(source_id) {
+            let now = self.wants_sound(source_id);
+            wanted.send_if_modified(|was| std::mem::replace(was, now) != now);
+        }
+    }
 }
 
 /// How long a playback token lasts.
@@ -370,11 +449,53 @@ impl Hub {
         (at.elapsed() < PLAYBACK_LIFETIME).then(|| (id.clone(), file.clone()))
     }
 
-    /// Sends a source's pictures to a recording's writer too.
+    /// Sends a source's pictures to a recording's writer too. A recording
+    /// takes the camera's sound, so it wants it (ADR-0067 M8).
     pub fn record(&self, recording_id: &str, source_id: &str, to: std::sync::mpsc::Sender<Item>) {
-        self.lock()
+        let mut inner = self.lock();
+        let old = inner
             .recorders
             .insert(recording_id.to_owned(), (source_id.to_owned(), to));
+        inner.rethink_sound(source_id);
+        if let Some((old, _)) = old.filter(|(old, _)| old != source_id) {
+            inner.rethink_sound(&old);
+        }
+    }
+
+    /// Whether a source's sound is wanted, now and as it changes: while one
+    /// of its sockets listens or a recording takes it (ADR-0067 M8).
+    pub fn sound_wanted(&self, source_id: &str) -> tokio::sync::watch::Receiver<bool> {
+        let mut inner = self.lock();
+        let now = inner.wants_sound(source_id);
+        inner
+            .sound_wanted
+            .entry(source_id.to_owned())
+            .or_insert_with(|| tokio::sync::watch::Sender::new(now))
+            .subscribe()
+    }
+
+    /// Whether the engine records a source or is about to, which wants its
+    /// sound from before the recording's first picture (ADR-0067 M8).
+    pub fn record_sound(&self, source_id: &str, asked: bool) {
+        let mut inner = self.lock();
+        let changed = if asked {
+            inner.recording_asked.insert(source_id.to_owned())
+        } else {
+            inner.recording_asked.remove(source_id)
+        };
+        if changed {
+            inner.rethink_sound(source_id);
+        }
+    }
+
+    /// A socket said `sound on` or `sound off` (ADR-0067 M11).
+    pub fn listen(&self, token: &str, on: bool) {
+        let inner = self.lock();
+        let Some((source_id, watcher)) = inner.open.get(token) else {
+            return;
+        };
+        watcher.listen(on);
+        inner.rethink_sound(source_id);
     }
 
     /// Whether a recording takes this source's items now.
@@ -397,7 +518,10 @@ impl Hub {
 
     /// Ends a recording: its writer finishes the file.
     pub fn stop_recording(&self, recording_id: &str) {
-        self.lock().recorders.remove(recording_id);
+        let mut inner = self.lock();
+        if let Some((source_id, _)) = inner.recorders.remove(recording_id) {
+            inner.rethink_sound(&source_id);
+        }
     }
 
     pub fn allow_playback(
@@ -495,8 +619,9 @@ impl Hub {
     pub fn revoke(&self, token: &str) {
         let mut inner = self.lock();
         inner.allowed.remove(token);
-        if let Some((_, watcher)) = inner.open.remove(token) {
+        if let Some((source_id, watcher)) = inner.open.remove(token) {
             watcher.close();
+            inner.rethink_sound(&source_id);
         }
     }
 
@@ -531,8 +656,10 @@ impl Hub {
     }
 
     pub fn close(&self, token: &str) {
-        if let Some((_, watcher)) = self.lock().open.remove(token) {
+        let mut inner = self.lock();
+        if let Some((source_id, watcher)) = inner.open.remove(token) {
             watcher.close();
+            inner.rethink_sound(&source_id);
         }
     }
 
@@ -622,6 +749,7 @@ impl Hub {
             q.items.clear();
             q.skipping = true;
             q.recoveries_waited = 0;
+            q.sound_gap = true;
         }
     }
 
@@ -692,11 +820,21 @@ impl Hub {
                 self.want_reencode(source_id, now);
             }
         }
+        // Sound goes to the sockets that listen, which their queues decide.
+        if matches!(item, Item::Audio(_)) {
+            for watcher in &watchers {
+                watcher.push(item.clone(), now);
+            }
+        }
         // Recordings get every picture: no dropping to catch up.
         let mut inner = self.lock();
+        let before = inner.recorders.len();
         inner
             .recorders
             .retain(|_, (source, to)| source != source_id || to.send(item.clone()).is_ok());
+        if inner.recorders.len() != before {
+            inner.rethink_sound(source_id);
+        }
     }
 }
 
@@ -929,6 +1067,132 @@ mod tests {
         );
         assert!(matches!(from.try_recv().unwrap(), Item::Audio(_)));
         assert!(watcher.lock().items.is_empty());
+    }
+
+    fn sound(timestamp_us: u64) -> Item {
+        Item::Audio(Arc::new(AudioUnit {
+            data: vec![0xFC],
+            timestamp_us,
+            config: uxduck_media::audio::AudioConfig::Opus(uxduck_media::opus::OpusConfig {
+                channels: 1,
+            }),
+            samples: 960,
+        }))
+    }
+
+    /// Everything queued: pictures as `p`, sound as `s`, KLV as `k`, with
+    /// its time and whether it follows a gap.
+    fn drain_all(watcher: &Watcher) -> Vec<(char, u64, bool)> {
+        let mut out = Vec::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        while !watcher.lock().items.is_empty() {
+            match runtime.block_on(watcher.next()) {
+                Some((Item::Unit(u), gap)) => out.push(('p', u.timestamp_us, gap)),
+                Some((Item::Audio(a), gap)) => out.push(('s', a.timestamp_us, gap)),
+                Some((Item::Klv { timestamp_us, .. }, gap)) => out.push(('k', timestamp_us, gap)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// ADR-0067 M8: a source's sound is wanted while one of its sockets
+    /// listens or a recording takes it, and its worker hears each change.
+    #[test]
+    fn sound_is_wanted_while_a_socket_listens_or_a_recording_takes_it_or_is_asked() {
+        let hub = Hub::default();
+        let mut wanted = hub.sound_wanted("camera");
+        assert!(!*wanted.borrow_and_update());
+        for (token, source) in [("a", "camera"), ("b", "camera"), ("c", "other")] {
+            hub.allow(token, source);
+            let _ = hub.open(token).unwrap();
+        }
+        hub.listen("c", true);
+        assert!(!wanted.has_changed().unwrap(), "another camera's socket");
+        hub.listen("a", true);
+        assert!(wanted.has_changed().unwrap());
+        assert!(*wanted.borrow_and_update());
+        hub.listen("b", true);
+        hub.listen("a", false);
+        assert!(!wanted.has_changed().unwrap(), "b still listens");
+        hub.close("b");
+        assert!(!*wanted.borrow_and_update(), "the last listener closed");
+        let (to, _from) = std::sync::mpsc::channel();
+        hub.record("r", "camera", to);
+        assert!(*wanted.borrow_and_update(), "recordings keep the sound");
+        hub.stop_recording("r");
+        assert!(!*wanted.borrow_and_update());
+        // A recording whose writer ended stops wanting it at the next item.
+        let (to, from) = std::sync::mpsc::channel();
+        hub.record("r2", "camera", to);
+        assert!(*wanted.borrow_and_update());
+        drop(from);
+        hub.publish("camera", &unit(true, 0));
+        assert!(!*wanted.borrow_and_update());
+        // A socket revoked with its watch.
+        hub.listen("a", true);
+        assert!(*wanted.borrow_and_update());
+        hub.revoke("a");
+        assert!(!*wanted.borrow_and_update());
+        assert!(*hub.sound_wanted("other").borrow(), "c listens to its own");
+        // A recording the engine asks for wants it before its first picture.
+        hub.record_sound("camera", true);
+        assert!(*wanted.borrow_and_update(), "a recording on its way");
+        hub.record_sound("camera", true);
+        assert!(!wanted.has_changed().unwrap());
+        hub.record_sound("camera", false);
+        assert!(!*wanted.borrow_and_update());
+    }
+
+    /// ADR-0067 M11: sound goes only to the sockets that said `sound on`,
+    /// once they had their first picture, and none is sent after `sound off`.
+    #[test]
+    fn sound_goes_only_to_sockets_that_listen_after_their_first_picture() {
+        let hub = Hub::default();
+        hub.allow("listens", "camera");
+        hub.allow("quiet", "camera");
+        let (_, listens) = hub.open("listens").unwrap();
+        let (_, quiet) = hub.open("quiet").unwrap();
+        let tap = hub.tap("publisher", "camera");
+        hub.listen("listens", true);
+        hub.publish("camera", &sound(0));
+        hub.publish("camera", &unit(true, 10));
+        hub.publish("camera", &sound(20));
+        assert_eq!(drain_all(&listens), [('p', 10, false), ('s', 20, false)]);
+        assert_eq!(drain_all(&quiet), [('p', 10, false)]);
+        assert_eq!(drain_all(&tap), [('p', 10, false)]);
+        let epoch = listens.sound_epoch();
+        hub.publish("camera", &sound(40));
+        hub.listen("listens", false);
+        hub.publish("camera", &sound(60));
+        assert!(drain_all(&listens).is_empty(), "queued sound is dropped");
+        hub.listen("listens", true);
+        assert_eq!(listens.sound_epoch(), epoch + 1, "the codec is said again");
+        hub.publish("camera", &sound(80));
+        assert_eq!(drain_all(&listens), [('s', 80, false)]);
+    }
+
+    /// A socket 200 ms behind drops its queued sound with the pictures, and
+    /// the sound after it is marked; sound keeps coming while the pictures
+    /// wait for their keyframe.
+    #[test]
+    fn sound_after_a_drop_is_marked_and_comes_while_pictures_wait() {
+        let watcher = Watcher::default();
+        watcher.listen(true);
+        let start = Instant::now();
+        watcher.push(unit(true, 1), start);
+        watcher.push(sound(2), start);
+        let late = start + Duration::from_millis(250);
+        watcher.push(sound(3), late);
+        watcher.push(unit(false, 4), late);
+        watcher.push(sound(5), late);
+        watcher.push(unit(true, 6), late);
+        assert_eq!(
+            drain_all(&watcher),
+            [('s', 3, true), ('s', 5, false), ('p', 6, true)]
+        );
     }
 
     #[test]

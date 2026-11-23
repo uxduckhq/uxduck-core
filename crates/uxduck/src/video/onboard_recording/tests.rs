@@ -20,6 +20,7 @@ fn config(modes: &[Mode]) -> Config {
         mavlink: "udp:127.0.0.1:15010".into(),
         system_id: 1,
         mediamtx_api: "http://127.0.0.1:9997".into(),
+        mediamtx_rtsp: "rtsp://127.0.0.1:8554".into(),
         paths: modes
             .iter()
             .enumerate()
@@ -626,14 +627,14 @@ async fn deleting_earlier_recordings_and_a_disk_nearly_full_are_warnings_said_wh
     segment(&store.dir, "2026-11-20_10-05-00-000000.mp4", 6_000_000, 200);
     let mut kept = Kept::default();
     let roomy = disk(tmp.path(), 100_000_000);
-    let (_, said) = keep(&api, "front_record", true, &mut kept, true, &roomy)
+    let (_, said) = keep(&api, "front_record", true, &mut kept, true, &roomy, None)
         .await
         .unwrap();
     assert!(said.unwrap().2.is_empty(), "room enough, nothing to say");
     segment(&store.dir, "2026-11-22_12-00-00-000000.mp4", 6_000_000, 0);
 
     let full = disk(tmp.path(), 24_000_000);
-    let (_, said) = keep(&api, "front_record", true, &mut kept, true, &full)
+    let (_, said) = keep(&api, "front_record", true, &mut kept, true, &full, None)
         .await
         .unwrap();
     let (_, _, notes) = said.unwrap();
@@ -654,7 +655,7 @@ async fn deleting_earlier_recordings_and_a_disk_nearly_full_are_warnings_said_wh
     );
 
     let fuller = disk(tmp.path(), 14_000_000);
-    let (_, said) = keep(&api, "front_record", true, &mut kept, true, &fuller)
+    let (_, said) = keep(&api, "front_record", true, &mut kept, true, &fuller, None)
         .await
         .unwrap();
     let (_, room, notes) = said.unwrap();
@@ -694,6 +695,10 @@ async fn record_follows_arming_through_a_restart_of_mediamtx() {
         config.clone(),
         tokio::sync::watch::channel(config).1,
         recording_tx,
+        Sounds {
+            status: tokio::sync::watch::channel(sound::Status::default()).1,
+            gst: PathBuf::from("/nonexistent/gst-launch-1.0"),
+        },
     ));
 
     let mut buffer = vec![0; 65_536];
@@ -769,4 +774,152 @@ async fn record_follows_arming_through_a_restart_of_mediamtx() {
     .await
     .expect("the frame rate is the sender's own again")
     .unwrap();
+}
+
+fn sound_status(
+    state: sound::State,
+    recording: Option<u16>,
+    reason: Option<&str>,
+) -> sound::Status {
+    sound::Status {
+        microphones: Vec::new(),
+        cameras: BTreeMap::from([(
+            "cam0".to_owned(),
+            sound::CameraSound {
+                state,
+                microphone: None,
+                reason: reason.map(str::to_owned),
+                recording,
+            },
+        )]),
+    }
+}
+
+/// Waits up to 5 s for the record changes to end with `last`.
+async fn records_end_with(fake: &Fake, last: &[(&str, bool)]) -> Vec<(String, bool)> {
+    let last: Vec<(String, bool)> = last.iter().map(|(p, on)| ((*p).to_owned(), *on)).collect();
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let records = fake.records();
+        if records.ends_with(&last) {
+            return records;
+        }
+        assert!(
+            tokio::time::Instant::now() < until,
+            "{records:?} does not end with {last:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn with_sound_the_recording_moves_to_the_sound_path_once_it_is_ready_and_never_waits_for_it()
+{
+    let root = tempfile::tempdir().unwrap();
+    let conf = record_conf(root.path(), 4_000_000, "5m");
+    let fake = Fake::start(&[("cam0_record", conf.clone())]).await;
+    let router = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config(&[Mode::Always]);
+    config.mavlink = format!("udp:{}", router.local_addr().unwrap());
+    config.mediamtx_api = fake.url.clone();
+    let helper = tempfile::tempdir().unwrap();
+    let gst = sound::tests::fake_gst(helper.path(), false);
+    let (status_tx, status) =
+        tokio::sync::watch::channel(sound_status(sound::State::Available, Some(5005), None));
+    tokio::spawn(run(
+        config.clone(),
+        tokio::sync::watch::channel(config).1,
+        tokio::sync::watch::channel(BTreeMap::new()).0,
+        Sounds { status, gst },
+    ));
+
+    // Until the joined path is ready, the record path records the picture.
+    records_end_with(&fake, &[("cam0_record", true)]).await;
+    assert_eq!(fake.added(), ["cam0_record_sound"]);
+    let added = fake.path("cam0_record_sound");
+    assert_eq!(
+        added["recordPath"], conf["recordPath"],
+        "the record path's own folder pattern"
+    );
+    assert_eq!(added["recordFormat"], "fmp4");
+    assert_eq!(added["recordSegmentDuration"], "5m");
+    let joins = sound::tests::runs_until(helper.path(), 1).await;
+    assert_eq!(joins.len(), 1);
+    assert_eq!(
+        joins[0],
+        sound::joining(
+            "rtsp://127.0.0.1:8554",
+            "cam0_record",
+            "cam0_record_sound",
+            5005
+        )
+        .join(" ")
+    );
+
+    // Ready: the sound path records first, then the picture alone stops.
+    fake.publish("cam0_record_sound", true);
+    records_end_with(
+        &fake,
+        &[("cam0_record_sound", true), ("cam0_record", false)],
+    )
+    .await;
+
+    // A restart of MediaMTX forgets the added path: it is added again, and
+    // the picture records alone until the joined path is ready again.
+    fake.restart();
+    records_end_with(&fake, &[("cam0_record", true)]).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(fake.added(), ["cam0_record_sound", "cam0_record_sound"]);
+    assert!(fake.has("cam0_record_sound"));
+    fake.publish("cam0_record_sound", true);
+    records_end_with(
+        &fake,
+        &[("cam0_record_sound", true), ("cam0_record", false)],
+    )
+    .await;
+
+    // Set to none: the joining stops and the picture records alone.
+    status_tx.send_replace(sound_status(sound::State::Off, None, None));
+    records_end_with(
+        &fake,
+        &[("cam0_record_sound", false), ("cam0_record", true)],
+    )
+    .await;
+    assert_eq!(fake.path("cam0_record_sound")["record"], false);
+    assert_eq!(
+        sound::tests::runs(helper.path()).len(),
+        1,
+        "never started again"
+    );
+}
+
+#[test]
+fn why_a_camera_has_no_sound_is_said_to_the_ground_once_as_a_warning() {
+    let config = config(&[Mode::Armed]);
+    let mut recorder = Recorder::new(&config, 0);
+    let mut said = BTreeMap::new();
+    let failed = sound_status(
+        sound::State::Failed,
+        None,
+        Some("GStreamer is not installed on the camera computer."),
+    );
+    assert_eq!(
+        whole_text(&say_sound(&mut recorder, &config, &failed, &mut said)),
+        [(
+            WARNING,
+            "No sound from cam0. GStreamer is not installed on the camera computer.".to_owned()
+        )]
+    );
+    assert!(
+        say_sound(&mut recorder, &config, &failed, &mut said).is_empty(),
+        "once"
+    );
+    let fine = sound_status(sound::State::NoMicrophone, Some(5005), None);
+    assert!(say_sound(&mut recorder, &config, &fine, &mut said).is_empty());
+    assert_eq!(
+        whole_text(&say_sound(&mut recorder, &config, &failed, &mut said)).len(),
+        1,
+        "again once it came back"
+    );
 }

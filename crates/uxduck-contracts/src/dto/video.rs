@@ -370,6 +370,9 @@ pub struct VideoSource {
     /// (S147).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<VideoAudio>,
+    /// Whether its sound can be heard, and why not (ADR-0067 M13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<VideoSound>,
     pub counters: VideoCounters,
     #[schemars(schema_with = "crate::safe::integer")]
     pub first_seen_us: u64,
@@ -515,6 +518,66 @@ pub struct VideoAudio {
     /// such as "MPEG audio".
     pub name: String,
     pub recorded: bool,
+}
+
+/// What a camera's speaker can do (ADR-0067 M12, M13).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoSound {
+    pub state: VideoSoundState,
+    /// Where the sound comes from, for people, such as "USB `PnP` Sound
+    /// Device on the Plane".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone: Option<String>,
+    /// What it is, for people, such as "Opus, mono".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+    /// Why it cannot be heard, for people, naming the vehicle, such as "No
+    /// microphone on the Plane's camera computer. Plug in a USB microphone."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The companion computer camera whose microphone this is, for the
+    /// speaker's Microphone row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion: Option<VideoSoundCompanion>,
+    /// Sound is coming now: a window listens or this computer records it
+    /// (ADR-0067 M8).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flowing: bool,
+    /// The bit/s the camera sends it at now, when its sender says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub bitrate: Option<u64>,
+}
+
+/// Whether a camera's sound can be heard (ADR-0067 M9, M13).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum VideoSoundState {
+    /// It can be heard: unmuting asks for it.
+    Available,
+    /// Its camera computer has no microphone.
+    NoMicrophone,
+    /// The microphone chosen for it is not plugged in.
+    Unplugged,
+    /// Its microphone is set to None on the camera computer.
+    Off,
+    /// The camera computer cannot send sound, such as `GStreamer` missing.
+    Failed,
+    /// The camera sends no sound.
+    NoSound,
+    /// It sends sound UXDuck cannot play, such as G.711.
+    Unsupported,
+}
+
+/// A companion computer's camera, by the vehicle page's ids.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoSoundCompanion {
+    pub vehicle_id: String,
+    pub computer_id: String,
+    /// The camera's path, such as `front`.
+    pub path: String,
 }
 
 /// Why a camera with fallback addresses is on the address it tries or

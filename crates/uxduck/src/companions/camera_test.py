@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import pwd
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,8 @@ import unittest
 from unittest.mock import patch
 
 HERE = pathlib.Path(__file__).parent
+# The fake /proc and /sys trees uxduck companion's Rust reads too (ADR-0067 M2).
+MICROPHONES = HERE.parents[3] / "tests/fixtures/microphones"
 spec = importlib.util.spec_from_file_location("camera", HERE / "camera.py")
 camera = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(camera)
@@ -114,6 +117,7 @@ class CameraTests(unittest.TestCase):
                             "LOGIN_DEFS": self.root / "login.defs", "SENSOR_NAMES": (self.root / "video4linux",),
                             "WATCHDOG_SCRIPT": self.root / "lib/camera-watchdog.py", "WATCHDOG_STATE": self.root / "run/camera-watchdog.json",
                             "COMPANION_TOML": self.root / "uxduck/companion.toml",
+                            "ASOUND": self.root / "proc/asound", "SOUND_CLASS": self.root / "sys/class/sound",
                             "READY_WAIT_S": 1.0, "POLL_S": 0.02}.items():
             patcher = patch.object(camera, name, value)
             patcher.start()
@@ -195,6 +199,145 @@ class CameraTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "has no record_path"):
             camera.set_record({"path": "front", "mode": "off"}, found)
         self.assertEqual(path.read_text(), '[cameras.front]\nfollow = true\n')
+
+    def microphones_from(self, case):
+        """A copy of one fake microphone tree as this computer's /proc and /sys."""
+        shutil.rmtree(self.root / "proc", ignore_errors=True)
+        shutil.rmtree(self.root / "sys", ignore_errors=True)
+        shutil.copytree(MICROPHONES / case / "proc", self.root / "proc", symlinks=True)
+        shutil.copytree(MICROPHONES / case / "sys", self.root / "sys", symlinks=True)
+
+    def test_microphones_are_found_as_every_shared_fake_tree_expects(self):
+        cases = sorted(p.name for p in MICROPHONES.iterdir() if p.is_dir())
+        self.assertEqual(cases, ["loopback-only", "none", "one-usb", "several"])
+        for case in cases:
+            with self.subTest(case):
+                self.microphones_from(case)
+                expected = json.loads((MICROPHONES / case / "expected.json").read_text())
+                found = camera.microphones()
+                self.assertEqual(found, expected["microphones"])
+                self.assertEqual(camera.automatic(found), expected["automatic"])
+        # A computer with no sound cards at all.
+        shutil.rmtree(self.root / "proc")
+        self.assertEqual(camera.microphones(), [])
+
+    def test_a_microphone_plugged_in_or_pulled_out_is_seen_on_the_next_read(self):
+        self.microphones_from("one-usb")
+        self.assertEqual(camera.automatic(camera.microphones()), "usb:3-1.2")
+        # Pulled out: the kernel drops its card.
+        cards = self.root / "proc/asound/cards"
+        cards.write_text("".join(cards.read_text().splitlines(keepends=True)[:4]))
+        shutil.rmtree(self.root / "proc/asound/card2")
+        (self.root / "sys/class/sound/card2/device").unlink()
+        self.assertEqual(camera.microphones(), [])
+        self.assertIsNone(camera.automatic([]))
+        # A Blue Snowball plugged into another port takes the next free card number.
+        with cards.open("a") as file:
+            file.write(" 2 [Snowball       ]: USB-Audio - Blue Snowball\n"
+                       "                      BLUE MICROPHONE Blue Snowball at usb-xhci-hcd.0-2, full speed\n")
+        (self.root / "proc/asound/card2/pcm0c").mkdir(parents=True)
+        (self.root / "proc/asound/card2/id").write_text("Snowball\n")
+        (self.root / "sys/devices/usb1/1-2/1-2:1.0").mkdir(parents=True)
+        os.symlink("../../../devices/usb1/1-2/1-2:1.0", self.root / "sys/class/sound/card2/device")
+        found = camera.microphones()
+        self.assertEqual(found, [{"id": "usb:1-2", "name": "Blue Snowball", "card": "Snowball", "usb": True,
+                                  "alsa": "hw:CARD=Snowball,DEV=0"}])
+        self.assertEqual(camera.automatic(found), "usb:1-2")
+
+    def test_each_camera_has_its_microphone_choice_and_the_device_it_gives_now(self):
+        self.microphones_from("several")
+        self.companion_toml('[cameras.front]\nfollow = true\n\n[cameras.rear]\nmicrophone = "none"\n\n'
+                            '[cameras.side]\nmicrophone = "usb:9-9"  # on the mast\n\n[cameras.top]\nmicrophone = "card:Loopback"\n')
+        status = {"paths": [{"name": n} for n in ("front", "rear", "side", "top", "relay")]}
+        with patch.object(camera, "GSTREAMER", "uxduck-test-no-gst-launch"):
+            camera.sound(status)
+        self.assertEqual(status["microphones"], [
+            {"id": "usb:3-1.2", "name": "USB PnP Sound Device", "card": "Device", "usb": True},
+            {"id": "card:Loopback", "name": "Loopback PCM", "card": "Loopback", "usb": False},
+            {"id": "usb:1-2", "name": "Blue Snowball", "card": "Snowball", "usb": True}])
+        self.assertEqual([p.get("microphone") for p in status["paths"]], [
+            {"choice": "auto", "device": "usb:3-1.2"}, {"choice": "none"}, {"choice": "usb:9-9"},
+            {"choice": "card:Loopback", "device": "card:Loopback"}, None])
+        self.assertIn("Sound needs GStreamer on this computer", status["soundProblem"])
+        self.assertIn("gstreamer1.0-rtsp", status["soundProblem"])
+        self.assertNotIn(";", status["soundProblem"])
+        # With gst-launch-1.0 on the computer nothing is said.
+        gst = self.fake / "bin/gst-launch-1.0"
+        gst.write_text("#!/bin/sh\n")
+        gst.chmod(0o755)
+        status = {"paths": [{"name": "front"}]}
+        camera.sound(status)
+        self.assertNotIn("soundProblem", status)
+        # Automatic with no microphone plugged in, or None, needs no GStreamer.
+        self.microphones_from("none")
+        self.companion_toml('[cameras.front]\n\n[cameras.rear]\nmicrophone = "none"\n')
+        status = {"paths": [{"name": "front"}, {"name": "rear"}]}
+        with patch.object(camera, "GSTREAMER", "uxduck-test-no-gst-launch"):
+            camera.sound(status)
+        self.assertEqual(status, {"paths": [{"name": "front", "microphone": {"choice": "auto"}},
+                                            {"name": "rear", "microphone": {"choice": "none"}}], "microphones": []})
+        # A chosen device that is not plugged in still wants sound.
+        self.companion_toml('[cameras.front]\nmicrophone = "usb:1-2"\n')
+        status = {"paths": [{"name": "front"}]}
+        with patch.object(camera, "GSTREAMER", "uxduck-test-no-gst-launch"):
+            camera.sound(status)
+        self.assertIn("soundProblem", status)
+        # No companion.toml: uxduck companion sends no camera, so none has a microphone.
+        (self.root / "uxduck/companion.toml").unlink()
+        status = {"paths": [{"name": "front"}]}
+        camera.sound(status)
+        self.assertEqual(status, {"paths": [{"name": "front"}], "microphones": []})
+
+    def test_a_microphone_is_written_on_its_own_line_with_a_backup_and_every_other_line_is_kept(self):
+        text = ('# Written by UXDuck\n[video]\ninterfaces = ["wlan0"]\n\n[cameras.front]\nrecord_path = "front_record"\nrecord = "armed"\n\n'
+                '[cameras.rear]  # the back one\nfollow = false\nmicrophone = "auto" # default\n')
+        path = self.companion_toml(text)
+        found = {"paths": [{"name": "front", "microphone": {"choice": "auto"}}, {"name": "rear", "microphone": {"choice": "auto"}},
+                           {"name": "relay"}],
+                 "microphones": [{"id": "usb:3-1.2", "name": "USB PnP Sound Device", "card": "Device", "usb": True}]}
+        backup = path.with_name("companion.toml.bak")
+        camera.set_microphone({"path": "front", "choice": "usb:3-1.2"}, found)
+        self.assertEqual(backup.read_text(), text)
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o640)
+        once = text.replace('[cameras.front]\n', '[cameras.front]\nmicrophone = "usb:3-1.2"\n')
+        self.assertEqual(path.read_text(), once)
+        camera.set_microphone({"path": "rear", "choice": "none"}, found)
+        self.assertEqual(backup.read_text(), once)
+        twice = once.replace('microphone = "auto" # default\n', 'microphone = "none"\n')
+        self.assertEqual(path.read_bytes(), twice.encode())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+        # A microphone not plugged in now can be chosen by its id.
+        camera.set_microphone({"path": "rear", "choice": "card:Snowball"}, found)
+        self.assertIn('microphone = "card:Snowball"\n', path.read_text())
+        self.assertEqual([c for c in self.calls() if c[:2] == ["systemctl", "reload"]], [])
+        with patch.object(camera, "active", return_value=True):
+            camera.set_microphone({"path": "rear", "choice": "auto"}, found)
+        self.assertIn(["systemctl", "reload", "--", "uxduck-companion.service"], self.calls())
+        kept = path.read_text()
+        for change, why in [({"path": "front", "choice": "Blue Yeti"}, "Blue Yeti is not a microphone on this computer"),
+                            ({"path": "front", "choice": 'usb:1-2"\nrecord = "off'}, "is not a microphone"),
+                            ({"path": "front", "choice": "usb:"}, "is not a microphone"),
+                            ({"path": "front", "choice": None}, "is not a microphone"),
+                            ({"path": "relay", "choice": "auto"}, "does not send relay"),
+                            ({"path": 'front]\nx = "', "choice": "auto"}, "does not send"),
+                            ("front", "change is missing")]:
+            with self.assertRaisesRegex(ValueError, why):
+                camera.set_microphone(change, found)
+        self.assertEqual(path.read_text(), kept)
+        # A table removed since the last read is never added back.
+        path.write_text('[cameras.rear]\n')
+        with self.assertRaisesRegex(ValueError, r"has no \[cameras.front\] table"):
+            camera.set_microphone({"path": "front", "choice": "none"}, found)
+        self.assertEqual(path.read_text(), '[cameras.rear]\n')
+
+    def test_a_reload_that_fails_says_the_microphone_is_saved(self):
+        path = self.companion_toml('[cameras.front]\n')
+        found = {"paths": [{"name": "front", "microphone": {"choice": "auto"}}]}
+        with patch.object(camera, "active", return_value=True), \
+                patch.object(camera, "run", side_effect=RuntimeError("systemctl reload failed: Job failed.")):
+            with self.assertRaisesRegex(RuntimeError, "The microphone for front is saved as none in .*next starts"):
+                camera.set_microphone({"path": "front", "choice": "none"}, found)
+        self.assertEqual(path.read_text(), '[cameras.front]\nmicrophone = "none"\n')
 
     def test_drop_in_holds_only_overrides_and_keeps_other_cameras(self):
         self.drop_in.parent.mkdir(parents=True)
@@ -357,12 +500,15 @@ class CameraTests(unittest.TestCase):
             {"name": "~^live/.*$", "source": "publisher"}]
         self.api.live = lambda: [{"name": "cam", "ready": True, "readers": [{"type": "rtspSession"}], "inboundBytes": 123456}]
         # The adapter as SSH runs it, with python3 -c, reading the test's folder in place of the system's.
+        self.microphones_from("one-usb")
+        self.companion_toml('[cameras.cam]\nfollow = true\n')
         def here(value):
             if isinstance(value, tuple):
                 return "(" + "".join(here(v) + ", " for v in value) + ")"
             return "pathlib.Path(" + repr(str(value)) + ")"
         places = {name: here(getattr(camera, name)) for name in
-                  ("SYSTEMD", "LINGER", "LOGIND", "LOGIND_DIRS", "LOGIN_DEFS", "SENSOR_NAMES", "WATCHDOG_SCRIPT", "WATCHDOG_STATE")}
+                  ("SYSTEMD", "LINGER", "LOGIND", "LOGIND_DIRS", "LOGIN_DEFS", "SENSOR_NAMES", "WATCHDOG_SCRIPT", "WATCHDOG_STATE",
+                   "COMPANION_TOML", "ASOUND", "SOUND_CLASS")}
         source = "".join(next((name + " = " + value + "\n" for name, value in places.items() if line.startswith(name + " = ")), line)
                          for line in (HERE / "camera.py").read_text().splitlines(keepends=True))
         self.assertEqual(source.count(str(self.root)), len(places))
@@ -377,8 +523,9 @@ class CameraTests(unittest.TestCase):
         self.assertEqual(found["paths"], [
             {"name": "cam", "source": "rpiCamera", "onDemand": False, "ready": True, "readers": 1, "bytes": 123456, "cameraId": 0,
              "settings": {"width": 1536, "height": 864, "fps": 50, "mode": "2304:1296:10:P", "idrPeriod": 50, "bitrate": 2000000},
-             "setByUxduck": False, "sensor": "imx708"},
+             "setByUxduck": False, "sensor": "imx708", "microphone": {"choice": "auto", "device": "usb:3-1.2"}},
             {"name": "relay", "source": "rtsp", "onDemand": True, "ready": False, "readers": 0, "bytes": 0}])
+        self.assertEqual(found["microphones"], [{"id": "usb:3-1.2", "name": "USB PnP Sound Device", "card": "Device", "usb": True}])
         self.assertNotIn("linger", found)
 
     def test_api_address_follows_the_yaml_and_the_environment(self):

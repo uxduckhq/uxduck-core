@@ -95,6 +95,9 @@ pub trait VideoPort: Send + std::fmt::Debug {
     fn rtsp_may_return(&mut self, _source_id: &str, _to: &[usize]) {}
     /// Whether a UDP source should be demuxed instead of just discovered.
     fn demand(&mut self, _source_id: &str, _needed: bool) {}
+    /// Whether a source is recorded or about to be, so its sound is asked
+    /// for before the recording's first picture (ADR-0067 M8, M10).
+    fn record_sound(&mut self, _source_id: &str, _asked: bool) {}
     /// Cached enumeration; the host refreshes outside the engine thread.
     fn devices(&mut self) -> VideoDevicesResult {
         VideoDevicesResult {
@@ -420,6 +423,8 @@ pub(crate) struct Video {
     /// The UDP port the listener holds, or why it holds none.
     listening: Option<u16>,
     listen_error: Option<String>,
+    /// What each camera's worker last saw of its sound (ADR-0067 M13).
+    pub(crate) sound_seen: BTreeMap<String, crate::video_sound::SoundSeen>,
 }
 
 fn actor() -> Actor {
@@ -766,6 +771,7 @@ impl Engine {
             }
             let now = self.clock.now_us();
             let source = VideoSource {
+                sound: None,
                 recording_requested: false,
                 reencoding: None,
                 id: id.clone(),
@@ -779,10 +785,7 @@ impl Engine {
                 height: None,
                 frame_rate: None,
                 state: VideoState::Stopped,
-                state_detail: Some(format!(
-                    "Connecting to {}",
-                    uxduck_core::domain::video::redact(uri)
-                )),
+                state_detail: Some(format!("Connecting to {}", redact(uri))),
                 picture_note: None,
                 vehicle_id: Some(vehicle_id.to_owned()),
                 assigned_by_hand: false,
@@ -836,34 +839,7 @@ impl Engine {
     #[must_use]
     pub fn camera_companion(&self, source_id: &str, host: &str) -> Option<Companion> {
         let source = self.state.video_sources.get(source_id)?;
-        let vehicle = self.vehicle(source.vehicle_id.as_deref()?)?;
-        let bare = |host: &str| {
-            host.trim_start_matches('[')
-                .trim_end_matches(']')
-                .to_ascii_lowercase()
-        };
-        let computers = &vehicle.companions;
-        let computer = match &source.served_by {
-            Some(id) => computers.iter().find(|c| &c.id == id),
-            None => computers
-                .iter()
-                .find(|c| {
-                    c.check
-                        .as_ref()
-                        .and_then(|check| check.cameras.as_ref())
-                        .and_then(|cameras| {
-                            cameras.named_by(
-                                source
-                                    .url
-                                    .iter()
-                                    .chain(&source.fallback_urls)
-                                    .map(String::as_str),
-                            )
-                        })
-                        .is_some()
-                })
-                .or_else(|| computers.iter().find(|c| bare(&c.host) == bare(host))),
-        }?;
+        let (vehicle, computer) = self.serving_computer(source, host)?;
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -917,6 +893,7 @@ impl Engine {
         .filter(|s| is_waiting(s))
         .cloned();
         let mut source = before.clone().unwrap_or_else(|| VideoSource {
+            sound: None,
             recording_requested: false,
             reencoding: None,
             id: id.clone(),
@@ -1000,6 +977,7 @@ impl Engine {
         if report.audio.is_some() {
             source.audio.clone_from(&report.audio);
         }
+        source.sound = self.video_sound(&source).map(Box::new);
         if source.url.is_some() && report.id.is_none() {
             // A sender on a port is never an added source.
             return;
@@ -1063,6 +1041,7 @@ impl Engine {
         if new {
             self.notify_new_video(&source);
         }
+        self.notice_microphone(&source, before.as_ref().and_then(|b| b.sound.as_deref()));
     }
 
     /// A camera that sends no IDR could not be re-encoded for live view.
@@ -2320,6 +2299,7 @@ impl Engine {
             // it is watched or recorded.
             // The same source shape and lifecycle as a manually added camera.
             VideoSource {
+                sound: None,
                 recording_requested: false,
                 reencoding: None,
                 id: format!("vs{}", &self.random.token()[..16]),
@@ -2381,6 +2361,7 @@ impl Engine {
         source.height = None;
         source.frame_rate = None;
         source.audio = None;
+        source.sound = None;
         source.state = VideoState::Stopped;
         source.state_detail = Some("Starting recorded video".into());
         source.changed_at_us = now;
@@ -2438,6 +2419,7 @@ impl Engine {
         // nothing until it is watched or recorded.
         let now = self.clock.now_us();
         let mut source = previous.unwrap_or_else(|| VideoSource {
+            sound: None,
             recording_requested: false,
             reencoding: None,
             id: format!("vs{}", &self.random.token()[..16]),
@@ -2666,6 +2648,7 @@ impl Engine {
     ) -> VideoSource {
         let now = self.clock.now_us();
         VideoSource {
+            sound: None,
             recording_requested: false,
             reencoding: None,
             id,
@@ -2856,6 +2839,7 @@ impl Engine {
         let now = self.clock.now_us();
         let id = waiting_id(port);
         let source = VideoSource {
+            sound: None,
             recording_requested: false,
             reencoding: None,
             name: name.clone().unwrap_or_else(|| udp_name(&id, port, "")),
@@ -3162,6 +3146,9 @@ impl Engine {
                     },
                 );
             }
+            if let Some(port) = self.video.port.as_mut() {
+                port.record_sound(&source.id, recording);
+            }
             let wanted = (watched.contains(&source.id) || recording)
                 && source.capture.as_ref().is_none_or(|c| c.enabled)
                 && (source.url.is_none() || !urls.is_empty());
@@ -3224,6 +3211,7 @@ impl Engine {
                         // refused, or sound turned off (S161).
                         if source.audio.is_some() {
                             source.audio = None;
+                            source.sound = None;
                             source.version += 1;
                             self.commit_as(
                                 actor(),

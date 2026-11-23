@@ -25,6 +25,9 @@ pub struct Store {
     /// to finish. 0 when the source's bitrate is not configured, and then the
     /// largest segment already written stands in for it.
     pub reserve: u64,
+    /// Other folders whose segments are the same camera's recordings, such
+    /// as the record path's and its path with sound (ADR-0067 M7).
+    pub also: Vec<PathBuf>,
 }
 
 /// A finished or growing segment.
@@ -114,16 +117,19 @@ impl Store {
             dir,
             extension,
             reserve,
+            also: Vec::new(),
         })
     }
 
-    /// Every segment, oldest first. None while the folder is not there yet.
+    /// Every segment in its folder and the others it counts, oldest first.
+    /// None while a folder is not there yet.
     ///
     /// # Errors
     /// A folder that cannot be read.
     pub fn segments(&self) -> io::Result<Vec<Segment>> {
         let mut found = Vec::new();
-        let mut folders = vec![self.dir.clone()];
+        let mut folders: Vec<PathBuf> =
+            [&self.dir].into_iter().chain(&self.also).cloned().collect();
         while let Some(folder) = folders.pop() {
             let entries = match std::fs::read_dir(&folder) {
                 Ok(entries) => entries,

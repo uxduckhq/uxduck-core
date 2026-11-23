@@ -21,6 +21,8 @@ use super::client::CliError;
 use super::link_spec;
 use crate::daemon::onboard::{Computer, Onboard};
 use crate::video::companion::File;
+use crate::video::companion::sound;
+use crate::video::onboard_recording::Sounds;
 
 #[derive(Debug, clap::Args)]
 pub struct CompanionArgs {
@@ -45,19 +47,27 @@ pub struct CompanionArgs {
     /// /etc/uxduck/companion.toml. Its [video] section sends the cameras
     /// named under [cameras.<path>] over WebRTC, their bitrate following the
     /// connection. A camera with a `record_path` also records on this
-    /// computer's disk, by its `record` mode: armed, always or off. SIGHUP,
-    /// or systemctl reload, applies a changed record mode at once.
+    /// computer's disk, by its `record` mode: armed, always or off. Each
+    /// camera's sound comes from its `microphone`: auto, none or a device's
+    /// id, which needs `GStreamer` (sudo apt-get install gstreamer1.0-tools
+    /// gstreamer1.0-alsa gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+    /// gstreamer1.0-rtsp). SIGHUP, or systemctl reload, applies a changed
+    /// record mode or microphone at once.
     #[arg(long, value_name = "FILE")]
     config: Option<std::path::PathBuf>,
 }
 
 /// Runs until stopped. With `--config`, SIGHUP (`systemctl reload`) reads the
-/// file again and applies its recording modes. A file that does not read
+/// file again and applies its recording modes and microphones. A file that does not read
 /// then keeps the running configuration, and says why.
 ///
 /// # Errors
 /// A destination that does not parse, no UDP socket, or a configuration
 /// that does not read or whose feature fails.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the companion's features started in order, each wired to the ones it feeds"
+)]
 pub async fn run(args: CompanionArgs) -> Result<(), CliError> {
     // Before anything else, so a reload never meets SIGHUP's default, which
     // ends the program.
@@ -74,28 +84,49 @@ pub async fn run(args: CompanionArgs) -> Result<(), CliError> {
         None => None,
     };
     let (recording_tx, recording_rx) = watch::channel(BTreeMap::new());
-    let video = file
-        .as_ref()
-        .and_then(|f| Some((f.video.clone()?, f.sender_cameras())));
-    let video = async move {
-        match video {
-            Some((video, cameras)) => crate::video::sender::run(video, cameras, recording_rx)
+    let environment = sound::Environment::from_env();
+    let gst = environment.gst.clone();
+    let (choices_tx, sound) = match &file {
+        Some(file) => {
+            let (choices_tx, choices) = watch::channel(file.microphones());
+            let sound = sound::start(environment, choices)
                 .await
-                .map_err(|e| CliError::Usage(format!("the video sender: {e}"))),
-            None => std::future::pending().await,
-        }
-    };
-    let (modes_tx, recorder) = match file.as_ref().and_then(File::recorder) {
-        Some(recorder) => {
-            let (modes_tx, modes) = watch::channel(recorder.clone());
-            (Some(modes_tx), Some((recorder, modes)))
+                .map_err(|e| CliError::Usage(format!("sound: {e}")))?;
+            (Some(choices_tx), Some(sound))
         }
         None => (None, None),
     };
+    let (feed, sound_status) = match sound {
+        Some(sound) => (Some(sound.feed), Some(sound.status)),
+        None => (None, None),
+    };
+    let video = file
+        .as_ref()
+        .and_then(|f| Some((f.video.clone()?, f.sender_cameras(), feed?)));
+    let video = async move {
+        match video {
+            Some((video, cameras, feed)) => {
+                crate::video::sender::run(video, cameras, recording_rx, feed)
+                    .await
+                    .map_err(|e| CliError::Usage(format!("the video sender: {e}")))
+            }
+            None => std::future::pending().await,
+        }
+    };
+    let (modes_tx, recorder) = match (file.as_ref().and_then(File::recorder), sound_status) {
+        (Some(recorder), Some(status)) => {
+            let (modes_tx, modes) = watch::channel(recorder.clone());
+            (
+                Some(modes_tx),
+                Some((recorder, modes, Sounds { status, gst })),
+            )
+        }
+        _ => (None, None),
+    };
     let recorder = async move {
         match recorder {
-            Some((recorder, modes)) => {
-                crate::video::onboard_recording::run(recorder, modes, recording_tx)
+            Some((recorder, modes, sounds)) => {
+                crate::video::onboard_recording::run(recorder, modes, recording_tx, sounds)
                     .await
                     .map_err(|e| CliError::Usage(format!("the recorder: {e}")))
             }
@@ -111,7 +142,7 @@ pub async fn run(args: CompanionArgs) -> Result<(), CliError> {
                     Ok(newer) => {
                         if running.beyond_modes(&newer) {
                             tracing::warn!(
-                                "reloaded {}: only the recording modes apply on a reload, restart uxduck-companion for the rest",
+                                "reloaded {}: only the recording modes and microphones apply on a reload, restart uxduck-companion for the rest",
                                 path.display()
                             );
                         } else {
@@ -119,6 +150,9 @@ pub async fn run(args: CompanionArgs) -> Result<(), CliError> {
                         }
                         if let (Some(modes_tx), Some(modes)) = (&modes_tx, newer.recorder()) {
                             modes_tx.send_replace(modes);
+                        }
+                        if let Some(choices_tx) = &choices_tx {
+                            choices_tx.send_replace(newer.microphones());
                         }
                         running = newer;
                     }
@@ -129,7 +163,7 @@ pub async fn run(args: CompanionArgs) -> Result<(), CliError> {
             }
         }
         #[cfg(not(unix))]
-        let _ = (modes_tx, file, config_path);
+        let _ = (modes_tx, choices_tx, file, config_path);
         std::future::pending::<Result<(), CliError>>().await
     };
     let report = async move {

@@ -4837,6 +4837,11 @@ export type CompanionCameraPath = {
      * `rpiCameraCamID`.
      */
     cameraId?: number | null;
+    /**
+     * Its microphone, when `companion.toml` has a `[cameras.<name>]`
+     * table for it (ADR-0067 M3).
+     */
+    microphone?: CompanionMicrophone | null;
     name: string;
     onDemand?: boolean;
     /**
@@ -4901,6 +4906,10 @@ export type CompanionCameras = {
      * The unit's user, when it is a login user (C7).
      */
     linger?: CameraLinger | null;
+    /**
+     * The sound capture devices on the computer (ADR-0067 M2, M14).
+     */
+    microphones?: Array<CompanionMicrophoneDevice>;
     paths: Array<CompanionCameraPath>;
     /**
      * Why the cameras could not be read, for people.
@@ -4911,6 +4920,11 @@ export type CompanionCameras = {
      * for people (ADR-0066 R10).
      */
     recordProblem?: string | null;
+    /**
+     * Why the computer cannot send sound, for people, such as `GStreamer`
+     * missing (ADR-0067 M4).
+     */
+    soundProblem?: string | null;
     /**
      * The systemd unit running a `mediamtx` binary; absent when none runs.
      */
@@ -5044,6 +5058,41 @@ export type CompanionComputer = {
     user?: string | null;
 };
 
+/**
+ * Which microphone a camera's sound comes from (ADR-0067 M3).
+ */
+export type CompanionMicrophone = {
+    /**
+     * `auto` (also when `companion.toml` has no `microphone`), `none`,
+     * or a device's `id`.
+     */
+    choice: string;
+    /**
+     * The device the choice gives now, by its id, when one is plugged in.
+     */
+    device?: string | null;
+};
+
+/**
+ * A sound capture device on a companion computer (ADR-0067 M2).
+ */
+export type CompanionMicrophoneDevice = {
+    /**
+     * The ALSA card id, such as `Device`.
+     */
+    card: string;
+    /**
+     * Stable across reboots and replugging into the same port:
+     * `usb:<bus path>` for a USB device, else `card:<ALSA id>`.
+     */
+    id: string;
+    /**
+     * The card's long name, such as "USB `PnP` Sound Device".
+     */
+    name: string;
+    usb?: boolean;
+};
+
 export type CompanionNetwork = {
     checkUri: string;
     checksAvailable?: boolean;
@@ -5167,6 +5216,12 @@ export type ComputerCamerasParams = {
      * (`loginctl enable-linger`).
      */
     linger?: boolean;
+    /**
+     * Which microphone a camera's sound comes from (ADR-0067 M3, M14):
+     * written to `/etc/uxduck/companion.toml`, which `uxduck companion`
+     * reads again. No camera pauses.
+     */
+    microphone?: MicrophoneParams | null;
     /**
      * When a camera records on the vehicle (ADR-0066 R9): written to
      * `/etc/uxduck/companion.toml`, which `uxduck companion` reads again.
@@ -11292,6 +11347,17 @@ export type MessageSubscription = {
      * MAVLink's message names, from the ArduPilot dialect.
      */
     names: Array<string>;
+};
+
+export type MicrophoneParams = {
+    /**
+     * `auto`, `none`, or a device's `id` from `microphones`.
+     */
+    choice: string;
+    /**
+     * The camera's path, such as `front`.
+     */
+    path: string;
 };
 
 /**
@@ -21619,6 +21685,58 @@ export type VideoSocket = {
 };
 
 /**
+ * What a camera's speaker can do (ADR-0067 M12, M13).
+ */
+export type VideoSound = {
+    /**
+     * The bit/s the camera sends it at now, when its sender says.
+     */
+    bitrate?: number | null;
+    /**
+     * What it is, for people, such as "Opus, mono".
+     */
+    codec?: string | null;
+    /**
+     * The companion computer camera whose microphone this is, for the
+     * speaker's Microphone row.
+     */
+    companion?: VideoSoundCompanion | null;
+    /**
+     * Sound is coming now: a window listens or this computer records it
+     * (ADR-0067 M8).
+     */
+    flowing?: boolean;
+    /**
+     * Where the sound comes from, for people, such as "USB `PnP` Sound
+     * Device on the Plane".
+     */
+    microphone?: string | null;
+    /**
+     * Why it cannot be heard, for people, naming the vehicle, such as "No
+     * microphone on the Plane's camera computer. Plug in a USB microphone."
+     */
+    reason?: string | null;
+    state: VideoSoundState;
+};
+
+/**
+ * A companion computer's camera, by the vehicle page's ids.
+ */
+export type VideoSoundCompanion = {
+    computerId: string;
+    /**
+     * The camera's path, such as `front`.
+     */
+    path: string;
+    vehicleId: string;
+};
+
+/**
+ * Whether a camera's sound can be heard (ADR-0067 M9, M13).
+ */
+export type VideoSoundState = 'available' | 'noMicrophone' | 'unplugged' | 'off' | 'failed' | 'noSound' | 'unsupported';
+
+/**
  * A camera stream arriving at UXDuck.
  */
 export type VideoSource = {
@@ -21720,6 +21838,10 @@ export type VideoSource = {
      * the camera address's host.
      */
     servedBy?: string | null;
+    /**
+     * Whether its sound can be heard, and why not (ADR-0067 M13).
+     */
+    sound?: VideoSound | null;
     state: VideoState;
     stateDetail?: string | null;
     /**

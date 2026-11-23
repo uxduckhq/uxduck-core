@@ -20,8 +20,8 @@ use uxduck_contracts::dto::initialize::DaemonCapabilities;
 use uxduck_contracts::dto::trace::Transport;
 use uxduck_core::domain::companion::CompanionClock;
 use uxduck_core::domain::companion_cameras::{
-    CameraLinger, CameraWatchdog, CompanionCameraPath, CompanionCameras, PicturePreset,
-    VehicleRecordMode, VehicleRecording,
+    CameraLinger, CameraWatchdog, CompanionCameraPath, CompanionCameras, CompanionMicrophone,
+    CompanionMicrophoneDevice, PicturePreset, VehicleRecordMode, VehicleRecording,
 };
 use uxduck_core::domain::link::Link;
 use uxduck_core::domain::vehicle::{Observation, Presence};
@@ -711,6 +711,8 @@ fn network_changes_require_a_pin_and_disarm_and_never_persist_passwords() {
 
 fn cameras(linger_at_risk: bool) -> CompanionCameras {
     CompanionCameras {
+        microphones: Vec::new(),
+        sound_problem: None,
         unit: Some("mediamtx.service".into()),
         config: Some("/etc/mediamtx/mediamtx.yml".into()),
         api: Some("127.0.0.1:9997".into()),
@@ -722,6 +724,7 @@ fn cameras(linger_at_risk: bool) -> CompanionCameras {
         }),
         paths: vec![
             CompanionCameraPath {
+                microphone: None,
                 name: "cam".into(),
                 source: "rpiCamera".into(),
                 camera_id: Some(0),
@@ -739,6 +742,7 @@ fn cameras(linger_at_risk: bool) -> CompanionCameras {
                 }),
             },
             CompanionCameraPath {
+                microphone: None,
                 name: "front_cam".into(),
                 source: "rpiCamera".into(),
                 camera_id: Some(1),
@@ -752,6 +756,7 @@ fn cameras(linger_at_risk: bool) -> CompanionCameras {
                 record: None,
             },
             CompanionCameraPath {
+                microphone: None,
                 name: "relay".into(),
                 source: "rtsp".into(),
                 camera_id: None,
@@ -770,6 +775,137 @@ fn cameras(linger_at_risk: bool) -> CompanionCameras {
         problem: None,
         record_problem: None,
     }
+}
+
+/// A camera's microphone (ADR-0067 M3, M14) is chosen like its record
+/// mode: checked against the last read, written over the pinned SSH one
+/// change at a time, and refused while armed.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario from the first read to the armed refusal"
+)]
+fn a_cameras_microphone_is_checked_against_the_last_read_and_refused_while_armed() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let ssh = Ssh::default();
+    engine.set_companions(Box::new(ssh.clone()));
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({"vehicleId":"v","host":"pi.local"}),
+    );
+    let id = vehicle["companions"][0]["id"].as_str().unwrap().to_owned();
+    let mut read = cameras(false);
+    read.microphones = vec![CompanionMicrophoneDevice {
+        id: "usb:3-1.2".into(),
+        name: "USB PnP Sound Device".into(),
+        card: "Device".into(),
+        usb: true,
+    }];
+    read.paths[0].microphone = Some(CompanionMicrophone {
+        choice: "auto".into(),
+        device: Some("usb:3-1.2".into()),
+    });
+    let answer = |engine: &mut Engine| {
+        engine.companion_checked(CheckAnswer {
+            vehicle_id: "v".into(),
+            computer_id: id.clone(),
+            result: Ok(Found {
+                host_key: Some("SHA256:known".into()),
+                cameras: Some(read.clone()),
+                ..Found::default()
+            }),
+        });
+    };
+    answer(&mut engine);
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/check",
+        json!({"vehicleId":"v","computerId":id}),
+    );
+    assert_eq!(
+        vehicle["companions"][0]["check"]["cameras"]["paths"][0]["microphone"],
+        json!({"choice": "auto", "device": "usb:3-1.2"})
+    );
+    assert_eq!(
+        vehicle["companions"][0]["check"]["cameras"]["microphones"],
+        json!([{"id": "usb:3-1.2", "name": "USB PnP Sound Device", "card": "Device", "usb": true}])
+    );
+    answer(&mut engine);
+    ssh.0.lock().unwrap().clear();
+    let choose = |path: &str, choice: &str| json!({"vehicleId":"v","computerId":id,"microphone":{"path":path,"choice":choice}});
+    for (params, why) in [
+        (choose("front_cam", "auto"), "does not send front_cam"),
+        (
+            choose("cam", "Blue Yeti"),
+            "Blue Yeti is not a microphone on pi.local",
+        ),
+        (choose("cam", "usb:"), "is not a microphone"),
+        (choose("cam", "usb:3"), "is not a microphone"),
+        (choose("cam", "usb:3-1."), "is not a microphone"),
+        (choose("cam", "card:"), "is not a microphone"),
+        (choose("cam", "card:Dev\"ice"), "is not a microphone"),
+        (
+            json!({"vehicleId":"v","computerId":id,"record":{"path":"cam","mode":"always"},"microphone":{"path":"cam","choice":"none"}}),
+            "one camera change",
+        ),
+    ] {
+        let error = refused(&mut engine, &mut ui, "computer/cameras", params);
+        assert!(error.contains(why), "{error}");
+        assert!(!error.contains(';'), "{error}");
+    }
+    assert!(ssh.0.lock().unwrap().is_empty());
+
+    for choice in ["usb:3-1.2", "none", "auto", "card:Snowball", "usb:1-2.4"] {
+        ok(
+            &mut engine,
+            &mut ui,
+            "computer/cameras",
+            choose("cam", choice),
+        );
+        let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
+        let [CompanionOrder::Cameras { input, .. }] = &orders[..] else {
+            panic!("{orders:?}");
+        };
+        let input: Value = serde_json::from_str(input).unwrap();
+        assert_eq!(
+            input["microphone"],
+            json!({"path": "cam", "choice": choice})
+        );
+        assert!(input["record"].is_null() && input["apply"].is_null());
+        assert!(
+            refused(
+                &mut engine,
+                &mut ui,
+                "computer/cameras",
+                choose("cam", "none")
+            )
+            .contains("already running"),
+            "the same operation lock as every camera change"
+        );
+        answer(&mut engine);
+    }
+
+    let mut state = engine.state().clone();
+    state.vehicles.get_mut("v").unwrap().armed = true;
+    let mut armed = self::engine(state, &keys);
+    armed.set_companions(Box::new(ssh.clone()));
+    let mut ui = connect(&mut armed);
+    assert!(
+        refused(
+            &mut armed,
+            &mut ui,
+            "computer/cameras",
+            choose("cam", "none")
+        )
+        .contains("Disarm the vehicle before changing its cameras.")
+    );
+    assert!(ssh.0.lock().unwrap().is_empty());
 }
 
 fn picture(path: &str, settings: Value) -> Value {

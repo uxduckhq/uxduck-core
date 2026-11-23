@@ -26,6 +26,10 @@ struct FakeState {
     paths: BTreeMap<String, serde_json::Value>,
     patches: Vec<(String, Settings)>,
     records: Vec<(String, bool)>,
+    /// The paths someone publishes to, ready to record.
+    published: std::collections::BTreeSet<String>,
+    /// The paths added through the API, in order.
+    added: Vec<String>,
 }
 
 pub fn rpi(settings: Settings) -> serde_json::Value {
@@ -39,6 +43,7 @@ pub fn rpi(settings: Settings) -> serde_json::Value {
 }
 
 impl Fake {
+    #[allow(clippy::too_many_lines, reason = "one route for each part of the API")]
     pub async fn start(paths: &[(&str, serde_json::Value)]) -> Self {
         let configured: BTreeMap<String, serde_json::Value> = paths
             .iter()
@@ -50,6 +55,8 @@ impl Fake {
             configured,
             patches: Vec::new(),
             records: Vec::new(),
+            published: std::collections::BTreeSet::new(),
+            added: Vec::new(),
         }));
         let router = axum::Router::new()
             .route(
@@ -67,6 +74,34 @@ impl Fake {
                             Some(conf) => Ok(Json(conf.clone())),
                             None => Err(axum::http::StatusCode::NOT_FOUND),
                         }
+                    },
+                ),
+            )
+            .route(
+                "/v3/config/paths/add/{*path}",
+                axum::routing::post(
+                    |State(s): State<Arc<Mutex<FakeState>>>,
+                     UrlPath(path): UrlPath<String>,
+                     Json(body): Json<serde_json::Value>| async move {
+                        let mut s = s.lock().unwrap();
+                        if s.paths.contains_key(&path) {
+                            return Err(axum::http::StatusCode::BAD_REQUEST);
+                        }
+                        s.paths.insert(path.clone(), body);
+                        s.added.push(path);
+                        Ok(())
+                    },
+                ),
+            )
+            .route(
+                "/v3/paths/get/{*path}",
+                get(
+                    |State(s): State<Arc<Mutex<FakeState>>>, UrlPath(path): UrlPath<String>| async move {
+                        let s = s.lock().unwrap();
+                        if !s.paths.contains_key(&path) {
+                            return Err(axum::http::StatusCode::NOT_FOUND);
+                        }
+                        Ok(Json(serde_json::json!({ "name": path, "ready": s.published.contains(&path) })))
                     },
                 ),
             )
@@ -135,11 +170,33 @@ impl Fake {
         self.records()
     }
 
-    /// `MediaMTX` restarted: its changes gone, `started` new.
+    /// `MediaMTX` restarted: its changes and added paths gone, its
+    /// publishers too, `started` new.
     pub fn restart(&self) {
         let mut s = self.state.lock().unwrap();
         s.started += 1;
         s.paths = s.configured.clone();
+        s.published.clear();
+    }
+
+    /// Someone publishes to `path` now, or stopped.
+    pub fn publish(&self, path: &str, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        if on {
+            s.published.insert(path.to_owned());
+        } else {
+            s.published.remove(path);
+        }
+    }
+
+    /// The paths added through the API, in order.
+    pub fn added(&self) -> Vec<String> {
+        self.state.lock().unwrap().added.clone()
+    }
+
+    /// Whether `MediaMTX` has the path now.
+    pub fn has(&self, path: &str) -> bool {
+        self.state.lock().unwrap().paths.contains_key(path)
     }
 
     /// The person changed a camera's configuration, which a restart applies.

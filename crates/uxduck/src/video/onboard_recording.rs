@@ -25,6 +25,19 @@
 //! When the disk fills, the oldest finished segments of earlier recordings
 //! are deleted to keep recording, never the current recording's, and the
 //! ground hears how much went (`disk`).
+//!
+//! With sound (ADR-0067 M7): while a camera records and its `microphone` is
+//! not `none` with `GStreamer` there, a joining `gst-launch-1.0` reads the
+//! record path's video back from `MediaMTX`'s RTSP, takes the camera's
+//! recording encode from its port, and publishes both to
+//! `<record path>_sound`, a path added through the API with the record
+//! path's `record*` settings, again after a restart of `MediaMTX`. Once
+//! that path is ready, `record` is on there in place of the record path, so
+//! each segment has H.264 and Opus. Until then, and whenever the joining
+//! process stops, the record path records the picture alone, so a
+//! recording is never lost to sound. A microphone pulled out mid-flight
+//! leaves the joined path recording with a silent sound track. Both paths'
+//! folders count as this camera's recordings when the disk fills.
 
 mod disk;
 
@@ -45,6 +58,7 @@ use uxduck_mavlink::onboard_camera::{
     VIDEO_START_CAPTURE, VIDEO_STOP_CAPTURE, WARNING,
 };
 
+use super::companion::sound::{self, Backoff, Helper};
 use super::sender::Api;
 
 /// The vendor name the ground knows a recording camera by (ADR-0066).
@@ -66,7 +80,18 @@ pub struct Config {
     pub system_id: u8,
     /// `MediaMTX`'s API, with `user:password@` when it asks for one.
     pub mediamtx_api: String,
+    /// `MediaMTX`'s RTSP server, where the joining process reads a record
+    /// path's video and publishes it with sound (ADR-0067 M7).
+    pub mediamtx_rtsp: String,
     pub paths: Vec<PathConfig>,
+}
+
+/// What recording with sound stands on (ADR-0067 M7): each camera's sound,
+/// whose `recording` port is there while it is wanted, and the
+/// `gst-launch-1.0` to run.
+pub struct Sounds {
+    pub status: tokio::sync::watch::Receiver<sound::Status>,
+    pub gst: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -374,8 +399,10 @@ fn obey(unit: &mut Unit, command: &Command, now_ms: u64) -> Vec<Vec<u8>> {
 /// What the keeper knows of one path in `MediaMTX`.
 #[derive(Default)]
 struct Kept {
-    /// What it set `record` to last.
+    /// Whether it should record, as last applied.
     applied: Option<bool>,
+    /// What it set the record path's own `record` to last.
+    alone: Option<bool>,
     /// The segments there were when the current recording started, the
     /// ones it may delete. Told by name rather than by time, as the clock
     /// of a computer with no clock battery may be set mid-flight.
@@ -384,6 +411,133 @@ struct Kept {
     said: Option<String>,
     /// The current recording has filled the disk alone, already said.
     full_said: bool,
+    /// Its recording with sound.
+    joined: Joined,
+}
+
+/// Where a camera's recording with sound comes from.
+struct Joining<'a> {
+    port: u16,
+    rtsp: &'a str,
+    gst: &'a Path,
+}
+
+/// One camera's joining process and its `<record path>_sound` path.
+#[derive(Default)]
+struct Joined {
+    helper: Option<Helper>,
+    backoff: Backoff,
+    /// The sound path's `record` as last set or read, None when unknown.
+    record: Option<bool>,
+    ready: bool,
+    /// Why joining stopped, said once.
+    said: Option<String>,
+}
+
+impl Joined {
+    /// Keeps the sound path and its joining process. Whether the sound path
+    /// is ready and records in place of the record path.
+    async fn keep(
+        &mut self,
+        api: &Api,
+        path: &str,
+        sound_path: &str,
+        conf: &serde_json::Value,
+        joining: &Joining<'_>,
+    ) -> Result<bool, String> {
+        let now = Instant::now();
+        let record = if let Some(sound) = api.path_if_any(sound_path).await? {
+            sound.get("record").and_then(serde_json::Value::as_bool)
+        } else {
+            let mut added: serde_json::Map<String, serde_json::Value> = conf
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(key, _)| key.starts_with("record") && *key != "record")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            added.insert("record".into(), false.into());
+            api.add(sound_path, &serde_json::Value::Object(added))
+                .await?;
+            tracing::info!(%path, %sound_path, "added the path that records the camera with its sound");
+            Some(false)
+        };
+        if let Some(helper) = &mut self.helper
+            && let Some((ran, why)) = helper.ended()
+        {
+            self.helper = None;
+            self.backoff.ended(ran, now);
+            self.stopped(path, why);
+        }
+        if self.helper.is_none() && self.backoff.due(now) {
+            let words = sound::joining(joining.rtsp, path, sound_path, joining.port);
+            match Helper::spawn(joining.gst, &words) {
+                Ok(helper) => {
+                    tracing::info!(%path, %sound_path, "joining the camera's sound to its recording");
+                    self.helper = Some(helper);
+                }
+                Err(error) => {
+                    self.backoff.ended(Duration::ZERO, now);
+                    self.stopped(
+                        path,
+                        format!("{} cannot be run: {error}", joining.gst.display()),
+                    );
+                }
+            }
+        }
+        let ready = self.helper.is_some() && api.ready(sound_path).await?;
+        if ready != self.ready {
+            if ready {
+                self.said = None;
+            }
+            tracing::info!(
+                %path,
+                %sound_path,
+                "recording {}",
+                if ready { "with sound" } else { "the picture alone" }
+            );
+            self.ready = ready;
+        }
+        if record != Some(ready) {
+            api.patch(sound_path, &serde_json::json!({ "record": ready }))
+                .await?;
+            tracing::info!(path = %sound_path, record = ready, "set the path's recording");
+        }
+        self.record = Some(ready);
+        Ok(ready)
+    }
+
+    fn stopped(&mut self, path: &str, why: String) {
+        if self.said.as_ref() != Some(&why) {
+            tracing::warn!(%path, %why, "cannot join the camera's sound to its recording, so its picture records alone until it can");
+            self.said = Some(why);
+        }
+    }
+
+    /// No recording with sound: the joining process stopped and the sound
+    /// path's `record` off, where `MediaMTX` has the path.
+    async fn stop(&mut self, api: &Api, sound_path: &str) -> Result<(), String> {
+        if self.helper.take().is_some() {
+            tracing::info!(%sound_path, "stopped joining the camera's sound to its recording");
+        }
+        self.backoff.reset();
+        self.ready = false;
+        self.said = None;
+        if self.record == Some(false) {
+            return Ok(());
+        }
+        let on = api
+            .path_if_any(sound_path)
+            .await?
+            .and_then(|conf| conf.get("record").and_then(serde_json::Value::as_bool));
+        if on == Some(true) {
+            api.patch(sound_path, &serde_json::json!({ "record": false }))
+                .await?;
+            tracing::info!(path = %sound_path, record = false, "set the path's recording");
+        }
+        self.record = Some(false);
+        Ok(())
+    }
 }
 
 /// Runs until stopped. `reloaded` hears the configuration read again, whose
@@ -400,6 +554,7 @@ pub async fn run(
     config: Config,
     mut reloaded: tokio::sync::watch::Receiver<Config>,
     recording: tokio::sync::watch::Sender<BTreeMap<String, f64>>,
+    mut sounds: Sounds,
 ) -> Result<(), String> {
     let api = Api::new(&config.mediamtx_api)?;
     let (host, port) = router(&config.mavlink)?;
@@ -412,6 +567,8 @@ pub async fn run(
     let mut kept: Vec<Kept> = config.paths.iter().map(|_| Kept::default()).collect();
     let mut other_system: Option<u8> = None;
     let mut unreachable = false;
+    // Why each camera has no sound, as the ground last heard it.
+    let mut no_sound: BTreeMap<String, String> = BTreeMap::new();
     tracing::info!(
         router = %config.mavlink,
         system = config.system_id,
@@ -434,6 +591,10 @@ pub async fn run(
             Ok(()) = reloaded.changed() => {
                 let new = reloaded.borrow_and_update().clone();
                 out.extend(recorder.reconfigure(&new, now_ms()));
+            }
+            Ok(()) = sounds.status.changed() => {
+                let status = sounds.status.borrow_and_update().clone();
+                out.extend(say_sound(&mut recorder, &config, &status, &mut no_sound));
             }
             received = socket.recv_from(&mut buffer) => {
                 // An error is an earlier send that went nowhere.
@@ -458,8 +619,28 @@ pub async fn run(
             if !check_disk && kept.applied == Some(*on) {
                 continue;
             }
-            let said = keep(&api, path, *on, kept, check_disk, &disk::space).await;
             let camera = &config.paths[index].camera;
+            let port = sounds
+                .status
+                .borrow()
+                .cameras
+                .get(camera)
+                .and_then(|sound| sound.recording);
+            let joining = port.map(|port| Joining {
+                port,
+                rtsp: &config.mediamtx_rtsp,
+                gst: &sounds.gst,
+            });
+            let said = keep(
+                &api,
+                path,
+                *on,
+                kept,
+                check_disk,
+                &disk::space,
+                joining.as_ref(),
+            )
+            .await;
             if let Ok((fps, _)) = &said {
                 recording.send_if_modified(|recording| match fps.filter(|_| *on) {
                     Some(fps) => recording.insert(camera.clone(), fps) != Some(fps),
@@ -513,6 +694,35 @@ pub async fn run(
     }
 }
 
+/// Says to the ground, at warning severity, why a camera has no sound when
+/// it cannot have any (ADR-0067 M4), once for each reason: from the camera's
+/// own recording component, else the first.
+fn say_sound(
+    recorder: &mut Recorder,
+    config: &Config,
+    status: &sound::Status,
+    said: &mut BTreeMap<String, String>,
+) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    for (camera, sound) in &status.cameras {
+        let (sound::State::Failed, Some(reason)) = (&sound.state, &sound.reason) else {
+            said.remove(camera);
+            continue;
+        };
+        if said.get(camera) == Some(reason) {
+            continue;
+        }
+        said.insert(camera.clone(), reason.clone());
+        let index = config
+            .paths
+            .iter()
+            .position(|p| &p.camera == camera)
+            .unwrap_or(0);
+        frames.extend(recorder.say(index, WARNING, &format!("No sound from {camera}. {reason}")));
+    }
+    frames
+}
+
 /// Notes for the ground: each one's severity and words.
 type Notes = Vec<(u8, String)>;
 
@@ -528,13 +738,40 @@ async fn keep(
     kept: &mut Kept,
     check_disk: bool,
     space: &(dyn Fn(&Path) -> std::io::Result<Space> + Sync),
+    joining: Option<&Joining<'_>>,
 ) -> Result<(Option<f64>, Option<(Space, bool, Notes)>), String> {
     let conf = api.path(path).await?;
     let fps = conf
         .get("rpiCameraFPS")
         .and_then(serde_json::Value::as_f64)
         .filter(|fps| *fps > 0.0);
-    let store = disk::Store::of(path, &conf);
+    let sound_path = format!("{path}_sound");
+    let with_sound = match joining {
+        Some(joining) if on => kept
+            .joined
+            .keep(api, path, &sound_path, &conf, joining)
+            .await
+            .unwrap_or_else(|why| {
+                kept.joined.stopped(path, why);
+                false
+            }),
+        _ => {
+            kept.joined.stop(api, &sound_path).await?;
+            false
+        }
+    };
+    let (active, other) = if with_sound {
+        (sound_path.as_str(), path)
+    } else {
+        (path, sound_path.as_str())
+    };
+    // The segments of both, which are this camera's recordings.
+    let store = disk::Store::of(active, &conf).map(|mut store| {
+        if let Ok(other) = disk::Store::of(other, &conf) {
+            store.also.push(other.dir);
+        }
+        store
+    });
     if !on {
         kept.earlier = None;
     } else if kept.earlier.is_none() {
@@ -549,14 +786,16 @@ async fn keep(
         kept.full_said = false;
     }
     let record = conf.get("record").and_then(serde_json::Value::as_bool);
-    if record != Some(on) {
-        if kept.applied == Some(on) {
+    let alone = on && !with_sound;
+    if record != Some(alone) {
+        if kept.alone == Some(alone) {
             tracing::info!(%path, "MediaMTX lost the recording's state, restarted or changed: setting it again");
         }
-        api.patch(path, &serde_json::json!({ "record": on }))
+        api.patch(path, &serde_json::json!({ "record": alone }))
             .await?;
-        tracing::info!(%path, record = on, "set the path's recording");
+        tracing::info!(%path, record = alone, "set the path's recording");
     }
+    kept.alone = Some(alone);
     kept.applied = Some(on);
     if !check_disk {
         return Ok((fps, None));

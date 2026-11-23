@@ -3,13 +3,20 @@
 //!
 //! ```text
 //! 0   u8   version, 1
-//! 1   u8   kind: 1 access unit, 2 KLV
-//! 2   u8   flags: 1 keyframe, 2 discontinuity (pictures were dropped before it)
+//! 1   u8   kind: 1 access unit, 2 KLV, 3 sound
+//! 2   u8   flags: 1 keyframe, 2 discontinuity (pictures were dropped
+//!          before it, or sound resumes after a gap)
 //! 3   u8   codec string length, 0 when unchanged since the last message
+//!          of its kind
 //! 4   u32  sequence, per socket, from 0
-//! 8   u64  timestamp, microseconds
-//! 16  ..   codec string (ASCII), then the payload: Annex B, or a KLV PES
+//! 8   u64  timestamp, microseconds, sound on the pictures' clock
+//! 16  ..   codec string (ASCII), then the payload: Annex B, a KLV PES, or
+//!          one Opus packet or raw AAC frame
 //! ```
+//!
+//! Sound (ADR-0067 M11) goes only to a socket that sent `sound on`. Its
+//! codec string is `opus/48000/<channels>`, or
+//! `mp4a.40.<object type>/<rate>/<channels>/<AudioSpecificConfig in hex>`.
 //!
 //! `packages/client/src/video/wire.ts` reads the same bytes; both test the
 //! same message.
@@ -21,6 +28,7 @@ pub const HEADER: usize = 16;
 pub enum Kind {
     AccessUnit = 1,
     Klv = 2,
+    Sound = 3,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,6 +72,7 @@ pub fn decode(b: &[u8]) -> Result<Message<'_>, &'static str> {
     let kind = match b[1] {
         1 => Kind::AccessUnit,
         2 => Kind::Klv,
+        3 => Kind::Sound,
         _ => return Err("an unknown kind"),
     };
     let codec_len = usize::from(b[3]);
@@ -118,5 +127,39 @@ mod tests {
         };
         assert_eq!(decode(&encode(&klv)), Ok(klv));
         assert!(decode(&[1; 3]).is_err());
+    }
+
+    /// The sound message `wire.test.ts` decodes too (ADR-0067 M11).
+    pub const SOUND_SAMPLE: &str = "0103000c0000000700000000000f42406f7075732f34383030302f31fc0102";
+
+    #[test]
+    fn a_sound_message_with_its_codec_round_trips_and_matches_the_client() {
+        let m = Message {
+            kind: Kind::Sound,
+            key: false,
+            discontinuity: false,
+            sequence: 7,
+            timestamp_us: 1_000_000,
+            codec: Some("opus/48000/1"),
+            payload: &[0xFC, 0x01, 0x02],
+        };
+        let bytes = encode(&m);
+        let sample: Vec<u8> = (0..SOUND_SAMPLE.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&SOUND_SAMPLE[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(bytes, sample);
+        assert_eq!(decode(&bytes), Ok(m));
+        let resumed = Message {
+            kind: Kind::Sound,
+            key: false,
+            discontinuity: true,
+            sequence: 9,
+            timestamp_us: 1_040_000,
+            codec: None,
+            payload: &[0xFC],
+        };
+        assert_eq!(encode(&resumed)[2], 2);
+        assert_eq!(decode(&encode(&resumed)), Ok(resumed));
     }
 }

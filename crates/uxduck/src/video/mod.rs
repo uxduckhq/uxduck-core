@@ -97,6 +97,10 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         self.hub.demand(source_id, needed);
     }
 
+    fn record_sound(&mut self, source_id: &str, asked: bool) {
+        self.hub.record_sound(source_id, asked);
+    }
+
     fn allow(&mut self, token: &str, source_id: &str) {
         self.hub.allow(token, source_id);
     }

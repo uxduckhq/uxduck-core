@@ -1094,3 +1094,14 @@ FlightLink.link_id
 # release has stored.
 VehicleRecording.mode
 VehicleRecording.path
+# A camera's sound and its microphone (ADR-0067 M3 and M13, 2026-11-23):
+# new types inside optional fields of a video source and a companion's
+# camera path, which no release has stored.
+CompanionMicrophone.choice
+CompanionMicrophoneDevice.card
+CompanionMicrophoneDevice.id
+CompanionMicrophoneDevice.name
+VideoSound.state
+VideoSoundCompanion.computer_id
+VideoSoundCompanion.path
+VideoSoundCompanion.vehicle_id

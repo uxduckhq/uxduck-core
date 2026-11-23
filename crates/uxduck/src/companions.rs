@@ -1639,7 +1639,9 @@ async fn run_route(
         if cameras {
             let change = input["apply"].is_object()
                 || input["linger"] == true
-                || !input["watchdog"].is_null();
+                || !input["watchdog"].is_null()
+                || input["record"].is_object()
+                || input["microphone"].is_object();
             if change {
                 timeout = CAMERA_CHANGE_TIMEOUT;
             }
@@ -2333,8 +2335,12 @@ mod tests {
             r#"{"paths": [{"name": "cam", "source": "rpiCamera", "onDemand": false, "ready": true, "readers": 1, "bytes": 123456, "cameraId": 0,
                 "settings": {"width": 1536, "height": 864, "fps": 50, "mode": "2304:1296:10:P", "idrPeriod": 50, "bitrate": 2000000},
                 "setByUxduck": true, "sensor": "imx708", "record": {"path": "cam_record", "mode": "always",
-                "settings": {"width": 1280, "height": 720, "fps": 30, "mode": "", "idrPeriod": 30, "bitrate": 4000000}}},
+                "settings": {"width": 1280, "height": 720, "fps": 30, "mode": "", "idrPeriod": 30, "bitrate": 4000000}},
+                "microphone": {"choice": "auto", "device": "usb:3-1.2"}},
                 {"name": "relay", "source": "rtsp", "onDemand": true, "ready": false, "readers": 0, "bytes": 0}],
+               "microphones": [{"id": "usb:3-1.2", "name": "USB PnP Sound Device", "card": "Device", "usb": true},
+                {"id": "card:Loopback", "name": "Loopback PCM", "card": "Loopback", "usb": false}],
+               "soundProblem": "Sound needs GStreamer on this computer, and gst-launch-1.0 is not installed.",
                "recordProblem": "[cameras.rear] has record = \"x\", which is not armed, always or off.",
                "watchdog": {"installed": true, "running": true, "gaveUp": true, "restarts": [{"atUs": 1700000000500000, "path": "cam"}]},
                "unit": "mediamtx.service", "dropIn": "/etc/systemd/system/mediamtx.service.d/60-uxduck-camera.conf",
@@ -2371,6 +2377,24 @@ mod tests {
         assert_eq!(record.settings.as_ref().unwrap().bitrate, 4_000_000);
         assert!(cameras.paths[1].record.is_none());
         assert!(cameras.record_problem.unwrap().contains("[cameras.rear]"));
+        let microphone = cam.microphone.as_ref().unwrap();
+        assert_eq!(
+            (microphone.choice.as_str(), microphone.device.as_deref()),
+            ("auto", Some("usb:3-1.2"))
+        );
+        assert!(cameras.paths[1].microphone.is_none());
+        assert_eq!(
+            cameras
+                .microphones
+                .iter()
+                .map(|m| (m.id.as_str(), m.name.as_str(), m.card.as_str(), m.usb))
+                .collect::<Vec<_>>(),
+            [
+                ("usb:3-1.2", "USB PnP Sound Device", "Device", true),
+                ("card:Loopback", "Loopback PCM", "Loopback", false)
+            ]
+        );
+        assert!(cameras.sound_problem.unwrap().contains("GStreamer"));
     }
 
     #[test]

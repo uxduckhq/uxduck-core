@@ -11,7 +11,7 @@ use uxduck_contracts::dto::companion::{
     ComputerAddParams, ComputerCheckParams, ComputerNetworkParams, ComputerParams,
     ComputerRenameParams, ComputerRouteParams, WifiSecurity,
 };
-use uxduck_contracts::dto::companion_cameras::ComputerCamerasParams;
+use uxduck_contracts::dto::companion_cameras::{ComputerCamerasParams, MicrophoneParams};
 use uxduck_contracts::dto::vehicle::Vehicle as VehicleDto;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_core::domain::companion::{
@@ -223,6 +223,58 @@ impl std::fmt::Debug for Companions {
 
 fn invalid(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorKind::InvalidValue, message)
+}
+
+/// A camera's microphone choice, when one is asked for, against the last
+/// read (ADR-0067 M3, M14): the camera must be one `uxduck companion`
+/// sends, and the choice `auto`, `none`, a listed device or a well-formed
+/// id of one not plugged in now. The computer checks it again before writing.
+fn check_microphone(
+    computer: &CompanionComputer,
+    microphone: Option<&MicrophoneParams>,
+) -> Result<(), ApiError> {
+    let Some(microphone) = microphone else {
+        return Ok(());
+    };
+    let cameras = computer.check.as_ref().and_then(|c| c.cameras.as_ref());
+    if cameras
+        .and_then(|c| c.paths.iter().find(|p| p.name == microphone.path))
+        .is_none_or(|p| p.microphone.is_none())
+    {
+        return Err(invalid(format!(
+            "uxduck companion on {} does not send {}, so it has no microphone to choose. Read its cameras again.",
+            computer.name, microphone.path
+        )));
+    }
+    let listed = cameras.is_some_and(|c| c.microphones.iter().any(|m| m.id == microphone.choice));
+    if !listed && !microphone_choice(&microphone.choice) {
+        return Err(invalid(format!(
+            "{} is not a microphone on {}. Choose Automatic, None, a microphone it lists, or one not plugged in now by its id, such as usb:1-1.2 or card:Device.",
+            microphone.choice.chars().take(80).collect::<String>(),
+            computer.name
+        )));
+    }
+    Ok(())
+}
+
+/// Whether a microphone choice is `auto`, `none` or a well-formed device
+/// id, `usb:<bus path>` or `card:<ALSA id>`, so a device not plugged in now
+/// can still be chosen.
+fn microphone_choice(choice: &str) -> bool {
+    if matches!(choice, "auto" | "none") {
+        return true;
+    }
+    if let Some(card) = choice.strip_prefix("card:") {
+        return !card.is_empty()
+            && card
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    }
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    choice
+        .strip_prefix("usb:")
+        .and_then(|bus| bus.split_once('-'))
+        .is_some_and(|(root, ports)| digits(root) && ports.split('.').all(digits))
 }
 
 fn busy() -> ApiError {
@@ -728,7 +780,8 @@ impl Engine {
         let changes = usize::from(params.apply.is_some())
             + usize::from(params.linger)
             + usize::from(params.watchdog.is_some())
-            + usize::from(params.record.is_some());
+            + usize::from(params.record.is_some())
+            + usize::from(params.microphone.is_some());
         if changes > 1 {
             return Err(invalid("Make one camera change at a time."));
         }
@@ -788,6 +841,7 @@ impl Engine {
                 )));
             }
         }
+        check_microphone(computer, params.microphone.as_ref())?;
         let waits = self.take_computer(&computer.id, false)?;
         let input = if changes == 0 {
             "{}".to_owned()
@@ -797,6 +851,7 @@ impl Engine {
                 "linger": params.linger,
                 "watchdog": params.watchdog,
                 "record": params.record,
+                "microphone": params.microphone,
             })
             .to_string()
         };

@@ -2,8 +2,8 @@
 //! computer runs, in one shape that the app's vehicle page also reads and
 //! writes. `[video]` turns on the video sender, `[mavlink]` names the vehicle's
 //! router, and each `[cameras.<path>]` table is a camera by its `MediaMTX`
-//! path: whether it follows the connection, its floor, and where and when it
-//! records on the vehicle.
+//! path: whether it follows the connection, its floor, where and when it
+//! records on the vehicle, and its microphone (ADR-0067 M3).
 //!
 //! ```toml
 //! [video]
@@ -18,13 +18,18 @@
 //! floor_bitrate = 150000
 //! record_path = "front_record"
 //! record = "armed"
+//! microphone = "auto"
 //! ```
+
+pub mod microphones;
+pub mod sound;
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Deserialize;
 
+use self::microphones::Choice;
 use super::onboard_recording::{self, Mode, PathConfig};
 use super::sender::{self, CameraConfig};
 
@@ -71,6 +76,9 @@ pub struct Camera {
     pub record_path: Option<String>,
     /// When it records: `armed` when unset.
     pub record: Option<Mode>,
+    /// Where its sound comes from: `auto`, `none` or a device's id, `auto`
+    /// when unset. A reload applies it.
+    pub microphone: Option<Choice>,
 }
 
 fn default_router() -> String {
@@ -157,18 +165,32 @@ impl File {
                 .video
                 .as_ref()
                 .map_or_else(sender::default_api, |v| v.mediamtx_api.clone()),
+            mediamtx_rtsp: self
+                .video
+                .as_ref()
+                .map_or_else(sender::default_rtsp, |v| v.mediamtx_rtsp.clone()),
             paths,
         })
     }
 
-    /// Whether `newer` changes more than the recording modes, which a reload
-    /// applies. The rest needs a restart.
+    /// Each camera's microphone by its path (ADR-0067 M3).
+    #[must_use]
+    pub fn microphones(&self) -> BTreeMap<String, Choice> {
+        self.cameras
+            .iter()
+            .map(|(path, camera)| (path.clone(), camera.microphone.clone().unwrap_or_default()))
+            .collect()
+    }
+
+    /// Whether `newer` changes more than the recording modes and the
+    /// microphones, which a reload applies. The rest needs a restart.
     #[must_use]
     pub fn beyond_modes(&self, newer: &Self) -> bool {
         let without_modes = |file: &Self| {
             let mut file = file.clone();
             for camera in file.cameras.values_mut() {
                 camera.record = None;
+                camera.microphone = None;
             }
             file
         };

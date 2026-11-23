@@ -128,6 +128,7 @@ mod vehicle_kind;
 mod vehicles;
 mod version;
 pub mod video;
+pub mod video_sound;
 mod watch_link;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

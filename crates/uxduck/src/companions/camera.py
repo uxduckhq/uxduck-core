@@ -2,12 +2,13 @@
 
 Input is JSON on stdin. {} reads. A change is one of
 {"apply": {"path", "settings", "despiteLinger"}}, {"linger": true},
-{"watchdog": "install" | "remove", "watchdogScript": "..."} or
-{"record": {"path", "mode"}}, run as root through sudo -n. It prints
-"cameras=<json>": the systemd unit running MediaMTX, its paths as MediaMTX's
-local API has them, lingering for the unit's user, the camera watchdog, and
-each camera's recording on the vehicle from /etc/uxduck/companion.toml
-(ADR-0066 R10).
+{"watchdog": "install" | "remove", "watchdogScript": "..."},
+{"record": {"path", "mode"}} or {"microphone": {"path", "choice"}}, run as
+root through sudo -n. It prints "cameras=<json>": the systemd unit running
+MediaMTX, its paths as MediaMTX's local API has them, lingering for the
+unit's user, the camera watchdog, each camera's recording on the vehicle and
+microphone from /etc/uxduck/companion.toml (ADR-0066 R10, ADR-0067 M3), and
+the computer's microphones (ADR-0067 M2).
 
 A picture is written as MediaMTX's own environment overrides in one systemd
 drop-in UXDuck owns, never into the person's YAML. The restart that applies
@@ -21,6 +22,7 @@ import os
 import pathlib
 import pwd
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -42,6 +44,17 @@ WATCHDOG_STATE = pathlib.Path("/run/uxduck/camera-watchdog.json")
 COMPANION_TOML = pathlib.Path("/etc/uxduck/companion.toml")
 COMPANION_UNIT = "uxduck-companion.service"
 RECORD_MODES = ("armed", "always", "off")
+# Where the kernel lists sound cards (ADR-0067 M2): /proc/asound/cards, each
+# card's pcm<N>c capture folders, and /sys/class/sound/card<N>/device.
+ASOUND = pathlib.Path("/proc/asound")
+SOUND_CLASS = pathlib.Path("/sys/class/sound")
+CARD_LINE = re.compile(r"^\s*(\d+)\s+\[([^\]]*)\]:\s*.*? - (.*?)\s*$")
+CAPTURE = re.compile(r"pcm(\d+)c")
+USB_INTERFACE = re.compile(r"(\d+-\d+(?:\.\d+)*):\d+\.\d+")
+# A device id as companion.toml keeps it: usb:<bus path> or card:<ALSA id>.
+MICROPHONE_ID = re.compile(r"usb:[0-9]+-[0-9]+(?:\.[0-9]+)*|card:[A-Za-z0-9_-]+")
+GSTREAMER = "gst-launch-1.0"
+GSTREAMER_PACKAGES = "gstreamer1.0-tools, gstreamer1.0-alsa, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good and gstreamer1.0-rtsp"
 # The [cameras.<path>] tables UXDuck reads and writes in companion.toml
 # (ADR-0066 R10): standard tables of basic strings, one key to a line.
 CAMERAS_TABLE = re.compile(r'^\s*\[\s*cameras\.(?:"([^"\\]+)"|([A-Za-z0-9_-]+))\s*\]\s*(?:#.*)?$')
@@ -383,12 +396,14 @@ def read():
                 entry["sensor"] = sensor
         status["paths"].append(entry)
     recordings(status)
+    sound(status)
     return status
 
 
-def record_tables(text):
+def camera_tables(text):
     """Each [cameras.<path>] table of companion.toml: its record_path, its
-    record mode, the line of its header and the line of its record key."""
+    record mode and microphone, the line of its header and the lines of its
+    record and microphone keys by key."""
     tables, current = {}, None
     for number, line in enumerate(text.splitlines()):
         table = CAMERAS_TABLE.match(line)
@@ -402,7 +417,11 @@ def record_tables(text):
         if key and key.group(1) == "record_path":
             current["recordPath"] = key.group(2)
         elif key and key.group(1) == "record":
-            current["mode"], current["modeLine"] = key.group(2), number
+            current["mode"] = key.group(2)
+            current.setdefault("lines", {})["record"] = number
+        elif key and key.group(1) == "microphone":
+            current["microphone"] = key.group(2)
+            current.setdefault("lines", {})["microphone"] = number
     return tables
 
 
@@ -419,7 +438,7 @@ def recordings(status):
         return
     by_name = {p["name"]: p for p in status["paths"]}
     recorded, problems = set(), []
-    for name, table in record_tables(text).items():
+    for name, table in camera_tables(text).items():
         path, mode = table.get("recordPath"), table.get("mode", "armed")
         if not path or name not in by_name:
             continue
@@ -436,6 +455,95 @@ def recordings(status):
         status["recordProblem"] = " ".join(problems)
 
 
+def microphones(asound=None, sound_class=None):
+    """The sound capture devices in card order (ADR-0067 M2): cards with a
+    pcm<N>c folder, known by their USB bus path or else their ALSA id. The
+    same rules as uxduck companion's, tested on the same fake trees."""
+    asound, sound_class = asound or ASOUND, sound_class or SOUND_CLASS
+    try:
+        lines = (asound / "cards").read_text().splitlines()
+    except FileNotFoundError:
+        return []
+    found = []
+    for line in lines:
+        match = CARD_LINE.match(line)
+        if not match:
+            continue
+        number, folder = match.group(1), asound / ("card" + match.group(1))
+        captures = sorted(int(m.group(1)) for m in (CAPTURE.fullmatch(p.name) for p in folder.glob("pcm*c")) if m)
+        if not captures:
+            continue
+        try:
+            card = (folder / "id").read_text().strip() or match.group(2).strip()
+        except OSError:
+            card = match.group(2).strip()
+        device = os.path.basename(os.path.realpath(sound_class / ("card" + number) / "device"))
+        usb = USB_INTERFACE.fullmatch(device)
+        found.append({"id": "usb:" + usb.group(1) if usb else "card:" + card, "name": match.group(3) or card,
+                      "card": card, "usb": bool(usb), "alsa": "hw:CARD=" + card + ",DEV=" + str(captures[0])})
+    return found
+
+
+def automatic(devices):
+    """The device Automatic chooses: the only one, else the first USB one, else none (ADR-0067 M3)."""
+    if len(devices) == 1:
+        return devices[0]["id"]
+    return next((d["id"] for d in devices if d["usb"]), None)
+
+
+def sound(status):
+    """Lists the microphones, attaches each camera's choice and the device it
+    gives now, and says when a camera wants sound and GStreamer is missing.
+    A file that does not read is said by recordings."""
+    try:
+        tables = camera_tables(COMPANION_TOML.read_text())
+    except (OSError, UnicodeDecodeError):
+        tables = {}
+    devices = microphones()
+    status["microphones"] = [{key: d[key] for key in ("id", "name", "card", "usb")} for d in devices]
+    ids = {d["id"] for d in devices}
+    wanting = []
+    for path in status["paths"]:
+        table = tables.get(path["name"])
+        if table is None:
+            continue
+        choice = table.get("microphone", "auto")
+        device = automatic(devices) if choice == "auto" else choice if choice in ids else None
+        path["microphone"] = {"choice": choice, **({"device": device} if device else {})}
+        # A camera on Automatic with no microphone plugged in needs nothing new (ADR-0067).
+        if choice != "none" and (device or choice != "auto"):
+            wanting.append(path["name"])
+    if wanting and not shutil.which(GSTREAMER):
+        status["soundProblem"] = ("Sound needs GStreamer on this computer, and " + GSTREAMER + " is not installed. Install " +
+                                  GSTREAMER_PACKAGES + ".")
+
+
+def write_table_key(table, key, value, saved):
+    """Writes one key of one [cameras.<path>] table, adding it under the
+    header when missing, keeps a copy of the file as it was beside it, keeps
+    every other line and the file's mode, and has uxduck companion read the
+    file again. saved names the change for the words when the reload fails."""
+    text = COMPANION_TOML.read_text()
+    lines = text.splitlines(keepends=True)
+    entry = key + ' = "' + value + '"\n'
+    line = table.get("lines", {}).get(key)
+    if line is not None:
+        lines[line] = entry
+    else:
+        if not lines[table["header"]].endswith("\n"):
+            lines[table["header"]] += "\n"
+        lines.insert(table["header"] + 1, entry)
+    mode = COMPANION_TOML.stat().st_mode & 0o777
+    write_atomic(COMPANION_TOML.with_name(COMPANION_TOML.name + ".bak"), text.encode(), mode=mode)
+    write_atomic(COMPANION_TOML, "".join(lines).encode(), mode=mode)
+    if active(COMPANION_UNIT):
+        try:
+            run("systemctl", "reload", "--", COMPANION_UNIT, timeout=30)
+        except (RuntimeError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(saved + " in " + str(COMPANION_TOML) + ", but uxduck companion did not read it again (" +
+                               str(error)[:200] + "). It takes effect when uxduck companion next starts.") from error
+
+
 def set_record(change, found):
     """Writes one camera's record mode into companion.toml, keeping every
     other line as it was, and has uxduck companion read the file again."""
@@ -446,26 +554,28 @@ def set_record(change, found):
         raise ValueError("Record on the vehicle is armed, always or off.")
     if not any(p["name"] == name and p.get("record") for p in found["paths"]):
         raise ValueError("This computer does not record " + str(name)[:80] + " on the vehicle. Set up recording on the vehicle first.")
-    text = COMPANION_TOML.read_text()
-    table = record_tables(text).get(name)
+    table = camera_tables(COMPANION_TOML.read_text()).get(name)
     if not table or not table.get("recordPath"):
         raise ValueError("[cameras." + str(name)[:80] + "] in " + str(COMPANION_TOML) + " has no record_path, so it does not record on the vehicle. Read its cameras again.")
-    lines = text.splitlines(keepends=True)
-    entry = 'record = "' + mode + '"\n'
-    if "modeLine" in table:
-        lines[table["modeLine"]] = entry
-    else:
-        if not lines[table["header"]].endswith("\n"):
-            lines[table["header"]] += "\n"
-        lines.insert(table["header"] + 1, entry)
-    write_atomic(COMPANION_TOML, "".join(lines).encode(), mode=COMPANION_TOML.stat().st_mode & 0o777)
-    if active(COMPANION_UNIT):
-        try:
-            run("systemctl", "reload", "--", COMPANION_UNIT, timeout=30)
-        except (RuntimeError, subprocess.TimeoutExpired) as error:
-            raise RuntimeError("Record on the vehicle is saved as " + mode + " in " + str(COMPANION_TOML) +
-                               ", but uxduck companion did not read it again (" + str(error)[:200] +
-                               "). It takes effect when uxduck companion next starts.") from error
+    write_table_key(table, "record", mode, "Record on the vehicle is saved as " + mode)
+
+
+def set_microphone(change, found):
+    """Writes one camera's microphone into companion.toml (ADR-0067 M3), as
+    set_record writes its mode. A device that is not plugged in now can be
+    chosen by its id, and gives no sound until it is."""
+    if not isinstance(change, dict):
+        raise ValueError("The microphone change is missing.")
+    name, choice = change.get("path"), change.get("choice")
+    if not any(p["name"] == name and p.get("microphone") for p in found["paths"]):
+        raise ValueError("uxduck companion does not send " + str(name)[:80] + " on this computer, so it has no microphone to choose. Read its cameras again.")
+    known = {m["id"] for m in found.get("microphones", [])}
+    if not isinstance(choice, str) or not (choice in ("auto", "none") or choice in known or MICROPHONE_ID.fullmatch(choice)):
+        raise ValueError(str(choice)[:80] + " is not a microphone on this computer. Choose auto, none, a microphone it lists, or one not plugged in now by its id, such as usb:1-1.2 or card:Device.")
+    table = camera_tables(COMPANION_TOML.read_text()).get(name)
+    if not table:
+        raise ValueError(str(COMPANION_TOML) + " has no [cameras." + str(name)[:80] + "] table. Read its cameras again.")
+    write_table_key(table, "microphone", choice, "The microphone for " + name + " is saved as " + choice)
 
 
 def own_source():
@@ -631,7 +741,7 @@ def remove_watchdog():
 
 def main():
     request = json.loads(sys.stdin.read() or "{}")
-    changes = [key for key in ("apply", "linger", "watchdog", "record") if request.get(key)]
+    changes = [key for key in ("apply", "linger", "watchdog", "record", "microphone") if request.get(key)]
     if len(changes) > 1:
         raise ValueError("Make one camera change at a time.")
     found = read()
@@ -648,6 +758,8 @@ def main():
         raise ValueError("Install or remove the watchdog.")
     elif request.get("record"):
         set_record(request["record"], found)
+    elif request.get("microphone"):
+        set_microphone(request["microphone"], found)
     if changes:
         found = read()
     if applied:

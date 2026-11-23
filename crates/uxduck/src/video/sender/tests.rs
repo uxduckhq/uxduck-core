@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use super::mediamtx::tests::{FRONT, Fake, rpi};
 use super::*;
+use crate::video::companion::microphones;
 use crate::video::whep::tests::{INTERNET, Node, RADIO, camera};
 
 /// 160×90 at 30 pictures a second, a keyframe first: one second of
@@ -89,6 +90,7 @@ async fn sender(fake: &Fake, state: &std::path::Path) -> Running {
             follow: true,
         }],
         recording: watch::channel(BTreeMap::new()).1,
+        sound: silent(),
     })
     .await
     .unwrap()
@@ -265,6 +267,7 @@ async fn a_whep_picture_that_runs_late_keeps_its_session_and_the_sender_says_why
             follow: true,
         }],
         recording: watch::channel(BTreeMap::new()).1,
+        sound: silent(),
     })
     .await
     .unwrap();
@@ -421,6 +424,7 @@ async fn a_port_in_use_stops_the_start_and_says_why() {
             follow: true,
         }],
         recording: watch::channel(BTreeMap::new()).1,
+        sound: silent(),
     })
     .await
     .err()
@@ -448,6 +452,7 @@ async fn the_sender_reads_a_mediamtx_path_over_rtsp_and_the_daemon_plays_it() {
             follow: true,
         }],
         recording: watch::channel(BTreeMap::new()).1,
+        sound: silent(),
     })
     .await
     .unwrap();
@@ -474,4 +479,368 @@ async fn the_sender_reads_a_mediamtx_path_over_rtsp_and_the_daemon_plays_it() {
     assert_eq!(now["cameras"][0]["source"], "publisher");
     assert!(now["cameras"][0]["following"].is_null());
     assert!(now["cameras"][0]["readBitrate"].as_u64().unwrap() > 500_000);
+}
+
+/// No sound: a feed whose manager never says anything.
+fn silent() -> Feed {
+    Feed {
+        status: watch::channel(sound::Status::default()).1,
+        packets: mpsc::channel(1).1,
+    }
+}
+
+/// The sender of the camera `cam` with its sound from the real manager
+/// on the fake microphones at `root`, run by the fake `gst-launch-1.0`.
+#[cfg(unix)]
+async fn sender_with_sound(
+    fake: &Fake,
+    state: &std::path::Path,
+    root: &std::path::Path,
+    choice: microphones::Choice,
+) -> (
+    Running,
+    watch::Sender<BTreeMap<String, microphones::Choice>>,
+) {
+    let gst = sound::tests::fake_gst(state, false);
+    let (choices, choices_rx) = watch::channel(BTreeMap::from([("cam".to_owned(), choice)]));
+    let manager = sound::start(
+        sound::Environment {
+            root: root.to_owned(),
+            source: None,
+            gst,
+        },
+        choices_rx,
+    )
+    .await
+    .unwrap();
+    let running = start(Options {
+        api: Api::new(&fake.url).unwrap(),
+        hosts: Hosts::Addresses(vec![RADIO.into()]),
+        whep: SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        udp_port: 0,
+        state_file: state.join("video-sender.json"),
+        cameras: vec![CameraConfig {
+            path: "cam".into(),
+            floor_bitrate: FLOOR,
+            follow: true,
+        }],
+        recording: watch::channel(BTreeMap::new()).1,
+        sound: manager.feed,
+    })
+    .await
+    .unwrap();
+    (running, choices)
+}
+
+/// What a viewer that offers sound has received.
+#[derive(Default)]
+struct Heard {
+    pictures: u64,
+    audio_bytes: u64,
+    /// Each sound packet's time on the stream, at 48 kHz.
+    audio_times: Vec<u64>,
+}
+
+/// A viewer as the daemon will be (ADR-0067 M9): an offer with a `recvonly`
+/// video m-line and a `recvonly` Opus m-line. The session's address, and
+/// what it hears.
+async fn viewer_with_sound(
+    running: &Running,
+) -> (
+    String,
+    Arc<std::sync::Mutex<Heard>>,
+    tokio::task::JoinHandle<()>,
+) {
+    use str0m::change::SdpAnswer;
+    use str0m::media::Direction;
+    let socket = UdpSocket::bind((RADIO, 0)).await.unwrap();
+    let local = socket.local_addr().unwrap();
+    let mut rtc = RtcConfig::new()
+        .clear_codecs()
+        .enable_h264(true)
+        .enable_opus(true, false)
+        .build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
+    let mut change = rtc.sdp_api();
+    let video = change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+    let audio = change.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None);
+    let (offer, pending) = change.apply().unwrap();
+    let response = reqwest::Client::new()
+        .post(whep(RADIO, running))
+        .header("content-type", "application/sdp")
+        .body(offer.to_sdp_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    assert!(
+        response.headers()["server"]
+            .to_str()
+            .unwrap()
+            .starts_with("UXDuck/")
+    );
+    let location = response.headers()["location"].to_str().unwrap().to_owned();
+    let answer = response.text().await.unwrap();
+    let audio_line = answer
+        .split("m=")
+        .find(|m| m.starts_with("audio"))
+        .expect("an audio m-line in the answer");
+    assert!(audio_line.contains("a=sendonly"), "{audio_line}");
+    assert!(audio_line.contains("opus/48000/2"), "{audio_line}");
+    rtc.sdp_api()
+        .accept_answer(pending, SdpAnswer::from_sdp_string(&answer).unwrap())
+        .unwrap();
+    let heard = Arc::new(std::sync::Mutex::new(Heard::default()));
+    let into = heard.clone();
+    let task = tokio::spawn(async move {
+        let kinds = HashMap::from([(video, MediaKind::Video), (audio, MediaKind::Audio)]);
+        let mut buffer = vec![0_u8; 2048];
+        loop {
+            let timeout = loop {
+                match rtc.poll_output().unwrap() {
+                    Output::Timeout(at) => break at,
+                    Output::Transmit(t) => {
+                        let _ = socket.send_to(&t.contents, t.destination).await;
+                    }
+                    Output::Event(Event::MediaData(data)) => {
+                        let mut heard = into.lock().unwrap();
+                        match kinds.get(&data.mid) {
+                            Some(MediaKind::Audio) => {
+                                heard.audio_bytes += data.data.len() as u64;
+                                heard.audio_times.push(data.time.numer());
+                            }
+                            Some(MediaKind::Video) => heard.pictures += 1,
+                            None => {}
+                        }
+                    }
+                    Output::Event(_) => {}
+                }
+            };
+            let wait = timeout.saturating_duration_since(Instant::now());
+            let input = match tokio::time::timeout(wait, socket.recv_from(&mut buffer)).await {
+                Ok(Ok((n, from))) => Input::Receive(
+                    Instant::now(),
+                    Receive {
+                        proto: Protocol::Udp,
+                        source: from,
+                        destination: local,
+                        contents: buffer[..n].try_into().unwrap(),
+                    },
+                ),
+                _ => Input::Timeout(Instant::now()),
+            };
+            if rtc.handle_input(input).is_err() {
+                return;
+            }
+        }
+    });
+    let session = format!("http://127.0.0.1:{}{location}", running.http.port());
+    (session, heard, task)
+}
+
+async fn sound_of(session: &str) -> serde_json::Value {
+    let response = reqwest::get(session).await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    response.json::<serde_json::Value>().await.unwrap()["sound"].clone()
+}
+
+async fn ask_for_sound(session: &str, on: bool) -> serde_json::Value {
+    let response = reqwest::Client::new()
+        .patch(session)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "sound": on }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    response.json::<serde_json::Value>().await.unwrap()["sound"].clone()
+}
+
+fn heard(heard: &std::sync::Mutex<Heard>) -> (u64, u64) {
+    let heard = heard.lock().unwrap();
+    (heard.pictures, heard.audio_bytes)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_hears_the_camera_only_between_asking_and_stopping_and_the_picture_goes_on() {
+    let fake = Fake::start(&[("cam", rpi(FRONT))]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = microphones::tests::fixtures().join("one-usb");
+    let (running, _choices) =
+        sender_with_sound(&fake, dir.path(), &root, microphones::Choice::Auto).await;
+    feed(&running, "cam");
+    let (session, listened, _task) = viewer_with_sound(&running).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let (pictures, audio) = heard(&listened);
+    assert!(pictures > 50, "{pictures} pictures");
+    assert_eq!(audio, 0, "no sound before the viewer asks");
+    let before = sound_of(&session).await;
+    assert_eq!(
+        before,
+        serde_json::json!({
+            "state": "available",
+            "on": false,
+            "microphone": { "id": "usb:3-1.2", "name": "USB PnP Sound Device", "card": "Device", "usb": true },
+            "codec": "Opus, 48 kHz, mono",
+            "bitrate": null,
+            "reason": null,
+        })
+    );
+
+    let on = ask_for_sound(&session, true).await;
+    assert_eq!(
+        (&on["state"], &on["on"]),
+        (&"sending".into(), &true.into()),
+        "{on}"
+    );
+    let bitrate = on["bitrate"].as_u64().unwrap();
+    assert!(
+        STEPS.iter().any(|s| u64::from(s.bitrate) == bitrate),
+        "{bitrate}"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (pictures_on, audio_on) = heard(&listened);
+    assert!(audio_on > 50, "{audio_on} bytes of sound in 2 s");
+    assert!(pictures_on > pictures + 40, "the picture went on");
+    {
+        let heard = listened.lock().unwrap();
+        assert!(
+            heard.audio_times.windows(2).all(|w| w[1] > w[0]),
+            "the sound's times only grow"
+        );
+    }
+    let status = status(&running).await;
+    println!("{status:#}");
+    assert_eq!(status["microphones"][0]["id"], "usb:3-1.2");
+    let cam = &status["cameras"][0];
+    assert_eq!(cam["sound"]["state"], "sending");
+    assert_eq!(cam["listeners"], 1);
+    assert!(cam["sound"].get("on").is_none());
+
+    let off = ask_for_sound(&session, false).await;
+    assert_eq!(
+        (&off["state"], &off["on"]),
+        (&"available".into(), &false.into())
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (pictures_off, audio_off) = heard(&listened);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let (pictures_later, audio_later) = heard(&listened);
+    assert_eq!(audio_later, audio_off, "no sound after the viewer stopped");
+    assert!(pictures_later > pictures_off + 30, "the picture went on");
+
+    let bad = reqwest::Client::new()
+        .patch(&session)
+        .header("content-type", "application/json")
+        .body("{\"sound\": \"yes\"}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+    assert!(!bad.text().await.unwrap().contains(';'));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_says_when_there_is_no_microphone_or_the_chosen_one_is_unplugged() {
+    let fake = Fake::start(&[("cam", rpi(FRONT))]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = microphones::tests::fixtures().join("none");
+    let (running, choices) =
+        sender_with_sound(&fake, dir.path(), &root, microphones::Choice::Auto).await;
+    let (session, _listened, _task) = viewer_with_sound(&running).await;
+    let sound = sound_of(&session).await;
+    assert_eq!(
+        sound,
+        serde_json::json!({
+            "state": "noMicrophone",
+            "on": false,
+            "microphone": null,
+            "codec": null,
+            "bitrate": null,
+            "reason": null,
+        })
+    );
+    let asked = ask_for_sound(&session, true).await;
+    assert_eq!(
+        (&asked["state"], &asked["on"]),
+        (&"noMicrophone".into(), &true.into()),
+        "asked, and nothing to send"
+    );
+
+    choices.send_replace(BTreeMap::from([(
+        "cam".to_owned(),
+        microphones::Choice::Device("usb:3-1.2".into()),
+    )]));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let sound = sound_of(&session).await;
+    assert_eq!(sound["state"], "unplugged");
+    assert_eq!(
+        sound["reason"],
+        "The microphone usb:3-1.2 is not plugged in."
+    );
+    assert_eq!(sound["on"], true);
+    let gone = reqwest::get(format!(
+        "http://127.0.0.1:{}/cam/whep/0123",
+        running.http.port()
+    ))
+    .await
+    .unwrap();
+    assert_eq!(gone.status(), 404);
+}
+
+#[tokio::test]
+async fn the_status_lists_the_microphones_and_each_cameras_sound() {
+    let fake = Fake::start(&[("cam", rpi(FRONT))]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (status_tx, status_rx) = watch::channel(sound::Status::default());
+    let running = start(Options {
+        api: Api::new(&fake.url).unwrap(),
+        hosts: Hosts::Addresses(vec![RADIO.into()]),
+        whep: SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        udp_port: 0,
+        state_file: dir.path().join("video-sender.json"),
+        cameras: vec![CameraConfig {
+            path: "cam".into(),
+            floor_bitrate: FLOOR,
+            follow: true,
+        }],
+        recording: watch::channel(BTreeMap::new()).1,
+        sound: Feed {
+            status: status_rx,
+            packets: mpsc::channel(1).1,
+        },
+    })
+    .await
+    .unwrap();
+    status_tx.send_replace(sound::Status {
+        microphones: Vec::new(),
+        cameras: BTreeMap::from([(
+            "cam".to_owned(),
+            sound::CameraSound {
+                state: sound::State::Failed,
+                microphone: None,
+                reason: Some("GStreamer is not installed.".into()),
+                recording: None,
+            },
+        )]),
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let now = status(&running).await;
+    assert_eq!(now["microphones"], serde_json::json!([]));
+    assert_eq!(
+        now["cameras"][0]["sound"],
+        serde_json::json!({
+            "state": "failed",
+            "microphone": null,
+            "codec": null,
+            "bitrate": null,
+            "reason": "GStreamer is not installed.",
+        })
+    );
+    assert_eq!(now["cameras"][0]["listeners"], 0);
 }

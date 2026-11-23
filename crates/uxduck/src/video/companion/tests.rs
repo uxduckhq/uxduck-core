@@ -1,6 +1,7 @@
 //! The companion's file: the shape the app's vehicle page reads and writes,
 //! its defaults and the errors a person can act on.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use super::*;
@@ -47,6 +48,7 @@ fn the_planes_file_turns_on_the_sender_and_the_recorder() {
             mavlink: "udp:127.0.0.1:15010".into(),
             system_id: 1,
             mediamtx_api: "http://127.0.0.1:9997".into(),
+            mediamtx_rtsp: "rtsp://127.0.0.1:8554".into(),
             paths: vec![PathConfig {
                 path: "front_record".into(),
                 camera: "front".into(),
@@ -163,4 +165,42 @@ fn a_reload_applies_the_recording_modes_and_names_the_rest() {
     assert!(file.beyond_modes(&path));
     let router = File::parse(&PLANE.replace("15010", "15011")).unwrap();
     assert!(file.beyond_modes(&router));
+}
+
+#[test]
+fn a_cameras_microphone_is_auto_unless_set_and_a_reload_applies_it() {
+    let file = File::parse(PLANE).unwrap();
+    assert_eq!(file.cameras["front"].microphone, None);
+    assert_eq!(
+        file.microphones(),
+        BTreeMap::from([("front".to_owned(), Choice::Auto)])
+    );
+    for (line, choice) in [
+        ("auto", Choice::Auto),
+        ("none", Choice::None),
+        ("usb:3-1.2", Choice::Device("usb:3-1.2".into())),
+        ("card:Loopback", Choice::Device("card:Loopback".into())),
+    ] {
+        let chosen = File::parse(&format!("{PLANE}microphone = \"{line}\"\n")).unwrap();
+        assert_eq!(chosen.microphones()["front"], choice);
+        assert!(
+            !file.beyond_modes(&chosen),
+            "a changed microphone applies on a reload: {line}"
+        );
+    }
+}
+
+#[test]
+fn a_microphone_that_is_not_auto_none_or_a_devices_id_says_what_it_takes() {
+    for wrong in ["hw:1,0", "Auto", "usb:", "default"] {
+        let said = error(&format!("{PLANE}microphone = \"{wrong}\"\n"));
+        assert!(said.contains("does not read"), "{said}");
+        assert!(
+            said.contains(&format!(
+                "microphone = \"{wrong}\" is not \"auto\", \"none\" or a device's id such as \"usb:1-1.2\" or \"card:Loopback\""
+            )),
+            "{said}"
+        );
+    }
+    assert!(error(&format!("{PLANE}microphone = 2\n")).contains("does not read"));
 }

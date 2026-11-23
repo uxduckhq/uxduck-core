@@ -7,7 +7,10 @@
 //! A sound track (S149) is set up on channels 4 and 5 beside the video and
 //! any KLV, its frames lined up with the pictures by PLAY's `RTP-Info` and
 //! the two tracks' RTCP sender reports. Sound UXDuck does not record is
-//! named and not set up.
+//! named and not set up. A sound track is set up only while this computer
+//! wants the camera's sound, a window listening or a recording taking it,
+//! and the session is opened again when that changes (ADR-0067 M8, M10),
+//! so the picture waits for its next keyframe.
 //!
 //! The keepalive's `GET_PARAMETER` is timed by its `CSeq`, and the video's
 //! sender reports by when they were read: together they measure the
@@ -877,6 +880,10 @@ struct Prepared {
     sound: Option<(SoundPlaying, String)>,
     /// What the source says about the sound, set up or not.
     sound_description: Option<Sound>,
+    /// It has a sound track UXDuck records, and it was set up for it when
+    /// sound was wanted (ADR-0067 M10).
+    sound_track: bool,
+    sound_wanted: bool,
     note: Option<String>,
     keepalive: Duration,
     /// The `Server` header, which says whether its sender reports are
@@ -986,13 +993,15 @@ async fn start_playing(
     }))
 }
 
-/// DESCRIBE, and SETUP of the chosen track and any KLV and sound tracks:
-/// everything but PLAY. `offered` hears the tracks as soon as they are
-/// known, even when the one chosen is not among them.
+/// DESCRIBE, and SETUP of the chosen track and any KLV track, and of a
+/// sound track `with_sound`: everything but PLAY. `offered`
+/// hears the tracks as soon as they are known, even when the one chosen is
+/// not among them.
 async fn prepare(
     source_id: &str,
     address: &Address,
     offered: impl FnOnce(Vec<VideoTrack>),
+    with_sound: bool,
 ) -> Result<Prepared, String> {
     let mut s = Session::connect(address.clone()).await?;
     let (headers, body) = s
@@ -1065,12 +1074,14 @@ async fn prepare(
             }
         }
     }
-    // Sound in a track of its own (S149); MPEG-TS carries its own.
-    let (sound, sound_description) = match sound_track(&sdp, &base) {
-        Some(track) if video.payload != Payload::Ts => {
-            set_up_sound(&mut s, source_id, track, &mut note).await
-        }
-        _ => (None, None),
+    // Sound in a track of its own (S149), set up while it is wanted
+    // (ADR-0067 M8); MPEG-TS carries its own.
+    let track = sound_track(&sdp, &base).filter(|_| video.payload != Payload::Ts);
+    let recorded = track.as_ref().is_some_and(|t| t.format.is_ok());
+    let (sound, sound_description) = match track {
+        Some(track) if with_sound => set_up_sound(&mut s, source_id, track, &mut note).await,
+        Some(track) => (None, Some(track.sound())),
+        None => (None, None),
     };
     Ok(Prepared {
         session: s,
@@ -1080,6 +1091,8 @@ async fn prepare(
         klv,
         sound,
         sound_description,
+        sound_track: recorded,
+        sound_wanted: with_sound,
         note,
         keepalive: Duration::from_secs((timeout / 2).clamp(5, 25)),
         server,
@@ -1224,19 +1237,59 @@ impl Progress {
     }
 }
 
-/// Plays an address, set up now or already, and relays until it fails.
-/// `silent` says when nothing has come for `STALL_AFTER`.
-#[allow(clippy::too_many_lines, reason = "one arm per interleaved channel")]
+/// Whether the camera's sound is wanted changed, and its session is to be
+/// opened again with or without its sound track (ADR-0067 M10).
+struct SoundChanged;
+
+/// Plays an address, set up now or already, and relays until it fails,
+/// opening its session again whenever whether its sound is wanted changes
+/// (ADR-0067 M10). `silent` says when nothing has come for `STALL_AFTER`.
 async fn play(
+    camera: Camera<'_>,
+    url: &str,
+    mut pre_opened: Option<Prepared>,
+    connection_log: &mut ConnectionLog,
+    silent: &tokio::sync::watch::Sender<bool>,
+    progress: &mut Progress,
+) -> Result<(), String> {
+    let mut wanted = camera.hub.sound_wanted(camera.id);
+    loop {
+        let SoundChanged = play_session(
+            camera,
+            url,
+            pre_opened.take(),
+            connection_log,
+            silent,
+            progress,
+            &mut wanted,
+        )
+        .await?;
+        tracing::info!(
+            source = %camera.id,
+            sound = *wanted.borrow(),
+            "an RTSP camera opens its session again for its sound"
+        );
+        camera.hub.restart_source(camera.id);
+    }
+}
+
+/// One session at an address, until it fails or whether its sound is
+/// wanted changes.
+#[allow(clippy::too_many_lines, reason = "one arm per interleaved channel")]
+async fn play_session(
     camera: Camera<'_>,
     url: &str,
     pre_opened: Option<Prepared>,
     connection_log: &mut ConnectionLog,
     silent: &tokio::sync::watch::Sender<bool>,
     progress: &mut Progress,
-) -> Result<(), String> {
+    wanted: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<SoundChanged, String> {
     let source_id = camera.id;
     let address = address(url)?;
+    let want = *wanted.borrow_and_update();
+    // The address kept set up was set up for the sound wanted then.
+    let pre_opened = pre_opened.filter(|p| !p.sound_track || p.sound_wanted == want);
     let (prepared, mut sound, play_sent_us) = tokio::time::timeout(START_WITHIN, async {
         let mut prepared = match pre_opened {
             Some(prepared) => {
@@ -1245,9 +1298,14 @@ async fn play(
                 prepared
             }
             None => {
-                prepare(source_id, &address, |described| {
-                    camera.post(move |e, id| e.video_tracks(id, described));
-                })
+                prepare(
+                    source_id,
+                    &address,
+                    |described| {
+                        camera.post(move |e, id| e.video_tracks(id, described));
+                    },
+                    want,
+                )
                 .await?
             }
         };
@@ -1275,11 +1333,15 @@ async fn play(
         video,
         mut klv,
         sound_description,
+        sound_track: has_sound,
+        sound_wanted: sound_asked,
         note,
         keepalive,
         server,
         ..
     } = prepared;
+    // The sound frames that came last, for whether sound is coming.
+    let mut sound_heard: Option<Instant> = None;
     let peer = s
         .peer()
         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], address.port)));
@@ -1316,6 +1378,13 @@ async fn play(
         }
         if !*silent.borrow() {
             wake = wake.min(last_heard + STALL_AFTER);
+        }
+        // Frames come many times a second, so a change is heard at once.
+        if has_sound
+            && wanted.has_changed().unwrap_or(false)
+            && *wanted.borrow_and_update() != sound_asked
+        {
+            return Ok(SoundChanged);
         }
         let Ok(frame) = tokio::time::timeout_at(wake, s.frame()).await else {
             let now = tokio::time::Instant::now();
@@ -1360,6 +1429,7 @@ async fn play(
             }
             Frame::Interleaved { channel: 4, data } => {
                 if let Some(sound) = sound.as_mut() {
+                    sound_heard = Some(Instant::now());
                     for unit in sound.push(&data, &source) {
                         relay(source.audio_unit(unit), &mut klv_posted);
                     }
@@ -1420,6 +1490,13 @@ async fn play(
                 status.counters.bytes,
                 status.counters.pictures,
             );
+            let seen = uxduck_engine::video_sound::SoundSeen {
+                sender: None,
+                unasked: false,
+                flowing: *wanted.borrow()
+                    && sound_heard.is_some_and(|at| at.elapsed() < REPORT_EVERY),
+            };
+            camera.post(move |e, id| e.video_sound_seen(id, seen));
             camera.post(move |e, _| e.rtsp_observed(observed));
         }
         let every = if playing.elapsed() < ASK_OFTEN_FOR {
@@ -1532,7 +1609,15 @@ struct Standby {
 }
 
 impl Standby {
-    fn open(source_id: &str, index: usize, url: &str, gate: Arc<tokio::sync::Mutex<()>>) -> Self {
+    /// Kept set up with a sound track while `sound` says it is wanted, as
+    /// it is each time it is set up (ADR-0067 M10).
+    fn open(
+        source_id: &str,
+        index: usize,
+        url: &str,
+        sound: tokio::sync::watch::Receiver<bool>,
+        gate: Arc<tokio::sync::Mutex<()>>,
+    ) -> Self {
         let (asks, asked) = tokio::sync::mpsc::unbounded_channel();
         let (set_up, ready) = tokio::sync::watch::channel(false);
         tokio::spawn(keep_ready(
@@ -1540,6 +1625,7 @@ impl Standby {
             url.to_owned(),
             asked,
             set_up,
+            sound,
             gate,
         ));
         Self { index, asks, ready }
@@ -1705,6 +1791,7 @@ async fn keep_ready(
     url: String,
     mut asks: tokio::sync::mpsc::UnboundedReceiver<Ask>,
     ready: tokio::sync::watch::Sender<bool>,
+    sound: tokio::sync::watch::Receiver<bool>,
     _gate: Arc<tokio::sync::Mutex<()>>,
 ) {
     let Ok(address) = address(&url) else {
@@ -1712,7 +1799,9 @@ async fn keep_ready(
     };
     let mut failures = 0usize;
     loop {
-        let Some(set_up) = set_up_standby(&source_id, &address, failures, &mut asks).await else {
+        let wanted = *sound.borrow();
+        let Some(set_up) = set_up_standby(&source_id, &address, failures, wanted, &mut asks).await
+        else {
             return;
         };
         let prepared = match set_up {
@@ -1756,6 +1845,7 @@ async fn set_up_standby(
     source_id: &str,
     address: &Address,
     failures: usize,
+    sound: bool,
     asks: &mut tokio::sync::mpsc::UnboundedReceiver<Ask>,
 ) -> Option<Result<Prepared, String>> {
     let wait = failures
@@ -1765,7 +1855,7 @@ async fn set_up_standby(
         if let Some(wait) = wait {
             tokio::time::sleep(wait).await;
         }
-        tokio::time::timeout(START_WITHIN, prepare(source_id, address, drop))
+        tokio::time::timeout(START_WITHIN, prepare(source_id, address, drop, sound))
             .await
             .map_err(|_| "the camera did not start within 15 s".to_owned())?
     };
@@ -1867,7 +1957,10 @@ fn keep_standby(
     if lent.borrow().as_ref().map(|s| s.index) == wanted {
         return;
     }
-    *standby = wanted.map(|index| Standby::open(camera.id, index, &urls[index], gate.clone()));
+    *standby = wanted.map(|index| {
+        let sound = camera.hub.sound_wanted(camera.id);
+        Standby::open(camera.id, index, &urls[index], sound, gate.clone())
+    });
     lent.send_replace(standby.clone());
     let told = wanted.map(|index| (urls[index].clone(), false));
     camera.post(move |e, id| e.rtsp_standby(id, told));

@@ -21,11 +21,25 @@
 //! numeric `a=mid`, the m-line's index, and the answer's credentials and
 //! candidates go back. A PATCH without credentials adds its candidates.
 //!
-//! `GET /` answers what each camera follows, as JSON.
+//! Every camera's WHEP answer carries sound (ADR-0067 M9): an offer's audio
+//! m-line, Opus only, is answered `sendonly` whether or not a microphone is
+//! there, so one plugged in later needs no new session. A viewer gets sound
+//! only after it asks, with a PATCH to the session's address whose body is
+//! `{"sound": true}` or `{"sound": false}` (`application/json`), which changes
+//! nothing in the media, so the picture never blinks. `GET` on the session's
+//! address answers its sound as the PATCH does. Each listening viewer gets
+//! the live step its own estimate allows (`listening.rs`), and while anyone
+//! listens the camera follows the lowest estimate less what that viewer's
+//! sound costs (M6). The sound's packets carry the time their sound was
+//! captured on the pictures' clock, so the sender reports line them up.
+//!
+//! `GET /` answers what each camera follows and its sound, and the
+//! microphones, as JSON.
 //!
 //! WHEP is plain HTTP here: the certificate made on the vehicle and pinned
 //! over SSH (W10) comes with S384. DTLS-SRTP encrypts the media either way.
 
+mod listening;
 pub(in crate::video) mod mediamtx;
 mod reader;
 mod rule;
@@ -45,12 +59,14 @@ use serde::Deserialize;
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::SdpOffer;
 use str0m::format::Codec;
-use str0m::media::{MediaTime, Mid, Pt};
+use str0m::media::{Frequency, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch};
 
+use super::companion::sound::{self, CameraSound, Feed, STEPS};
+use listening::Listener;
 pub use mediamtx::{Api, Camera};
 pub use reader::Frame;
 pub use rule::{Rule, Settings};
@@ -64,6 +80,11 @@ const LOST_FOR: Duration = Duration::from_secs(30);
 /// How often the configured interfaces are read for addresses, so one that
 /// comes up late, as Tailscale's does about 150 s after boot, is used.
 const INTERFACES_EVERY: Duration = Duration::from_secs(2);
+/// How often the sound's RTCP sender reports go, which the daemon lines
+/// the sound up with the pictures by (ADR-0067 M11): str0m's default of
+/// 5 s for audio would leave a newly unmuted camera's sound lined up by
+/// arrival for that long.
+const SOUND_REPORTS_EVERY: Duration = Duration::from_secs(1);
 /// The floor a camera follows down to unless set (ADR-0064 W7, the
 /// maintainer's choice on 2026-11-17).
 const FLOOR: u64 = 150_000;
@@ -108,7 +129,7 @@ pub struct CameraConfig {
 pub(crate) fn default_api() -> String {
     "http://127.0.0.1:9997".into()
 }
-fn default_rtsp() -> String {
+pub(crate) fn default_rtsp() -> String {
     "rtsp://127.0.0.1:8554".into()
 }
 fn default_whep() -> SocketAddr {
@@ -188,6 +209,8 @@ pub struct Options {
     /// The frame rate each camera records at on the vehicle while it does
     /// (ADR-0066), by its path: the lowest it may follow down to.
     pub recording: watch::Receiver<BTreeMap<String, f64>>,
+    /// Each camera's sound and its packets (ADR-0067).
+    pub sound: Feed,
 }
 
 /// The sender, running.
@@ -210,6 +233,7 @@ pub async fn run(
     config: Config,
     cameras: Vec<CameraConfig>,
     recording: watch::Receiver<BTreeMap<String, f64>>,
+    sound: Feed,
 ) -> Result<(), String> {
     config.check(&cameras)?;
     let running = start(Options {
@@ -220,6 +244,7 @@ pub async fn run(
         state_file: config.state_file.clone(),
         cameras,
         recording,
+        sound,
     })
     .await?;
     let readers = tokio::spawn(read(
@@ -364,6 +389,7 @@ pub async fn start(options: Options) -> Result<Running, String> {
         sockets,
         paths: paths_tx,
         wanted: wanted_tx.clone(),
+        sound: options.sound.status.borrow().clone(),
     };
     tracing::info!(%http, port = options.udp_port, "the video sender answers WHEP");
     Ok(Running {
@@ -374,6 +400,7 @@ pub async fn start(options: Options) -> Result<Running, String> {
             pictures,
             configured,
             options.recording,
+            options.sound,
         )),
         wanted: paths_rx,
         pictures: pictures_tx,
@@ -395,6 +422,12 @@ enum Request {
         reply: oneshot::Sender<Reply>,
     },
     Delete {
+        path: String,
+        id: String,
+        reply: oneshot::Sender<Reply>,
+    },
+    /// The session's sound (ADR-0067 M9).
+    Session {
         path: String,
         id: String,
         reply: oneshot::Sender<Reply>,
@@ -508,6 +541,7 @@ async fn answer(
                 reply,
             },
             Method::DELETE => Request::Delete { path, id, reply },
+            Method::GET => Request::Session { path, id, reply },
             _ => return Reply::text(StatusCode::METHOD_NOT_ALLOWED, "").into_response(),
         }
     } else {
@@ -690,13 +724,23 @@ struct CameraState {
 }
 
 /// One WHEP session.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a session's independent facts, each its own yes or no"
+)]
 struct Viewer {
     path: String,
     rtc: Rtc,
     /// The offer as it now stands, for an ICE restart.
     offer: String,
-    mid: Option<Mid>,
+    video: Option<Mid>,
     pt: Option<Pt>,
+    /// The offer's audio m-line, and the Opus payload type to send on it.
+    audio: Option<Mid>,
+    audio_pt: Option<Pt>,
+    /// Whether the viewer asked for sound (M9).
+    listening: bool,
+    listener: Listener,
     connected: bool,
     /// Whether a keyframe has gone, so it never starts on a picture that
     /// cannot be decoded.
@@ -711,6 +755,14 @@ impl Viewer {
     fn counts(&self) -> bool {
         self.connected && self.lost_since.is_none()
     }
+
+    /// The step it is sent while it listens and its camera has sound.
+    fn hears(&self, camera: Option<&CameraSound>) -> Option<usize> {
+        (self.listening
+            && self.audio.is_some()
+            && camera.is_some_and(|c| c.state == sound::State::Available))
+        .then(|| self.listener.step())
+    }
 }
 
 struct Core {
@@ -719,6 +771,8 @@ struct Core {
     sockets: Sockets,
     paths: watch::Sender<BTreeSet<String>>,
     wanted: watch::Sender<BTreeMap<String, Option<Settings>>>,
+    /// The microphones and each camera's sound, as the manager last said.
+    sound: sound::Status,
 }
 
 impl Core {
@@ -729,7 +783,12 @@ impl Core {
         mut pictures: mpsc::Receiver<(String, Frame)>,
         mut configured: watch::Receiver<BTreeMap<String, Camera>>,
         mut recording: watch::Receiver<BTreeMap<String, f64>>,
+        sound: Feed,
     ) -> Result<(), String> {
+        let Feed {
+            status: mut sound_status,
+            mut packets,
+        } = sound;
         let mut second = tokio::time::interval(Duration::from_secs(1));
         let mut interfaces = tokio::time::interval(INTERFACES_EVERY);
         loop {
@@ -738,6 +797,14 @@ impl Core {
                 Some(request) = requests.recv() => self.request(request),
                 Some(datagram) = datagrams.recv() => self.datagram(&datagram),
                 Some((path, frame)) = pictures.recv() => self.picture(&path, frame),
+                Some(packet) = packets.recv() => self.sound(packet),
+                Ok(()) = sound_status.changed() => {
+                    self.sound = sound_status.borrow_and_update().clone();
+                    let paths: Vec<String> = self.cameras.keys().cloned().collect();
+                    for path in paths {
+                        self.follow(&path);
+                    }
+                }
                 Ok(()) = configured.changed() => {
                     let cameras = configured.borrow_and_update().clone();
                     self.reconfigure(cameras);
@@ -788,7 +855,10 @@ impl Core {
                     }
                     Output::Transmit(t) => self.sockets.send(t.source, t.destination, &t.contents),
                     Output::Event(event) => match event {
-                        Event::MediaAdded(added) => viewer.mid = Some(added.mid),
+                        Event::MediaAdded(added) => match added.kind {
+                            MediaKind::Video => viewer.video = Some(added.mid),
+                            MediaKind::Audio => viewer.audio = Some(added.mid),
+                        },
                         Event::Connected => {
                             tracing::info!(session = %id, path = %viewer.path, "a viewer connected");
                             viewer.connected = true;
@@ -808,6 +878,7 @@ impl Core {
                         }
                         Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. }) => {
                             viewer.estimate = Some(estimate.as_u64());
+                            viewer.listener.estimate(viewer.estimate, Instant::now());
                             estimated.insert(viewer.path.clone());
                         }
                         _ => {}
@@ -836,13 +907,15 @@ impl Core {
         soonest
     }
 
-    /// The lowest estimate among the camera's viewers, to its rule.
+    /// The lowest estimate among the camera's viewers, each less what its
+    /// sound costs while it listens (M6), to its rule.
     fn follow(&mut self, path: &str) {
+        let sound = self.sound.cameras.get(path);
         let lowest = self
             .viewers
             .values()
             .filter(|v| v.path == path && v.counts())
-            .filter_map(|v| v.estimate)
+            .filter_map(|v| Some(listening::for_the_picture(v.estimate?, v.hears(sound))))
             .min();
         let Some(camera) = self.cameras.get_mut(path) else {
             return;
@@ -857,6 +930,19 @@ impl Core {
     }
 
     fn second(&mut self) {
+        // A step up is taken once the estimate allowed it for 5 s.
+        let now = Instant::now();
+        let mut stepped = BTreeSet::new();
+        for viewer in self.viewers.values_mut().filter(|v| v.listening) {
+            let step = viewer.listener.step();
+            viewer.listener.estimate(viewer.estimate, now);
+            if viewer.listener.step() != step {
+                stepped.insert(viewer.path.clone());
+            }
+        }
+        for path in stepped {
+            self.follow(&path);
+        }
         for (path, camera) in &mut self.cameras {
             camera.made_last = std::mem::take(&mut camera.made);
             if let Some(rule) = camera.rule.as_mut()
@@ -922,10 +1008,8 @@ impl Core {
             }
             if let (Camera::RpiCamera(own), true) = (&now, camera.follow) {
                 for viewer in self.viewers.values_mut().filter(|v| v.path == path) {
-                    viewer
-                        .rtc
-                        .bwe()
-                        .set_bitrate(Bitrate::ZERO, desired(own.bitrate));
+                    let desired = with_sound(desired(own.bitrate), viewer.listening);
+                    viewer.rtc.bwe().set_bitrate(Bitrate::ZERO, desired);
                 }
             }
             camera.camera = now;
@@ -980,7 +1064,7 @@ impl Core {
             {
                 continue;
             }
-            let Some(mid) = viewer.mid else {
+            let Some(mid) = viewer.video else {
                 continue;
             };
             let Some(writer) = viewer.rtc.writer(mid) else {
@@ -1017,8 +1101,23 @@ impl Core {
                 content_type,
                 body,
                 reply,
+            } if content_type == "application/json" => {
+                let _ = reply.send(self.listen(&path, &id, &body));
+            }
+            Request::Patch {
+                path,
+                id,
+                content_type,
+                body,
+                reply,
             } => {
                 let _ = reply.send(self.patch(&path, &id, &content_type, &body));
+            }
+            Request::Session { path, id, reply } => {
+                let _ = reply.send(match self.viewers.get(&id).filter(|v| v.path == path) {
+                    Some(viewer) => self.session(viewer),
+                    None => Reply::text(StatusCode::NOT_FOUND, "There is no such session."),
+                });
             }
             Request::Delete { path, id, reply } => {
                 let found = self.viewers.get(&id).is_some_and(|v| v.path == path);
@@ -1076,7 +1175,9 @@ impl Core {
         let mut rtc = RtcConfig::new()
             .clear_codecs()
             .enable_h264(true)
+            .enable_opus(true, false)
             .set_stats_interval(Some(Duration::from_secs(1)))
+            .set_rtcp_report_interval_audio(SOUND_REPORTS_EVERY)
             .enable_bwe(Some(ceiling.map_or(Bitrate::mbps(25), Bitrate::bps)))
             .build(Instant::now());
         for candidate in candidates {
@@ -1113,8 +1214,12 @@ impl Core {
                 path: path.to_owned(),
                 rtc,
                 offer: sdp.to_owned(),
-                mid: None,
+                video: None,
                 pt: None,
+                audio: None,
+                audio_pt: None,
+                listening: false,
+                listener: Listener::default(),
                 connected: false,
                 keyed: false,
                 estimate: None,
@@ -1129,11 +1234,119 @@ impl Core {
                 (header::ETAG, "\"*\"".into()),
                 (
                     header::HeaderName::from_static("accept-patch"),
-                    "application/trickle-ice-sdpfrag".into(),
+                    "application/trickle-ice-sdpfrag, application/json".into(),
                 ),
             ],
             content_type: "application/sdp",
             body: answer,
+        }
+    }
+
+    /// A viewer's sound on or off (M9): `{"sound": true}` or `{"sound":
+    /// false}`. Nothing in the media changes, so the picture goes on.
+    fn listen(&mut self, path: &str, id: &str, body: &str) -> Reply {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Asked {
+            sound: bool,
+        }
+        let Ok(Asked { sound: on }) = serde_json::from_str(body) else {
+            return Reply::text(
+                StatusCode::BAD_REQUEST,
+                "A sound PATCH is {\"sound\": true} or {\"sound\": false}.",
+            );
+        };
+        let ceiling = match self.cameras.get(path).map(|c| (&c.camera, c.follow)) {
+            Some((Camera::RpiCamera(own), true)) => Some(own.bitrate),
+            _ => None,
+        };
+        let Some(viewer) = self.viewers.get_mut(id).filter(|v| v.path == path) else {
+            return Reply::text(StatusCode::NOT_FOUND, "There is no such session.");
+        };
+        if viewer.listening != on {
+            tracing::info!(session = %id, %path, sound = on, "a viewer turned its sound {}", if on { "on" } else { "off" });
+            viewer.listening = on;
+            if on {
+                viewer.listener.start(viewer.estimate, Instant::now());
+            }
+            if let Some(ceiling) = ceiling {
+                let desired = with_sound(desired(ceiling), on);
+                viewer.rtc.bwe().set_bitrate(Bitrate::ZERO, desired);
+            }
+            self.follow(path);
+        }
+        match self.viewers.get(id) {
+            Some(viewer) => self.session(viewer),
+            None => Reply::text(StatusCode::NOT_FOUND, "There is no such session."),
+        }
+    }
+
+    /// A session's sound, as its PATCH and GET answer it.
+    fn session(&self, viewer: &Viewer) -> Reply {
+        let camera = self.sound.cameras.get(&viewer.path);
+        let mut sound = sound_json(camera, viewer.hears(camera).map(|step| STEPS[step].bitrate));
+        sound["on"] = viewer.listening.into();
+        if viewer.audio.is_none() {
+            sound["reason"] = "This session has no sound track. Open it again with an audio m-line to hear the camera.".into();
+        }
+        Reply {
+            status: StatusCode::OK,
+            headers: Vec::new(),
+            content_type: "application/json",
+            body: serde_json::json!({ "sound": sound }).to_string(),
+        }
+    }
+
+    /// A packet of a camera's sound, to each of its viewers that listens
+    /// and gets that step (M5).
+    fn sound(&mut self, packet: sound::Packet) {
+        let available = self
+            .sound
+            .cameras
+            .get(&packet.path)
+            .is_some_and(|c| c.state == sound::State::Available);
+        if !available {
+            return;
+        }
+        let length = Duration::from_millis(u64::from(STEPS[packet.step].ms));
+        // When its sound began, on the pictures' clock (W11).
+        let wallclock = packet.at.checked_sub(length).unwrap_or(packet.at);
+        let data: Arc<[u8]> = packet.payload.into();
+        for viewer in self.viewers.values_mut() {
+            if viewer.path != packet.path || !viewer.listening || !viewer.connected || viewer.dead {
+                continue;
+            }
+            let Some(mid) = viewer.audio else {
+                continue;
+            };
+            let Some(time) =
+                viewer
+                    .listener
+                    .packet(packet.step, packet.ssrc, packet.timestamp, packet.at)
+            else {
+                continue;
+            };
+            let Some(writer) = viewer.rtc.writer(mid) else {
+                continue;
+            };
+            let pt = if let Some(pt) = viewer.audio_pt {
+                pt
+            } else {
+                let Some(pt) = writer
+                    .payload_params()
+                    .find(|p| p.spec().codec == Codec::Opus)
+                    .map(str0m::format::PayloadParams::pt)
+                else {
+                    continue;
+                };
+                viewer.audio_pt = Some(pt);
+                pt
+            };
+            let time = MediaTime::new(time, Frequency::FORTY_EIGHT_KHZ);
+            if let Err(error) = writer.write(pt, wallclock, time, data.clone()) {
+                tracing::info!(path = %packet.path, %error, "cannot send sound to a viewer");
+                viewer.dead = true;
+            }
         }
     }
 
@@ -1244,6 +1457,14 @@ impl Core {
                     Camera::Other { source } => (source.clone(), None),
                 };
                 let held = camera.rule.as_ref().is_some_and(Rule::held);
+                let sound = self.sound.cameras.get(path);
+                let bitrate = self
+                    .viewers
+                    .values()
+                    .filter(|v| &v.path == path)
+                    .filter_map(|v| v.hears(sound))
+                    .map(|step| STEPS[step].bitrate)
+                    .max();
                 let note = camera
                     .estimate
                     .filter(|e| camera.rule.is_some() && (*e < camera.floor || held))
@@ -1272,6 +1493,8 @@ impl Core {
                     "follow": camera.follow,
                     "recordingFps": camera.record_fps,
                     "note": note,
+                    "sound": sound_json(sound, bitrate),
+                    "listeners": self.viewers.values().filter(|v| &v.path == path && v.listening).count(),
                 })
             })
             .collect();
@@ -1281,7 +1504,44 @@ impl Core {
             .iter()
             .map(|(address, bound)| serde_json::json!({ "interface": bound.interface, "address": address.to_string(), "sentBytes": bound.sent }))
             .collect();
-        serde_json::json!({ "cameras": cameras, "addresses": addresses })
+        serde_json::json!({ "cameras": cameras, "addresses": addresses, "microphones": self.sound.microphones })
+    }
+}
+
+/// What a camera's sound is, as a session's and the status's `sound` say it
+/// (M9): `sending` when `bitrate` goes to a viewer now.
+fn sound_json(camera: Option<&CameraSound>, bitrate: Option<u32>) -> serde_json::Value {
+    let Some(camera) = camera else {
+        return serde_json::json!({
+            "state": sound::State::NoMicrophone,
+            "microphone": null,
+            "codec": null,
+            "bitrate": null,
+            "reason": null,
+        });
+    };
+    let state = if bitrate.is_some() {
+        serde_json::json!("sending")
+    } else {
+        serde_json::json!(camera.state)
+    };
+    let codec = (camera.state == sound::State::Available).then_some("Opus, 48 kHz, mono");
+    serde_json::json!({
+        "state": state,
+        "microphone": camera.microphone,
+        "codec": codec,
+        "bitrate": bitrate,
+        "reason": camera.reason,
+    })
+}
+
+/// What GCC probes toward with the highest step's sound on top while the
+/// viewer listens.
+fn with_sound(desired: Bitrate, listening: bool) -> Bitrate {
+    if listening {
+        Bitrate::bps(desired.as_u64() + u64::from(STEPS[0].wire()))
+    } else {
+        desired
     }
 }
 

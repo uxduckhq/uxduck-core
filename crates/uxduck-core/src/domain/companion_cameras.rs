@@ -291,6 +291,40 @@ pub struct CompanionCameras {
     /// for people (ADR-0066 R10). The cameras are read all the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_problem: Option<String>,
+    /// The sound capture devices on the computer (ADR-0067 M2, M14).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub microphones: Vec<CompanionMicrophoneDevice>,
+    /// Why the computer cannot send sound, for people, such as `GStreamer`
+    /// missing (ADR-0067 M4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound_problem: Option<String>,
+}
+
+/// A sound capture device on a companion computer (ADR-0067 M2).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionMicrophoneDevice {
+    /// Stable across reboots and replugging into the same port:
+    /// `usb:<bus path>` for a USB device, else `card:<ALSA id>`.
+    pub id: String,
+    /// The card's long name, such as "USB `PnP` Sound Device".
+    pub name: String,
+    /// The ALSA card id, such as `Device`.
+    pub card: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub usb: bool,
+}
+
+/// Which microphone a camera's sound comes from (ADR-0067 M3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionMicrophone {
+    /// `auto` (also when `companion.toml` has no `microphone`), `none`,
+    /// or a device's `id`.
+    pub choice: String,
+    /// The device the choice gives now, by its id, when one is plugged in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 impl CompanionCameras {
@@ -391,6 +425,10 @@ pub struct CompanionCameraPath {
     /// `/etc/uxduck/companion.toml` with a `record_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<VehicleRecording>,
+    /// Its microphone, when `companion.toml` has a `[cameras.<name>]`
+    /// table for it (ADR-0067 M3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone: Option<CompanionMicrophone>,
 }
 
 /// When `uxduck companion` records a camera on the vehicle (ADR-0066 R2):
@@ -584,6 +622,7 @@ mod tests {
             readers: 0,
             bytes: 0,
             record: None,
+            microphone: None,
         };
         assert!(proxy.adjustable().unwrap_err().contains("rpiCamera"));
     }
@@ -602,6 +641,7 @@ mod tests {
             readers: 0,
             bytes: 0,
             record: None,
+            microphone: None,
         };
         let cameras = CompanionCameras {
             unit: None,
@@ -616,6 +656,8 @@ mod tests {
             ],
             watchdog: CameraWatchdog::default(),
             record_problem: None,
+            microphones: Vec::new(),
+            sound_problem: None,
             applied: None,
             problem: None,
         };
