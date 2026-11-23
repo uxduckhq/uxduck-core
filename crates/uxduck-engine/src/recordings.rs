@@ -422,6 +422,7 @@ impl Engine {
 
     fn start_recording(&mut self, source: &VideoSource, trigger: RecordingTrigger) {
         let mut recording = VideoRecording {
+            on_vehicle: None,
             packed: None,
             id: format!("vr{}", &self.random.token()[..16]),
             source_id: source.id.clone(),

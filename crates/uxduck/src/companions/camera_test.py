@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -569,6 +570,119 @@ class CameraTests(unittest.TestCase):
         self.assertFalse((self.root / "lib/camera-watchdog.py").exists())
         self.assertFalse(state.exists())
         self.assertIn(["systemctl", "disable", "--now", "--", "uxduck-camera-watchdog.service"], self.calls())
+
+
+def mp4_box(kind, body):
+    return (8 + len(body)).to_bytes(4, "big") + kind + body
+
+
+def mp4_full(kind, version, flags, body):
+    return mp4_box(kind, bytes([version]) + flags.to_bytes(3, "big") + body)
+
+
+def mp4_init():
+    tkhd = mp4_full(b"tkhd", 0, 3, b"\0" * 8 + (1).to_bytes(4, "big") + b"\0" * 68)
+    mdhd = mp4_full(b"mdhd", 0, 0, b"\0" * 8 + (90000).to_bytes(4, "big") + b"\0" * 8)
+    hdlr = mp4_full(b"hdlr", 0, 0, b"\0" * 4 + b"vide" + b"\0" * 13)
+    return mp4_box(b"ftyp", b"iso6\0\0\0\0") + mp4_box(b"moov", mp4_box(b"trak", tkhd + mp4_box(b"mdia", mdhd + hdlr)))
+
+
+def mp4_fragment(base, durations):
+    tfhd = mp4_full(b"tfhd", 0, 0x020000, (1).to_bytes(4, "big"))
+    tfdt = mp4_full(b"tfdt", 1, 0, base.to_bytes(8, "big"))
+    trun = mp4_full(b"trun", 0, 0x100, len(durations).to_bytes(4, "big") + b"".join(d.to_bytes(4, "big") for d in durations))
+    moof = mp4_box(b"moof", mp4_full(b"mfhd", 0, 0, (1).to_bytes(4, "big")) + mp4_box(b"traf", tfhd + tfdt + trun))
+    return moof + mp4_box(b"mdat", b"x" * 10)
+
+
+class RecordingsOnTheVehicleTest(unittest.TestCase):
+    """S429: the record path's segments, as recordings a person thinks of."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+        self.conf = {"recordPath": str(self.root) + "/%path/%Y-%m-%d_%H-%M-%S-%f", "recordFormat": "fmp4", "record": False}
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def segment(self, stamp, seconds, age=600):
+        folder = self.root / "front_record"
+        folder.mkdir(exist_ok=True)
+        path = folder / (stamp + ".mp4")
+        path.write_bytes(mp4_init() + b"".join(mp4_fragment(i * 90000, [45000, 45000]) for i in range(seconds)))
+        then = time.time() - age
+        os.utime(path, (then, then))
+        return path
+
+    @staticmethod
+    def at(stamp):
+        day, clock = stamp.split("_")
+        y, m, d = (int(v) for v in day.split("-"))
+        hh, mm, ss, f = (int(v) for v in clock.split("-"))
+        return int((time.mktime((y, m, d, hh, mm, ss, 0, 0, -1)) + f / 1e6) * 1e6)
+
+    def test_segments_that_meet_are_one_recording_and_a_gap_starts_another(self):
+        first = self.segment("2026-11-23_10-00-00-000000", 60)
+        second = self.segment("2026-11-23_10-01-00-000000", 30)
+        third = self.segment("2026-11-23_10-05-00-250000", 20)
+        folder, recordings = camera.path_recordings("front_record", self.conf, ready=True)
+        self.assertEqual(folder, str(self.root / "front_record"))
+        self.assertEqual(len(recordings), 2)
+        self.assertEqual(recordings[0]["id"], "front_record/2026-11-23_10-00-00-000000.mp4")
+        self.assertEqual(recordings[0]["startedAtUs"], self.at("2026-11-23_10-00-00-000000"))
+        self.assertEqual(recordings[0]["durationUs"], 90_000_000)
+        self.assertEqual(recordings[0]["segments"], [{"path": str(first), "size": first.stat().st_size},
+                                                     {"path": str(second), "size": second.stat().st_size}])
+        self.assertEqual(recordings[1]["segments"], [{"path": str(third), "size": third.stat().st_size}])
+        self.assertEqual(recordings[1]["durationUs"], 20_000_000)
+        self.assertFalse(recordings[1]["recording"])
+
+    def test_the_newest_segment_is_still_recording_while_mediamtx_records_or_it_grows(self):
+        self.segment("2026-11-23_10-00-00-000000", 5)
+        _, recordings = camera.path_recordings("front_record", dict(self.conf, record=True), ready=True)
+        self.assertTrue(recordings[-1]["recording"])
+        _, recordings = camera.path_recordings("front_record", self.conf, ready=False)
+        self.assertFalse(recordings[-1]["recording"])
+        self.segment("2026-11-23_10-00-05-000000", 1, age=0)
+        _, recordings = camera.path_recordings("front_record", self.conf, ready=False)
+        self.assertEqual(len(recordings), 1)
+        self.assertTrue(recordings[0]["recording"])
+
+    def test_an_empty_segment_a_full_disk_left_is_not_a_recording(self):
+        self.segment("2026-11-23_10-00-00-000000", 5)
+        (self.root / "front_record" / "2026-11-23_11-00-00-000000.mp4").write_bytes(b"")
+        old = time.time() - 600
+        os.utime(self.root / "front_record" / "2026-11-23_11-00-00-000000.mp4", (old, old))
+        _, recordings = camera.path_recordings("front_record", self.conf, ready=False)
+        self.assertEqual([len(r["segments"]) for r in recordings], [1])
+
+    def test_mpegts_is_listed_but_not_offered_for_download(self):
+        folder = self.root / "front_record"
+        folder.mkdir()
+        (folder / "2026-11-23_10-00-00-000000.ts").write_bytes(b"G" * 188)
+        old = time.time() - 600
+        os.utime(folder / "2026-11-23_10-00-00-000000.ts", (old, old))
+        _, recordings = camera.path_recordings("front_record", dict(self.conf, recordFormat="mpegts"), ready=False)
+        self.assertIn("recordFormat: fmp4", recordings[0]["notDownloadable"])
+
+    def test_a_record_path_without_its_own_absolute_folder_is_refused(self):
+        for pattern in ("./recordings/%path/%Y", "/var/lib/recordings/%Y-%m-%d", "/var/lib/%path"):
+            with self.assertRaisesRegex(ValueError, "absolute folder"):
+                camera.record_store("front_record", {"recordPath": pattern})
+
+    def test_listing_reads_each_recording_cameras_path_from_mediamtx(self):
+        self.segment("2026-11-23_10-00-00-000000", 3)
+        found = {"api": "127.0.0.1:1", "paths": [{"name": "front", "record": {"path": "front_record", "mode": "armed"}}, {"name": "rear"}]}
+        answers = {"/v3/config/paths/get/front_record": self.conf, "/v3/paths/get/front_record": {"ready": True}}
+        with patch.object(camera, "get", lambda api, endpoint: answers[endpoint]):
+            listed = camera.list_recordings(found)
+        self.assertEqual([c["camera"] for c in listed["cameras"]], ["front"])
+        self.assertEqual(listed["cameras"][0]["mode"], "armed")
+        self.assertEqual(len(listed["cameras"][0]["recordings"]), 1)
+        with patch.object(camera, "get", side_effect=OSError("refused")):
+            listed = camera.list_recordings(found)
+        self.assertIn("could not list front_record", listed["cameras"][0]["problem"])
 
 
 if __name__ == "__main__":

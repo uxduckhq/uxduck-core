@@ -1,0 +1,48 @@
+{
+  "vehicleId": "veh-7f3a",
+  "computerId": "cmp-pi",
+  "computerName": "Camera Pi",
+  "cameras": [
+    {
+      "camera": "front",
+      "path": "front_record",
+      "folder": "/var/lib/uxduck/recordings/front_record",
+      "sourceId": "src-front",
+      "recordings": [
+        {
+          "id": "front_record/2026-11-22_13-20-00-000000.mp4",
+          "startedAtUs": 1795353600000000,
+          "durationUs": 363000000,
+          "bytes": 412000000,
+          "segments": 7,
+          "recording": true
+        },
+        {
+          "id": "front_record/2026-11-22_12-40-00-000000.mp4",
+          "startedAtUs": 1795351200000000,
+          "durationUs": 1107000000,
+          "bytes": 1300000000,
+          "segments": 19,
+          "transferId": "tr-1a2b"
+        },
+        {
+          "id": "front_record/2026-11-22_09-05-00-000000.mp4",
+          "startedAtUs": 1795338300000000,
+          "durationUs": 761000000,
+          "bytes": 380000000,
+          "segments": 13,
+          "transferId": "tr-0f9e",
+          "recordingId": "rec-55aa"
+        },
+        {
+          "id": "front_record/2026-11-22_08-00-00-000000.ts",
+          "startedAtUs": 1795334400000000,
+          "durationUs": 60000000,
+          "bytes": 30000000,
+          "segments": 1,
+          "notDownloadable": "front_record is recorded as MPEG-TS, and UXDuck downloads fragmented MP4 recordings. Set recordFormat: fmp4 for front_record in MediaMTX's configuration."
+        }
+      ]
+    }
+  ]
+}

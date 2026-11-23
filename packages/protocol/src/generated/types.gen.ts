@@ -2216,6 +2216,33 @@ export type CameraPhotoPlace = {
 };
 
 /**
+ * One camera's recordings on the vehicle, newest first.
+ */
+export type CameraRecordings = {
+    /**
+     * Its live path, such as `front`.
+     */
+    camera: string;
+    /**
+     * The folder its segments are in on the computer.
+     */
+    folder?: string | null;
+    /**
+     * The `MediaMTX` path that records it, such as `front_record`.
+     */
+    path: string;
+    /**
+     * Why its recordings could not be listed, for people.
+     */
+    problem?: string | null;
+    recordings: Array<RecordingOnVehicle>;
+    /**
+     * The picture on this computer whose address names this camera.
+     */
+    sourceId?: string | null;
+};
+
+/**
  * A camera's sensor. Each measure is absent when the camera did not say.
  */
 export type CameraSensor = {
@@ -3369,6 +3396,12 @@ export type ClientRequest = {
 } | {
     method: 'computer/cameras';
     params: ComputerCamerasParams;
+} | {
+    method: 'computer/recordings';
+    params: ComputerRecordingsParams;
+} | {
+    method: 'computer/download';
+    params: ComputerDownloadParams;
 } | {
     method: 'computer/network';
     params: ComputerNetworkParams;
@@ -5259,6 +5292,27 @@ export type ComputerConnectivityParams = {
 };
 
 /**
+ * `computer/download` (S429): copy one listed recording to this
+ * computer's recordings, resumably, checked against the computer's hash.
+ * It answers with the transfer, which pauses, resumes and cancels as
+ * `files/pause`, `files/resume` and `files/cancel`.
+ */
+export type ComputerDownloadParams = {
+    computerId: string;
+    /**
+     * Download now even while this computer's connection is metered
+     * (ADR-0046 B12). Without it, a download on a metered connection
+     * waits for an unmetered one when Wait for unmetered networks is on.
+     */
+    overMetered?: boolean;
+    /**
+     * A recording's id as `computer/recordings` listed it.
+     */
+    recording: string;
+    vehicleId: string;
+};
+
+/**
  * Read networking, save Wi-Fi for automatic connection when available, or
  * configure internet health checks. At most one change per request.
  */
@@ -5282,6 +5336,38 @@ export type ComputerNetworkParams = {
  */
 export type ComputerParams = {
     computerId: string;
+    vehicleId: string;
+};
+
+/**
+ * `computer/recordings` (S429): the recordings a camera computer made on
+ * the vehicle, listed over the pinned SSH. Name the computer, or a
+ * picture to list the computer that records it.
+ */
+export type ComputerRecordingsParams = {
+    computerId?: string | null;
+    /**
+     * A picture (`VideoSource`): the computer whose camera its address
+     * names, and only that camera.
+     */
+    sourceId?: string | null;
+    vehicleId: string;
+};
+
+/**
+ * `computer/recordings`'s answer.
+ */
+export type ComputerRecordingsResult = {
+    /**
+     * Each camera that records on the vehicle.
+     */
+    cameras: Array<CameraRecordings>;
+    computerId: string;
+    computerName: string;
+    /**
+     * Why the computer could not list them, for people.
+     */
+    problem?: string | null;
     vehicleId: string;
 };
 
@@ -7663,6 +7749,11 @@ export type FileSaveResult = {
  * A download from a vehicle or an upload to it, pushed as it moves.
  */
 export type FileTransfer = {
+    /**
+     * A recording copied from this vehicle's camera computer over SSH
+     * (S429): the computer.
+     */
+    computerId?: string | null;
     detail?: string | null;
     direction: TransferDirection;
     done: number;
@@ -7676,11 +7767,20 @@ export type FileTransfer = {
      * Bytes a second over the last five seconds, while it runs.
      */
     rateBps?: number | null;
+    /**
+     * Its id on the camera computer, as `computer/recordings` lists it.
+     */
+    recording?: string | null;
     size?: number | null;
     startedAtUs: number;
     state: FileTransferState;
     updatedAtUs: number;
     vehicleId: string;
+    /**
+     * It waits because this computer's connection is metered (ADR-0046
+     * B12): `computer/download` with `overMetered` sends it now.
+     */
+    waitsForUnmetered?: boolean;
 };
 
 export type FileTransferParams = {
@@ -14971,6 +15071,55 @@ export type RecordStep = {
     when?: CheckWhen;
 };
 
+/**
+ * Which recording on the vehicle a downloaded recording was (S429).
+ */
+export type RecordedOnVehicle = {
+    /**
+     * The camera's live path, such as `front`.
+     */
+    camera: string;
+    computerId: string;
+    /**
+     * Its id on the camera computer, as `computer/recordings` lists it.
+     */
+    recording: string;
+};
+
+/**
+ * One recording on the vehicle: from one arming or Record press to its
+ * end, however many segments `MediaMTX` wrote it in.
+ */
+export type RecordingOnVehicle = {
+    bytes: number;
+    durationUs: number;
+    /**
+     * Its record path and its first segment's name.
+     */
+    id: string;
+    /**
+     * Why it cannot be downloaded, for people, besides still recording.
+     */
+    notDownloadable?: string | null;
+    /**
+     * Its last segment is still being written: it downloads once it ends.
+     */
+    recording?: boolean;
+    /**
+     * The recording on this computer it was downloaded as.
+     */
+    recordingId?: string | null;
+    segments: number;
+    /**
+     * By the camera computer's clock.
+     */
+    startedAtUs: number;
+    /**
+     * Its download, running, waiting, failed or done.
+     */
+    transferId?: string | null;
+};
+
 export type RecordingState = 'recording' | 'done' | 'failed' | 'recovered';
 
 export type RecordingTrigger = 'by-hand' | 'armed' | 'always';
@@ -21604,6 +21753,11 @@ export type VideoRecording = {
     flightId?: string | null;
     height?: number | null;
     id: string;
+    /**
+     * Recorded on the vehicle by its camera computer and downloaded here
+     * (S429): shown as recorded on the vehicle.
+     */
+    onVehicle?: RecordedOnVehicle | null;
     /**
      * Kept in a flight's `.uxflight` on another disk rather than on this
      * computer (ADR-0062), and played from there.

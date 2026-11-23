@@ -1029,8 +1029,23 @@ pub struct VideoRecording {
     /// computer (ADR-0062), and played from there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packed: Option<PackedVideo>,
+    /// Recorded on the vehicle by its camera computer and downloaded here
+    /// (S429): shown as recorded on the vehicle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_vehicle: Option<RecordedOnVehicle>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
+}
+
+/// Which recording on the vehicle a downloaded recording was (S429).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordedOnVehicle {
+    pub computer_id: String,
+    /// The camera's live path, such as `front`.
+    pub camera: String,
+    /// Its id on the camera computer, as `computer/recordings` lists it.
+    pub recording: String,
 }
 
 /// Where a recording kept in a `.uxflight` is (ADR-0062).

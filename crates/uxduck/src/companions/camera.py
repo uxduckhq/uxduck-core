@@ -4,11 +4,13 @@ Input is JSON on stdin. {} reads. A change is one of
 {"apply": {"path", "settings", "despiteLinger"}}, {"linger": true},
 {"watchdog": "install" | "remove", "watchdogScript": "..."},
 {"record": {"path", "mode"}} or {"microphone": {"path", "choice"}}, run as
-root through sudo -n. It prints "cameras=<json>": the systemd unit running
-MediaMTX, its paths as MediaMTX's local API has them, lingering for the
-unit's user, the camera watchdog, each camera's recording on the vehicle and
-microphone from /etc/uxduck/companion.toml (ADR-0066 R10, ADR-0067 M3), and
-the computer's microphones (ADR-0067 M2).
+root through sudo -n. {"recordings": true} lists each recording camera's
+recordings on the vehicle instead, as "recordings=<json>" (S429). It prints
+"cameras=<json>": the systemd unit running MediaMTX, its paths as MediaMTX's
+local API has them, lingering for the unit's user, the camera watchdog, each
+camera's recording on the vehicle and microphone from
+/etc/uxduck/companion.toml (ADR-0066 R10, ADR-0067 M3), and the computer's
+microphones (ADR-0067 M2).
 
 A picture is written as MediaMTX's own environment overrides in one systemd
 drop-in UXDuck owns, never into the person's YAML. The restart that applies
@@ -27,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 SYSTEMD = pathlib.Path("/etc/systemd/system")
@@ -738,6 +741,205 @@ def remove_watchdog():
         path.unlink(missing_ok=True)
     run("systemctl", "daemon-reload", timeout=60)
 
+# Recordings on the vehicle (S429, ADR-0066 R12): MediaMTX's time fields in
+# recordPath, as regular expressions over a segment's name.
+RECORD_FIELDS = {"%Y": r"(?P<Y>\d{4})", "%m": r"(?P<m>\d{2})", "%d": r"(?P<d>\d{2})", "%H": r"(?P<H>\d{2})",
+                 "%M": r"(?P<M>\d{2})", "%S": r"(?P<S>\d{2})", "%f": r"(?P<f>\d{6})", "%s": r"(?P<s>\d+)"}
+# Two segments are one recording when the second starts within this long of
+# the first's end: MediaMTX starts the next segment at the first picture after
+# the last, so a recording's segments meet, and one stopped and started again
+# has a gap of at least the time it was off.
+SAME_RECORDING_S = 2.0
+# A segment written to in this long may still be growing: MediaMTX flushes a
+# part to the file every recordPartDuration, 1 s by default.
+STILL_WRITING_S = 10.0
+
+
+def get(api, endpoint):
+    """One object from MediaMTX's local API."""
+    with OPENER.open("http://" + api + endpoint, timeout=3) as response:
+        return json.load(response)
+
+
+def record_store(name, conf):
+    """Where a path's segments are, the pattern of their names, and their extension."""
+    pattern = conf.get("recordPath") or ""
+    own = name + "'s recordPath " + pattern + " must start with an absolute folder that has %path in it, such as /var/lib/uxduck/recordings/%path/%Y-%m-%d_%H-%M-%S-%f."
+    if not pattern.startswith("/") or "%path" not in pattern:
+        raise ValueError(own)
+    parts = pattern.replace("%path", name).split("/")
+    fixed = parts
+    for index, part in enumerate(parts):
+        if "%" in part:
+            fixed = parts[:index]
+            break
+    folder = "/".join(fixed)
+    rest = "/".join(parts[len(fixed):])
+    if not rest or ".." in fixed:
+        raise ValueError(own)
+    regex = ""
+    for token in re.split(r"(%[A-Za-z])", rest):
+        regex += RECORD_FIELDS.get(token, r"[^/]*" if token.startswith("%") and len(token) == 2 else re.escape(token))
+    extension = {"fmp4": "mp4", "mpegts": "ts"}.get(conf.get("recordFormat") or "fmp4")
+    if not extension:
+        raise ValueError(name + "'s recordFormat " + str(conf.get("recordFormat")) + " is not fmp4 or mpegts.")
+    return pathlib.Path(folder), re.compile(regex + r"\." + extension + "$"), extension
+
+
+def name_time(match):
+    """When a segment started, by its name, in the computer's local time as MediaMTX writes it."""
+    fields = match.groupdict()
+    if fields.get("s"):
+        return float(fields["s"])
+    if not all(fields.get(k) for k in ("Y", "m", "d", "H", "M", "S")):
+        return None
+    local = time.mktime((int(fields["Y"]), int(fields["m"]), int(fields["d"]), int(fields["H"]), int(fields["M"]), int(fields["S"]), 0, 0, -1))
+    return local + int(fields.get("f") or 0) / 1e6
+
+
+def boxes(data):
+    at = 0
+    while at + 8 <= len(data):
+        size = int.from_bytes(data[at:at + 4], "big")
+        if size < 8 or at + size > len(data):
+            return
+        yield data[at + 4:at + 8], data[at + 8:at + size]
+        at += size
+
+
+def mp4_seconds(path):
+    """How long a fragmented MP4's whole fragments play, by its video track, read
+    from the moov and each moof alone. None when it has no video fragment."""
+    scales, video, start, end = {}, None, None, None
+    with open(path, "rb") as file:
+        while True:
+            header = file.read(8)
+            if len(header) < 8:
+                break
+            size, kind = int.from_bytes(header[:4], "big"), header[4:]
+            head = 8
+            if size == 1:
+                size, head = int.from_bytes(file.read(8), "big"), 16
+            if size < head:
+                break
+            if kind not in (b"moov", b"moof"):
+                file.seek(size - head, 1)
+                continue
+            body = file.read(size - head)
+            if len(body) < size - head:
+                break
+            if kind == b"moov":
+                for trak_kind, trak in boxes(body):
+                    if trak_kind != b"trak":
+                        continue
+                    found = dict(boxes(trak))
+                    tkhd, mdia = found.get(b"tkhd", b""), dict(boxes(found.get(b"mdia", b"")))
+                    at = 20 if tkhd[:1] == b"\x01" else 12
+                    track = int.from_bytes(tkhd[at:at + 4], "big")
+                    mdhd, hdlr = mdia.get(b"mdhd", b""), mdia.get(b"hdlr", b"")
+                    scales[track] = int.from_bytes(mdhd[20:24] if mdhd[:1] == b"\x01" else mdhd[12:16], "big")
+                    if hdlr[8:12] == b"vide" and video is None:
+                        video = track
+                continue
+            for traf_kind, traf in boxes(body):
+                if traf_kind != b"traf":
+                    continue
+                track, default, base, ticks = None, 0, None, 0
+                for kind2, child in boxes(traf):
+                    flags = int.from_bytes(child[1:4], "big")
+                    if kind2 == b"tfhd":
+                        track = int.from_bytes(child[4:8], "big")
+                        if flags & 0x8:
+                            at = 8 + (8 if flags & 0x1 else 0) + (4 if flags & 0x2 else 0)
+                            default = int.from_bytes(child[at:at + 4], "big")
+                    elif kind2 == b"tfdt":
+                        base = int.from_bytes(child[4:12] if child[:1] == b"\x01" else child[4:8], "big")
+                    elif kind2 == b"trun":
+                        count = int.from_bytes(child[4:8], "big")
+                        at = 8 + (4 if flags & 0x1 else 0) + (4 if flags & 0x4 else 0)
+                        step = 4 * sum(1 for f in (0x100, 0x200, 0x400, 0x800) if flags & f)
+                        if flags & 0x100:
+                            ticks += sum(int.from_bytes(child[at + i * step:at + i * step + 4], "big") for i in range(count))
+                        else:
+                            ticks += count * default
+                if track == video and base is not None:
+                    start = base if start is None else min(start, base)
+                    end = base + ticks if end is None else max(end, base + ticks)
+    if video is None or start is None or not scales.get(video):
+        return None
+    return (end - start) / scales[video]
+
+
+def path_recordings(name, conf, ready):
+    """A record path's segments, grouped into recordings, oldest first."""
+    folder, pattern, extension = record_store(name, conf)
+    segments, now = [], time.time()
+    for root, dirs, files in os.walk(folder):
+        dirs.sort()
+        for file in files:
+            full = pathlib.Path(root) / file
+            relative = str(full.relative_to(folder))
+            match = pattern.search(relative)
+            stat = full.lstat()
+            if not match or not os.path.isfile(full) or os.path.islink(full):
+                continue
+            seconds = mp4_seconds(full) if extension == "mp4" else None
+            started = name_time(match)
+            if started is None:
+                started = stat.st_mtime - (seconds or 0)
+            segments.append({"path": str(full), "name": relative, "size": stat.st_size,
+                             "start": started, "seconds": seconds, "modified": stat.st_mtime})
+    segments.sort(key=lambda s: (s["start"], s["name"]))
+    if segments:
+        newest = segments[-1]
+        newest["writing"] = now - newest["modified"] < STILL_WRITING_S or (conf.get("record") is True and ready)
+    recordings = []
+    for segment in segments:
+        if segment["size"] == 0 and not segment.get("writing"):
+            continue
+        end = lambda s: s["start"] + s["seconds"] if s["seconds"] is not None else s["modified"]
+        if recordings and segment["start"] <= end(recordings[-1][-1]) + SAME_RECORDING_S:
+            recordings[-1].append(segment)
+        else:
+            recordings.append([segment])
+    listed = []
+    for group in recordings:
+        last = group[-1]
+        finish = last["start"] + last["seconds"] if last["seconds"] is not None else last["modified"]
+        entry = {"id": name + "/" + group[0]["name"], "startedAtUs": int(group[0]["start"] * 1e6),
+                 "durationUs": max(0, int((finish - group[0]["start"]) * 1e6)),
+                 "segments": [{"path": s["path"], "size": s["size"]} for s in group],
+                 "recording": bool(last.get("writing"))}
+        if extension != "mp4":
+            entry["notDownloadable"] = (name + " is recorded as MPEG-TS, and UXDuck downloads fragmented MP4 recordings. Set recordFormat: fmp4 for " + name + " in MediaMTX's configuration.")
+        listed.append(entry)
+    return str(folder), listed
+
+
+def list_recordings(found):
+    """Each camera that records on the vehicle, with its recordings."""
+    cameras = []
+    for path in found["paths"]:
+        record = path.get("record")
+        if not record:
+            continue
+        entry = {"camera": path["name"], "path": record["path"], "mode": record["mode"], "recordings": []}
+        try:
+            name = urllib.parse.quote(record["path"], safe="")
+            conf = get(found["api"], "/v3/config/paths/get/" + name)
+            try:
+                ready = is_ready(get(found["api"], "/v3/paths/get/" + name))
+            except OSError:
+                ready = False
+            entry["folder"], entry["recordings"] = path_recordings(record["path"], conf, ready)
+        except PermissionError as error:
+            entry["problem"] = "The user UXDuck signs in as cannot read " + str(error.filename) + ". Give it read access to the recordings."
+        except (OSError, ValueError) as error:
+            entry["problem"] = "UXDuck could not list " + record["path"] + "'s recordings (" + str(getattr(error, "reason", error))[:200] + ")."
+        cameras.append(entry)
+    return {"cameras": cameras, **({"problem": found["problem"]} if found.get("problem") else {}),
+            **({"recordProblem": found["recordProblem"]} if found.get("recordProblem") else {})}
+
 
 def main():
     request = json.loads(sys.stdin.read() or "{}")
@@ -745,6 +947,11 @@ def main():
     if len(changes) > 1:
         raise ValueError("Make one camera change at a time.")
     found = read()
+    if request.get("recordings"):
+        if changes:
+            raise ValueError("List the recordings on their own.")
+        print("recordings=" + json.dumps(list_recordings(found), ensure_ascii=True))
+        return
     applied = None
     if request.get("apply"):
         applied = apply(request["apply"], found)

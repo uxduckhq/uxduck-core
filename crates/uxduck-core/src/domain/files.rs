@@ -66,4 +66,46 @@ pub struct FileTransfer {
     pub rate_bps: Option<u64>,
     pub started_at_us: u64,
     pub updated_at_us: u64,
+    /// A recording copied from a camera computer over SSH rather than
+    /// from the flight controller (S429).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_computer: Option<FromComputer>,
+}
+
+/// A download of a recording made on the vehicle (S429, ADR-0066 R12):
+/// copied from its camera computer over the pinned SSH, segment by
+/// segment, each kept in a `.part` file until its hash matches, then
+/// joined into one file in the media folder and catalogued as a recording.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FromComputer {
+    pub computer_id: String,
+    /// The camera's live path, such as `front`.
+    pub camera: String,
+    /// The recording's id on the camera computer: its record path and its
+    /// first segment's name, such as `front_record/2026-11-23_10-02-11-000000.mp4`.
+    pub recording: String,
+    pub started_at_us: u64,
+    pub duration_us: u64,
+    /// Its segments in order, each by its absolute path on the computer.
+    pub segments: Vec<RemoteSegment>,
+    /// The kept file's name in the media folder, without its extension.
+    pub stem: String,
+    /// The camera computer's recording mode when it was listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<crate::domain::companion_cameras::VehicleRecordMode>,
+    /// Go on while this computer's connection is metered (ADR-0046 B12),
+    /// because a person chose to.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub over_metered: bool,
+    /// It waits because this computer's connection is metered.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waits_for_unmetered: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSegment {
+    pub path: String,
+    pub size: u64,
 }

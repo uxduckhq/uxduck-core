@@ -39,6 +39,19 @@ impl From<&core::FileTransfer> for dto::FileTransfer {
             rate_bps: transfer.rate_bps,
             started_at_us: transfer.started_at_us,
             updated_at_us: transfer.updated_at_us,
+            computer_id: transfer
+                .from_computer
+                .as_ref()
+                .map(|from| from.computer_id.clone()),
+            recording: transfer
+                .from_computer
+                .as_ref()
+                .map(|from| from.recording.clone()),
+            waits_for_unmetered: transfer.state == core::TransferState::Waiting
+                && transfer
+                    .from_computer
+                    .as_ref()
+                    .is_some_and(|from| from.waits_for_unmetered),
         }
     }
 }

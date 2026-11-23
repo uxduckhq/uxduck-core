@@ -1,0 +1,6 @@
+{
+  "method": "computer/recordings",
+  "params": {
+    "vehicleId": "veh-7f3a"
+  }
+}

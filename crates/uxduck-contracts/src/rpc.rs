@@ -295,6 +295,20 @@ pub enum ClientRequest {
     /// watchdog. Changes need a disarmed vehicle. Needs `config`. Result: `Vehicle`.
     #[serde(rename = "computer/cameras")]
     ComputerCameras(crate::dto::companion_cameras::ComputerCamerasParams),
+    /// The recordings a camera computer made on the vehicle (S429,
+    /// ADR-0066 R12), listed over pinned SSH: one per recording, however
+    /// many segments it spans, with its start, length and size, whether it
+    /// is still being written, and its download here. Needs `read`.
+    /// Result: `ComputerRecordingsResult`.
+    #[serde(rename = "computer/recordings")]
+    ComputerRecordings(crate::dto::companion_cameras::ComputerRecordingsParams),
+    /// Downloads a listed recording from the camera computer over pinned
+    /// SSH into this computer's recordings: resumed from what arrived after
+    /// a dropped link, checked against the computer's SHA-256 and joined
+    /// into one file without re-encoding. Needs `read`. Result:
+    /// `FileTransfer`.
+    #[serde(rename = "computer/download")]
+    ComputerDownload(crate::dto::companion_cameras::ComputerDownloadParams),
     /// Read or configure a companion network over pinned SSH. Needs `config`. Result: `Vehicle`.
     #[serde(rename = "computer/network")]
     ComputerNetwork(crate::dto::companion::ComputerNetworkParams),
@@ -2454,7 +2468,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 426] = [
+    pub const METHODS: [&'static str; 428] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2499,6 +2513,8 @@ impl ClientRequest {
         "computer/route",
         "computer/check",
         "computer/cameras",
+        "computer/recordings",
+        "computer/download",
         "computer/network",
         "computer/connectivity",
         "computer/run",

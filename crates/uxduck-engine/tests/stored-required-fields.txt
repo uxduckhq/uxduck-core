@@ -1105,3 +1105,19 @@ VideoSound.state
 VideoSoundCompanion.computer_id
 VideoSoundCompanion.path
 VideoSoundCompanion.vehicle_id
+
+# A recording downloaded from the vehicle's camera computer (S429,
+# ADR-0066 R12, 2026-11-23): new types inside optional fields of a file
+# transfer and a recording, which no release has stored.
+FromComputer.camera
+FromComputer.computer_id
+FromComputer.duration_us
+FromComputer.recording
+FromComputer.segments
+FromComputer.started_at_us
+FromComputer.stem
+RecordedOnVehicle.camera
+RecordedOnVehicle.computer_id
+RecordedOnVehicle.recording
+RemoteSegment.path
+RemoteSegment.size

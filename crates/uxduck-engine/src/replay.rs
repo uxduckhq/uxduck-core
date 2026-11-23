@@ -4332,6 +4332,7 @@ impl Engine {
         let name =
             attached.unwrap_or_else(|| path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned());
         let recording = VideoRecording {
+            on_vehicle: None,
             packed: None,
             id: format!("vr{}", &self.random.token()[..16]),
             // A camera named after the file: each added video its own.

@@ -1,0 +1,16 @@
+{
+  "id": "tr-1a2b",
+  "vehicleId": "veh-7f3a",
+  "direction": "download",
+  "path": "front_record/2026-11-22_12-40-00-000000.mp4",
+  "name": "2026-11-22 12.40.00 Plane - front.mp4",
+  "size": 1300000000,
+  "done": 126000000,
+  "state": "waiting",
+  "detail": "This computer's connection is metered, so the download waits for an unmetered one.",
+  "startedAtUs": 1795353600000000,
+  "updatedAtUs": 1795353660000000,
+  "computerId": "cmp-pi",
+  "recording": "front_record/2026-11-22_12-40-00-000000.mp4",
+  "waitsForUnmetered": true
+}

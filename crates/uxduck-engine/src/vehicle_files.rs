@@ -408,6 +408,7 @@ impl Engine {
             rate_bps: None,
             started_at_us: now,
             updated_at_us: now,
+            from_computer: None,
         };
         self.commit_as(actor(), Change::FileTransferUpserted { transfer });
         Ok(id)
@@ -458,6 +459,13 @@ impl Engine {
         for mut transfer in stopped {
             transfer.rate_bps = None;
             match transfer.direction {
+                // A download from a camera computer goes on from its part
+                // files once the daemon's port is set (S429).
+                TransferDirection::Download if transfer.from_computer.is_some() => {
+                    transfer.state = TransferState::Waiting;
+                    transfer.detail =
+                        Some("UXDuck restarted: it goes on with the camera computer".into());
+                }
                 TransferDirection::Download => {
                     transfer.state = TransferState::Waiting;
                     transfer.done = transfer
@@ -577,6 +585,7 @@ impl Engine {
             rate_bps: None,
             started_at_us: now,
             updated_at_us: now,
+            from_computer: None,
         };
         self.commit_as(
             actor(),
@@ -658,6 +667,7 @@ impl Engine {
             rate_bps: None,
             started_at_us: now,
             updated_at_us: now,
+            from_computer: None,
         };
         self.files.uploads.insert(transfer.id.clone(), bytes);
         self.commit_as(
@@ -716,6 +726,10 @@ impl Engine {
         if !transfer.state.active() {
             return to_value(&FileTransferDto::from(&transfer));
         }
+        if transfer.from_computer.is_some() {
+            let transfer = self.pause_from_computer(transfer);
+            return to_value(&FileTransferDto::from(&transfer));
+        }
         self.links.transfer(TransferOrder::CancelFile {
             vehicle_id: transfer.vehicle_id.clone(),
             id: id.to_owned(),
@@ -745,6 +759,9 @@ impl Engine {
             TransferState::Queued | TransferState::Running | TransferState::Done
         ) {
             return to_value(&FileTransferDto::from(&transfer));
+        }
+        if transfer.from_computer.is_some() {
+            return self.resume_from_computer(transfer);
         }
         if transfer.direction == TransferDirection::Upload && !self.files.uploads.contains_key(id) {
             return Err(ApiError::new(
@@ -785,7 +802,9 @@ impl Engine {
     /// copy goes.
     fn cancel_transfer(&mut self, id: &str) -> Result<(), ApiError> {
         let transfer = self.transfer(id)?;
-        if transfer.state.active() {
+        if transfer.from_computer.is_some() {
+            self.stop_from_computer(id, true);
+        } else if transfer.state.active() {
             self.links.transfer(TransferOrder::CancelFile {
                 vehicle_id: transfer.vehicle_id.clone(),
                 id: id.to_owned(),
@@ -1220,6 +1239,8 @@ impl Engine {
             .file_transfers
             .values()
             .filter(|t| t.state == TransferState::Waiting)
+            // A camera computer's downloads retry in the daemon (S429).
+            .filter(|t| t.from_computer.is_none())
             .filter(|t| now_us.saturating_sub(t.updated_at_us) >= RETRY_AFTER_US)
             .filter(|t| {
                 self.vehicle(&t.vehicle_id).is_some_and(|v| {

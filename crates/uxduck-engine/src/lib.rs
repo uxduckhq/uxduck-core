@@ -125,6 +125,7 @@ pub mod tray;
 mod tuning;
 pub mod vehicle_files;
 mod vehicle_kind;
+pub mod vehicle_recordings;
 mod vehicles;
 mod version;
 pub mod video;
@@ -475,6 +476,9 @@ pub struct Engine {
     /// A vehicle's files: requests waiting for it, and the copies' port
     /// (S121).
     files: vehicle_files::Files,
+    /// Recordings made on the vehicle: listings waiting for camera
+    /// computers, the latest of each, and the daemon's port (S429).
+    vehicle_recordings: vehicle_recordings::Recordings,
     /// Setup procedures' commands and progress not journaled yet (S184).
     setup: setup::Setups,
     /// What preflight checks need between evaluations (S192).
@@ -704,6 +708,7 @@ impl Engine {
             telemetry_alarms: telemetry_alarms::TelemetryAlarms::default(),
             practice: practice::Practice::default(),
             files: vehicle_files::Files::default(),
+            vehicle_recordings: vehicle_recordings::Recordings::default(),
             setup: setup::Setups::default(),
             preflight: preflight::Preflights::default(),
             terrain: terrain::TerrainState::default(),

@@ -204,6 +204,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
     start_finding(&engine, &options).await;
     // Photos and recordings, together in `media`: the Video storage
     // category (ADR-0007, S150).
+    // Recordings made on vehicles, copied over SSH (S429, ADR-0066 R12).
+    let recordings = crate::vehicle_recordings::Host::new(data_dir, &media, engine.clone());
+    let _ = engine
+        .run(move |e| e.set_recordings(Box::new(recordings)))
+        .await;
     let video = crate::video::start(options.video_port, &engine, media).await;
     // Simulated cameras' pictures (ADR-0063 Y7): who draws each, and why
     // none does.

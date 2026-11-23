@@ -1319,7 +1319,10 @@ impl Engine {
             .get(&params.source_id)
             .cloned()
             .ok_or_else(|| not_found(&params.source_id))?;
-        if source.url.is_none() || !source.added_by_hand {
+        // The camera made for downloads from the vehicle (ADR-0066 R12) gets
+        // its first address here and stays the same camera.
+        let place = crate::vehicle_recordings::place_camera(&source).is_some();
+        if !place && (source.url.is_none() || !source.added_by_hand) {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
                 "Only RTSP cameras you added can have more than one address.",
@@ -1429,6 +1432,10 @@ impl Engine {
         if let Input::Rtsp { host, port } | Input::Whep { host, port } = input(&primary)? {
             source.port = port;
             source.sender = format!("{host}:{port}");
+        }
+        if place {
+            source.added_by_hand = true;
+            source.state_detail = Some(format!("Connecting to {}", redact(&primary)));
         }
         source.url = Some(primary);
         source.fallback_urls = urls;
@@ -2618,6 +2625,34 @@ impl Engine {
                         "This address is already a fallback for another camera.",
                     ));
                 }
+                // The camera made for downloads from the vehicle (ADR-0066
+                // R12) whose live path this address names is this camera.
+                if let Some(vehicle_id) = &params.vehicle_id
+                    && let Some(place) = self.place_named_by(vehicle_id, &url)?
+                {
+                    let mut joined = self.added_by_address(
+                        place.id.clone(),
+                        url,
+                        name.or(Some(place.name)),
+                        Some(vehicle_id.clone()),
+                        &host,
+                        port,
+                    );
+                    joined.vehicle_only = place.vehicle_only;
+                    joined.first_seen_us = place.first_seen_us;
+                    joined.version = place.version + 1;
+                    self.commit_as(
+                        actor(),
+                        Change::VideoSourceUpserted {
+                            source: joined.clone(),
+                        },
+                    );
+                    self.review_recordings();
+                    return Ok(VideoAddResult {
+                        source: Some((&joined).into()),
+                        port: None,
+                    });
+                }
                 let id = format!("vs{}", &self.random.token()[..16]);
                 let source =
                     self.added_by_address(id, url, name, params.vehicle_id.clone(), &host, port);
@@ -3151,7 +3186,10 @@ impl Engine {
             }
             let wanted = (watched.contains(&source.id) || recording)
                 && source.capture.as_ref().is_none_or(|c| c.enabled)
-                && (source.url.is_none() || !urls.is_empty());
+                && (source.url.is_none() || !urls.is_empty())
+                // The camera made for downloads from the vehicle has no
+                // picture to fetch until it has an address (ADR-0066 R12).
+                && crate::vehicle_recordings::place_camera(&source).is_none();
             let was_needed = self.video.needed.contains(&source.id);
             if wanted != was_needed {
                 if wanted {

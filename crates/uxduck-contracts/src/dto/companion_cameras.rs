@@ -308,3 +308,99 @@ pub enum WatchdogChange {
     Install,
     Remove,
 }
+
+/// `computer/recordings` (S429): the recordings a camera computer made on
+/// the vehicle, listed over the pinned SSH. Name the computer, or a
+/// picture to list the computer that records it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerRecordingsParams {
+    pub vehicle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_id: Option<String>,
+    /// A picture (`VideoSource`): the computer whose camera its address
+    /// names, and only that camera.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+}
+
+/// `computer/recordings`'s answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerRecordingsResult {
+    pub vehicle_id: String,
+    pub computer_id: String,
+    pub computer_name: String,
+    /// Each camera that records on the vehicle.
+    pub cameras: Vec<CameraRecordings>,
+    /// Why the computer could not list them, for people.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+/// One camera's recordings on the vehicle, newest first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraRecordings {
+    /// Its live path, such as `front`.
+    pub camera: String,
+    /// The `MediaMTX` path that records it, such as `front_record`.
+    pub path: String,
+    /// The folder its segments are in on the computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    /// The picture on this computer whose address names this camera.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    pub recordings: Vec<RecordingOnVehicle>,
+    /// Why its recordings could not be listed, for people.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+/// One recording on the vehicle: from one arming or Record press to its
+/// end, however many segments `MediaMTX` wrote it in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingOnVehicle {
+    /// Its record path and its first segment's name.
+    pub id: String,
+    /// By the camera computer's clock.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub started_at_us: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub duration_us: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    pub segments: u32,
+    /// Its last segment is still being written: it downloads once it ends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recording: bool,
+    /// Why it cannot be downloaded, for people, besides still recording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_downloadable: Option<String>,
+    /// Its download, running, waiting, failed or done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_id: Option<String>,
+    /// The recording on this computer it was downloaded as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_id: Option<String>,
+}
+
+/// `computer/download` (S429): copy one listed recording to this
+/// computer's recordings, resumably, checked against the computer's hash.
+/// It answers with the transfer, which pauses, resumes and cancels as
+/// `files/pause`, `files/resume` and `files/cancel`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerDownloadParams {
+    pub vehicle_id: String,
+    pub computer_id: String,
+    /// A recording's id as `computer/recordings` listed it.
+    pub recording: String,
+    /// Download now even while this computer's connection is metered
+    /// (ADR-0046 B12). Without it, a download on a metered connection
+    /// waits for an unmetered one when Wait for unmetered networks is on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub over_metered: bool,
+}

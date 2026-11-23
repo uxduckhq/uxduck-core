@@ -58,6 +58,7 @@ mod tray;
 mod update;
 mod uploader;
 mod vehicle_files;
+mod vehicle_recordings;
 mod video;
 mod wakes;
 

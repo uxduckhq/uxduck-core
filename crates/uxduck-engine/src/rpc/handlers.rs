@@ -205,6 +205,16 @@ pub(crate) fn handle(
             require(Config)?;
             engine.cameras_computer(connection, &params)
         }
+        // Listing and downloading need `read`, as a vehicle's files do
+        // (ADR-0027 F6).
+        ClientRequest::ComputerRecordings(params) => {
+            require(Read)?;
+            engine.computer_recordings(&params)
+        }
+        ClientRequest::ComputerDownload(params) => {
+            require(Read)?;
+            engine.computer_download(&params)
+        }
         ClientRequest::ComputerCheck(params) => {
             require(Config)?;
             engine.check_computer(connection, params)

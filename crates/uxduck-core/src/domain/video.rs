@@ -785,7 +785,22 @@ pub struct VideoRecording {
     /// from the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packed: Option<PackedVideo>,
+    /// Recorded on the vehicle by its camera computer and downloaded to
+    /// this computer (S429, ADR-0017 V21): which recording it was there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_vehicle: Option<RecordedOnVehicle>,
     pub version: u64,
+}
+
+/// A recording the camera computer made and UXDuck downloaded (S429).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordedOnVehicle {
+    pub computer_id: String,
+    /// The camera's live path, such as `front`.
+    pub camera: String,
+    /// Its id on the camera computer (`FromComputer::recording`).
+    pub recording: String,
 }
 
 /// Where in a `.uxflight` a recording is kept (ADR-0062).

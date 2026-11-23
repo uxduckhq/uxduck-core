@@ -270,6 +270,11 @@ impl From<&core::VideoRecording> for dto::VideoRecording {
                 path: p.path.clone(),
                 place: crate::dto::flight::place_of(&p.path),
             }),
+            on_vehicle: v.on_vehicle.as_ref().map(|o| dto::RecordedOnVehicle {
+                computer_id: o.computer_id.clone(),
+                camera: o.camera.clone(),
+                recording: o.recording.clone(),
+            }),
             trigger: match v.trigger {
                 core::RecordingTrigger::ByHand => dto::RecordingTrigger::ByHand,
                 core::RecordingTrigger::Armed => dto::RecordingTrigger::Armed,

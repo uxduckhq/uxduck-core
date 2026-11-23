@@ -277,6 +277,11 @@ fn check(name: &str) {
         ("result", "computer_runs") => {
             round_trip::<uxduck_contracts::dto::terminal::ComputerRunsResult>(name, &json);
         }
+        ("result", "computer_recordings") => {
+            round_trip::<uxduck_contracts::dto::companion_cameras::ComputerRecordingsResult>(
+                name, &json,
+            );
+        }
         // The last frame on a `/terminal` socket.
         ("result", "terminal_ended") => {
             round_trip::<uxduck_contracts::dto::terminal::TerminalEnded>(name, &json);
@@ -832,7 +837,11 @@ fn check(name: &str) {
         ("result", "files_read") => {
             round_trip::<uxduck_contracts::dto::files::FilesReadResult>(name, &json);
         }
-        ("result", "files_download" | "files_upload" | "files_pause" | "files_resume") => {
+        (
+            "result",
+            "files_download" | "files_upload" | "files_pause" | "files_resume"
+            | "computer_download",
+        ) => {
             round_trip::<uxduck_contracts::dto::files::FileTransfer>(name, &json);
         }
         ("result", "files_save") => {

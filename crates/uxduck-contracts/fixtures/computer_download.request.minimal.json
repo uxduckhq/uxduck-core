@@ -1,0 +1,8 @@
+{
+  "method": "computer/download",
+  "params": {
+    "vehicleId": "veh-7f3a",
+    "computerId": "cmp-pi",
+    "recording": "front_record/2026-11-22_12-40-00-000000.mp4"
+  }
+}

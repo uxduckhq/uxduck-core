@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "d93b70914a2444de4df7681f60a941ce2eb26958",
+  "sourceCommit": "e3a649f1f6242e2590dcb48460efb5c68bc3fd08",
   "licenseReady": true,
   "files": [
     {
@@ -176,12 +176,12 @@
     },
     {
       "path": "crates/uxduck-agent/src/tools.rs",
-      "sha256": "70262bfc908e28be1cd97fc0e9b1b9a508c9de08f72a9b154e3d19898b6bb31e",
+      "sha256": "4fbcee0679c06907c7f4c5d03386d5de228b228bd0b7a778d99a9c18fece1923",
       "executable": false
     },
     {
       "path": "crates/uxduck-agent/src/tools/mcp.rs",
-      "sha256": "010f6f7e317927932d2e05a67f9c7a2e67f1c3f77e2c13347e7d83e8c50f2bde",
+      "sha256": "fe03399e0c65065bb4f74bd844daa52878bf18ae23b06ba87729662fe1edf345",
       "executable": false
     },
     {
@@ -1210,6 +1210,21 @@
       "executable": false
     },
     {
+      "path": "crates/uxduck-contracts/fixtures/computer_download.request.json",
+      "sha256": "26812d70a8cd4db5dd0a74badeaf54aa9bb824b2419d03773a1ca15c5c0daf80",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-contracts/fixtures/computer_download.request.minimal.json",
+      "sha256": "0b296ab0be70def8113721601cc4158b6da8f833c30a03f4b6dceb415ded191c",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-contracts/fixtures/computer_download.result.json",
+      "sha256": "29a38922cf916d1483a7358739e4966bb09d39da36fa9f94f742c20db4f2f64e",
+      "executable": false
+    },
+    {
       "path": "crates/uxduck-contracts/fixtures/computer_network.request.json",
       "sha256": "6b587ab86c4c3365043d10bc113a8ddc8b7ede03a476368bde648169cdad4781",
       "executable": false
@@ -1217,6 +1232,26 @@
     {
       "path": "crates/uxduck-contracts/fixtures/computer_network.result.json",
       "sha256": "c561ebe24cf98d0106f47101b5cd9406db9d8fb7720274df083c82873ea6fb00",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-contracts/fixtures/computer_recordings.request.json",
+      "sha256": "a783f70487b7cb17d388787583c55a6aafff5c5b38b507227a40a51ff24ff0a9",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-contracts/fixtures/computer_recordings.request.minimal.json",
+      "sha256": "32b9903c99881ce8287d00c87af1a82f2a156b62968419479ec408318e37df5d",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-contracts/fixtures/computer_recordings.result.json",
+      "sha256": "f5e140523cc8b0a985db8253ac55a30d39fb82a8a69eeef2913409f05d74bbfa",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-contracts/fixtures/computer_recordings.result.problem.json",
+      "sha256": "b95a8d5a5188f424849cd67a80cff8921315a952b76accae97a78807e671f59a",
       "executable": false
     },
     {
@@ -5946,7 +5981,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/convert/files.rs",
-      "sha256": "b812a6f80eb393fb0fe62f09d0e7c0b00590af62997342b527806fc8914f459c",
+      "sha256": "223d1003957464efae3998ddd75ffed8c178c486c1dac36e3f51c811aaf5f4d1",
       "executable": false
     },
     {
@@ -6066,7 +6101,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/convert/video.rs",
-      "sha256": "5e2b65ac1b8fce23f2626517b204b6e0d8a8059ce915d4a884480d3354375210",
+      "sha256": "ed7b962a05765d0138d8f93b4f3a1f935402ed1a6c6ac5bf95d367df7cc3acd4",
       "executable": false
     },
     {
@@ -6111,7 +6146,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/companion_cameras.rs",
-      "sha256": "9e687e4517f1d4dd3f100e2a480d948f07759f0a98dad7a68e3a64d481f46f06",
+      "sha256": "460799029335989ef7f92cc4fdc8954447d236d04d4b01c2f336281a5b0df923",
       "executable": false
     },
     {
@@ -6141,7 +6176,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/files.rs",
-      "sha256": "69df731074082283d77f5b45eb6f9e5b76e4758df697fd543c1a9927db7ba5ab",
+      "sha256": "05c27cc51d940fe25f738fff6c18f11fdbe76c6b7d5a36acddd1822eb741138e",
       "executable": false
     },
     {
@@ -6386,7 +6421,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/video.rs",
-      "sha256": "afb15ca33941e913d7347f828a69df166760634c576c2032f7b4fb38a7e264e8",
+      "sha256": "5c56c77129f91fae172e6c2d57eef1628b2d97aa78624866e6bdbb03c761a42e",
       "executable": false
     },
     {
@@ -6411,7 +6446,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/rpc.rs",
-      "sha256": "0361dd857ce0d09ddadea38af5756443c5dd7e75a1e10fc02125e879f7a3deba",
+      "sha256": "d67276ff479d815198bd1693aeca1aac7f17383f3e370e80966fb7b367c8a433",
       "executable": false
     },
     {
@@ -6426,7 +6461,7 @@
     },
     {
       "path": "crates/uxduck-contracts/tests/fixtures.rs",
-      "sha256": "e365cfd4dfbf988c500204ea7dee08eba7b46099b480b10b4a95d6e427747c6a",
+      "sha256": "39ed1f112879f32ff7c4f50d5c1dc4c3f131c5dd7b807957a0886ba36cc0289b",
       "executable": false
     },
     {
@@ -6526,7 +6561,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/files.rs",
-      "sha256": "d2aa2a0804bef8d123043dc30d282ec00ccb8ea28d7070f28fba98dc96ea7e1f",
+      "sha256": "e9edd5fad74b7ada769ba1f095045e76ca6580ab0a40c4249876c536a90529ae",
       "executable": false
     },
     {
@@ -6731,7 +6766,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/video.rs",
-      "sha256": "76ad6a50563d9ee23b07904b8f0c1d0e4219be08ba79b9d82da8b0758e6274be",
+      "sha256": "460935e9d058546ae380b8b2582ded1dfd0c9b1897390a52d6934d8bcf2515cb",
       "executable": false
     },
     {
@@ -6996,7 +7031,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/lib.rs",
-      "sha256": "141ecb48886b955c770044d5287174e40848ded0bd8f8c31fdfe43927c834c4f",
+      "sha256": "96605ad1511e6b24abfda2506c9309e689b1b4a3527e144496dfc54270b31f9e",
       "executable": false
     },
     {
@@ -7326,12 +7361,12 @@
     },
     {
       "path": "crates/uxduck-engine/src/recordings.rs",
-      "sha256": "d5ac11bcd859976b9219932746a13d0f03665c4b7ca857c6e38ca209958e54eb",
+      "sha256": "c065893ea04a7dc3e5beebcad91bb2824c17136a9bc832e901a31d6d397358b6",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/replay.rs",
-      "sha256": "89cda9dabe28bba5f6a9423f66f39f815b7199253dc23390263566e0e4167904",
+      "sha256": "7e8cebabbb8361e32ecedfc24aa355addd0a07c7641a9ebb5c826947c1b58bf0",
       "executable": false
     },
     {
@@ -7346,7 +7381,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/rpc/handlers.rs",
-      "sha256": "1156c5d3f21b1c1f909a24d221d2dd7f44d325bcfcccf07952f79d203dd5c308",
+      "sha256": "eba9949dd02ffaebb5fe957b7b7e5b47c6012dabd9065f47be4ef99a4c158473",
       "executable": false
     },
     {
@@ -7561,12 +7596,17 @@
     },
     {
       "path": "crates/uxduck-engine/src/vehicle_files.rs",
-      "sha256": "3f14719b70a101502a696e8c150aacac25d61568f421a78bf3aa089215997134",
+      "sha256": "ba5ce9b3fc4e4a23e1bbf9e423b253226b7628bb5027d4bccce0dd124783ff05",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/vehicle_kind.rs",
       "sha256": "ae8c4cfee99b34dc588e469379b36c3d1c19a15aa48da5e9f1e6a82430e1c26d",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-engine/src/vehicle_recordings.rs",
+      "sha256": "4bc161a8fe27ec8f41082106112dd08d40d2954ab259b650323f2308417cba86",
       "executable": false
     },
     {
@@ -7581,7 +7621,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/video.rs",
-      "sha256": "85d94012a320544b364e8397a0d78f36126dc8b4903b3f81532278f41f146069",
+      "sha256": "f2f0abe9d7b56a7607843901ef82b5b6b22918242335b93f3415978305b74963",
       "executable": false
     },
     {
@@ -7646,7 +7686,7 @@
     },
     {
       "path": "crates/uxduck-engine/tests/stored-required-fields.txt",
-      "sha256": "d326ee793f017c42a0e8b5b5d0490953b6b27b3d72f7a1d4f21b9718d59deb83",
+      "sha256": "896d0662643b7c56f0a5f1d0b09b7da72d28920b2b2b6af12723b649eed7774f",
       "executable": false
     },
     {
@@ -8226,7 +8266,7 @@
     },
     {
       "path": "crates/uxduck-media/src/mp4.rs",
-      "sha256": "93e214197f45ae441ff7d9e589a1cc8e65094268d3a8f411b0485c443e1a07e0",
+      "sha256": "21c18f3cc25d4c43eb8ca90bea299a03874b92470299ac414444b80d32c11adf",
       "executable": false
     },
     {
@@ -8736,12 +8776,12 @@
     },
     {
       "path": "crates/uxduck/src/companions/camera.py",
-      "sha256": "b047b119d2b493db010e0a5811354f9c85b3abb3876513c5244d09d82b22b038",
+      "sha256": "cc67cc16d5e50bdf3e7fff7207adff1105e9a620e849cde96e75f1b72f27ad3d",
       "executable": false
     },
     {
       "path": "crates/uxduck/src/companions/camera_test.py",
-      "sha256": "a3e055e8c61a11371869a1c2c06050bd95ac40bd3c41c7d7a47c0252a280504a",
+      "sha256": "92334be864248f8f2a5f751508a7ebb4f08b2d5427093781c9505b2abdae68b4",
       "executable": false
     },
     {
@@ -8836,7 +8876,7 @@
     },
     {
       "path": "crates/uxduck/src/daemon/mod.rs",
-      "sha256": "552580f602aeec8dc6200cd010420ed57a1bb32229e1067d113d50d72ae191c6",
+      "sha256": "078ecb58781f651c50afc1da38a261707ddcfcd02337b57ccd7c0e81dd9a4eb9",
       "executable": false
     },
     {
@@ -8996,7 +9036,7 @@
     },
     {
       "path": "crates/uxduck/src/main.rs",
-      "sha256": "8d5a1786a4f3c38f03c24ce8682dacaa525a2b338f4dd8bcaf350fba3a60a409",
+      "sha256": "4fc3804b88700e94b195416f0de7b0f3358455d80788550384612326901dea34",
       "executable": false
     },
     {
@@ -9277,6 +9317,16 @@
     {
       "path": "crates/uxduck/src/vehicle_files.rs",
       "sha256": "c68c102c3d2cb144fb5741cc2079d0b4785661fd984d2a25cc9ee837dcf227f6",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck/src/vehicle_recordings.rs",
+      "sha256": "85f4e653bf863ee1f21600704fba58fe8d508990c5895dbebe40219567e36214",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck/src/vehicle_recordings/tests.rs",
+      "sha256": "5b525a999ee2170fa85c8c9ab1e3ede337299a28b4d6875e4b9fda00ce898d44",
       "executable": false
     },
     {
@@ -9666,7 +9716,7 @@
     },
     {
       "path": "packages/protocol/src/generated/types.gen.ts",
-      "sha256": "2220d30fa8a4c40de45be96b38de4d02b6360ccaee8841f3923e86d670fabc9d",
+      "sha256": "69ee3f493345858c6a8c5296b6b2ee2a190e2c83e79f9aed8468b7b16c36e1e6",
       "executable": false
     },
     {

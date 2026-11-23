@@ -176,4 +176,15 @@ pub struct FileTransfer {
     pub started_at_us: u64,
     #[schemars(schema_with = "crate::safe::integer")]
     pub updated_at_us: u64,
+    /// A recording copied from this vehicle's camera computer over SSH
+    /// (S429): the computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_id: Option<String>,
+    /// Its id on the camera computer, as `computer/recordings` lists it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<String>,
+    /// It waits because this computer's connection is metered (ADR-0046
+    /// B12): `computer/download` with `overMetered` sends it now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waits_for_unmetered: bool,
 }

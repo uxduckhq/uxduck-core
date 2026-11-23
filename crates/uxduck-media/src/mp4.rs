@@ -687,6 +687,230 @@ fn trun_ticks(trun: &[u8]) -> u64 {
     ticks
 }
 
+/// Where each child box lies in a box's body: its type, and the range of
+/// its whole box (header included) in the body.
+fn child_ranges(body: &[u8]) -> Vec<([u8; 4], std::ops::Range<usize>)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(header) = body.get(at..at + 8) {
+        let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        if size < 8 || at + size > body.len() {
+            break;
+        }
+        out.push(([header[4], header[5], header[6], header[7]], at..at + size));
+        at += size;
+    }
+    out
+}
+
+/// The track ids a `moov` declares, in order.
+fn track_ids(moov: &[u8]) -> Vec<u32> {
+    children(moov)
+        .into_iter()
+        .filter(|(kind, _)| *kind == b"trak")
+        .filter_map(|(_, trak)| {
+            let (_, tkhd) = children(trak)
+                .into_iter()
+                .find(|(kind, _)| *kind == b"tkhd")?;
+            let at = if tkhd.first() == Some(&1) { 20 } else { 12 };
+            tkhd.get(at..at + 4)
+                .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        })
+        .collect()
+}
+
+/// Joins the segments of one recording, such as the ones `MediaMTX` writes
+/// on a camera computer (S429), into one fragmented MP4 without
+/// re-encoding: the first segment's `ftyp` and `moov`, then every
+/// segment's fragments in order, each track's decode times carried on from
+/// where the segment before ended and the fragments numbered again. A
+/// box cut short at a segment's end, as a power cut leaves, is left out.
+///
+/// # Errors
+/// A segment that cannot be read or written, one whose tracks are not the
+/// first's, or a fragment this cannot carry on, in words.
+pub fn join<R: std::io::Read + std::io::Seek, W: std::io::Write>(
+    segments: &mut [R],
+    out: &mut W,
+) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    use std::io::{Read as _, SeekFrom};
+    let io = |e: std::io::Error| format!("cannot read or write the recording: {e}");
+    let mut tracks: Option<Vec<u32>> = None;
+    let mut ends: BTreeMap<u32, u64> = BTreeMap::new();
+    let mut sequence = 0u32;
+    for (index, file) in segments.iter_mut().enumerate() {
+        let len = file.seek(SeekFrom::End(0)).map_err(io)?;
+        let mut shifts: BTreeMap<u32, i128> = BTreeMap::new();
+        let mut moof: Option<Vec<u8>> = None;
+        let mut at = 0u64;
+        let mut header = [0u8; 16];
+        while at + 8 <= len {
+            file.seek(SeekFrom::Start(at)).map_err(io)?;
+            file.read_exact(&mut header[..8]).map_err(io)?;
+            let kind = [header[4], header[5], header[6], header[7]];
+            let size = match u32::from_be_bytes([header[0], header[1], header[2], header[3]]) {
+                0 => len - at,
+                1 => {
+                    file.read_exact(&mut header[8..16]).map_err(io)?;
+                    u64::from_be_bytes(header[8..16].try_into().unwrap_or_default())
+                }
+                size => u64::from(size),
+            };
+            if size < 8 || at + size > len {
+                break;
+            }
+            let start = at;
+            at += size;
+            let whole = |file: &mut R| -> Result<Vec<u8>, String> {
+                let mut bytes = vec![0; usize::try_from(size).map_err(|_| "a box too large")?];
+                file.seek(SeekFrom::Start(start)).map_err(io)?;
+                file.read_exact(&mut bytes).map_err(io)?;
+                Ok(bytes)
+            };
+            match &kind {
+                b"ftyp" if index == 0 => out.write_all(&whole(file)?).map_err(io)?,
+                b"moov" => {
+                    let bytes = whole(file)?;
+                    let ids = track_ids(&bytes[8..]);
+                    match &tracks {
+                        None => {
+                            out.write_all(&bytes).map_err(io)?;
+                            tracks = Some(ids);
+                        }
+                        Some(first) if *first != ids => {
+                            return Err(format!(
+                                "segment {} has other tracks than the first, so it cannot be joined without re-encoding",
+                                index + 1
+                            ));
+                        }
+                        Some(_) => {}
+                    }
+                }
+                b"moof" => {
+                    let mut bytes = whole(file)?;
+                    sequence += 1;
+                    carry_on(&mut bytes, index == 0, sequence, &mut shifts, &mut ends)?;
+                    moof = Some(bytes);
+                }
+                b"mdat" => {
+                    let Some(bytes) = moof.take() else {
+                        continue;
+                    };
+                    out.write_all(&bytes).map_err(io)?;
+                    file.seek(SeekFrom::Start(start)).map_err(io)?;
+                    let copied = std::io::copy(&mut file.by_ref().take(size), out).map_err(io)?;
+                    if copied != size {
+                        return Err("a segment ended while it was being read".into());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if tracks.is_none() {
+        return Err("no segment has an init segment (moov)".into());
+    }
+    Ok(())
+}
+
+/// One `moof` carried on in a joined recording: its number, and each
+/// track's decode time moved to where that track has got to.
+fn carry_on(
+    moof: &mut [u8],
+    first_segment: bool,
+    sequence: u32,
+    shifts: &mut std::collections::BTreeMap<u32, i128>,
+    ends: &mut std::collections::BTreeMap<u32, u64>,
+) -> Result<(), String> {
+    let body = 8;
+    for (kind, range) in child_ranges(&moof[body..]) {
+        let (from, to) = (body + range.start, body + range.end);
+        match &kind {
+            b"mfhd" => {
+                if let Some(slot) = moof.get_mut(from + 12..from + 16) {
+                    slot.copy_from_slice(&sequence.to_be_bytes());
+                }
+            }
+            b"traf" => carry_traf(&mut moof[from..to], first_segment, shifts, ends)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn carry_traf(
+    traf: &mut [u8],
+    first_segment: bool,
+    shifts: &mut std::collections::BTreeMap<u32, i128>,
+    ends: &mut std::collections::BTreeMap<u32, u64>,
+) -> Result<(), String> {
+    let read = |bytes: &[u8], at: usize| {
+        bytes
+            .get(at..at + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let mut track = None;
+    let mut default_duration = 0u32;
+    let mut tfdt = None;
+    let mut ticks = 0u64;
+    for (kind, range) in child_ranges(&traf[8..]) {
+        let child = &traf[8 + range.start..8 + range.end];
+        let body = &child[8..];
+        match &kind {
+            b"tfhd" => {
+                let flags = read(body, 0).unwrap_or(0) & 0x00ff_ffff;
+                if flags & 0x1 != 0 {
+                    return Err("a fragment gives its data's place in the file, so it cannot be moved into another".into());
+                }
+                track = read(body, 4);
+                if flags & 0x8 != 0 {
+                    let at = 8 + if flags & 0x2 != 0 { 4 } else { 0 };
+                    default_duration = read(body, at).unwrap_or(0);
+                }
+            }
+            b"tfdt" => {
+                tfdt = Some((
+                    8 + range.start + 8,
+                    body.first() == Some(&1),
+                    tfdt_ticks(body),
+                ));
+            }
+            b"trun" => {
+                let flags = read(body, 0).unwrap_or(0) & 0x00ff_ffff;
+                ticks += if flags & 0x100 != 0 {
+                    trun_ticks(body)
+                } else {
+                    u64::from(read(body, 4).unwrap_or(0)) * u64::from(default_duration)
+                };
+            }
+            _ => {}
+        }
+    }
+    let track = track.ok_or("a fragment names no track")?;
+    let (at, wide, base) = tfdt.ok_or("a fragment has no decode time (tfdt)")?;
+    let shift = *shifts.entry(track).or_insert_with(|| {
+        if first_segment {
+            0
+        } else {
+            i128::from(ends.get(&track).copied().unwrap_or(0)) - i128::from(base)
+        }
+    });
+    let moved = u64::try_from(i128::from(base) + shift)
+        .map_err(|_| "a fragment's decode time went before the recording's start")?;
+    if wide {
+        traf[at + 4..at + 12].copy_from_slice(&moved.to_be_bytes());
+    } else {
+        let narrow = u32::try_from(moved)
+            .map_err(|_| "the joined recording is longer than a 32-bit decode time holds")?;
+        traf[at + 4..at + 8].copy_from_slice(&narrow.to_be_bytes());
+    }
+    let end = moved + ticks;
+    let slot = ends.entry(track).or_insert(0);
+    *slot = (*slot).max(end);
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_possible_truncation, reason = "test sizes")]
 mod tests {
@@ -719,6 +943,96 @@ mod tests {
             &[0, 0, 0, 1, 0x65, 1, 2, 3],
         ]
         .concat()
+    }
+
+    #[test]
+    fn segments_join_into_one_recording_whose_times_carry_on() {
+        let sets = ParameterSets::of(Codec::H264, &key());
+        let init = init_segment(Codec::H264, &sets, 1280, 720);
+        let k = key();
+        let picture = |duration| Sample {
+            annex_b: &k,
+            duration,
+            key: true,
+            composition_offset: 0,
+        };
+        // Each segment counts from its own start, as MediaMTX writes them,
+        // and the last is cut short by a power cut.
+        let one = [
+            init.clone(),
+            fragment(1, 0, &[picture(1800), picture(1800)]),
+        ]
+        .concat();
+        let two = [
+            init.clone(),
+            fragment(1, 0, &[picture(1800)]),
+            fragment(2, 1800, &[picture(900)]),
+        ]
+        .concat();
+        let whole_three = [init.clone(), fragment(1, 0, &[picture(1800)])].concat();
+        let three = [
+            whole_three.clone(),
+            fragment(2, 1800, &[picture(1800)])[..20].to_vec(),
+        ]
+        .concat();
+        let mut joined = Vec::new();
+        join(
+            &mut [
+                std::io::Cursor::new(one),
+                std::io::Cursor::new(two),
+                std::io::Cursor::new(three),
+            ],
+            &mut joined,
+        )
+        .unwrap();
+        assert_eq!(
+            boxes(&joined),
+            [
+                "ftyp", "moov", "moof", "mdat", "moof", "mdat", "moof", "mdat", "moof", "mdat"
+            ]
+        );
+        let (_, fragments) = layout(&joined);
+        let starts: Vec<u64> = fragments.iter().map(|f| f.start_us).collect();
+        assert_eq!(starts, [0, 40_000, 60_000, 70_000]);
+        assert_eq!(duration_us(&joined), 90_000);
+        // Numbered again, one after another.
+        let numbers: Vec<u32> = fragments
+            .iter()
+            .map(|f| {
+                let at = f.offset as usize + 8 + 12;
+                u32::from_be_bytes(joined[at..at + 4].try_into().unwrap())
+            })
+            .collect();
+        assert_eq!(numbers, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn segments_with_other_tracks_are_not_joined() {
+        let sets = ParameterSets::of(Codec::H264, &key());
+        let k = key();
+        let sample = Sample {
+            annex_b: &k,
+            duration: 1800,
+            key: true,
+            composition_offset: 0,
+        };
+        let one = [
+            init_segment(Codec::H264, &sets, 1280, 720),
+            fragment(1, 0, std::slice::from_ref(&sample)),
+        ]
+        .concat();
+        let sound = AudioConfig::Opus(crate::opus::OpusConfig { channels: 2 });
+        let two = [
+            init_segment_with_sound(Codec::H264, &sets, 1280, 720, Some(&sound)),
+            fragment(1, 0, &[sample]),
+        ]
+        .concat();
+        let error = join(
+            &mut [std::io::Cursor::new(one), std::io::Cursor::new(two)],
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.contains("other tracks"), "{error}");
     }
 
     #[test]

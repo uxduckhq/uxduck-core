@@ -35,6 +35,13 @@ pub const AGENT_METHODS: &[&str] = &[
     // operator, shown the whole command, allows it. The interactive
     // `terminal/*` stays a person's.
     "computer/run",
+    // What a camera computer recorded on the vehicle (S429): read only,
+    // so an agent can say what is there and how long each recording is,
+    // and download one (maintainer, 2026-11-23: "yea agents can
+    // download"). Pausing and cancelling stay the person's `files/*`, as
+    // for every transfer.
+    "computer/recordings",
+    "computer/download",
     "place/search",
     "place/locate",
     // A named area's outline (FB-177): it waits on the map for the
@@ -1249,6 +1256,18 @@ mod tests {
         assert!(AGENT_METHODS.contains(&"sim/stop"));
         for method in ["vehicle/hide", "link/remove", "vehicle/delete"] {
             assert!(!AGENT_METHODS.contains(&method), "{method}");
+            assert!(KEPT_FROM_AGENTS.contains(&method), "{method}");
+        }
+    }
+
+    /// An agent lists and downloads what a camera computer recorded on the
+    /// vehicle (S429). Pausing and cancelling a transfer stay the
+    /// person's, as for any transfer.
+    #[test]
+    fn agents_list_and_download_recordings_on_the_vehicle() {
+        assert!(AGENT_METHODS.contains(&"computer/recordings"));
+        assert!(AGENT_METHODS.contains(&"computer/download"));
+        for method in ["files/pause", "files/resume", "files/cancel"] {
             assert!(KEPT_FROM_AGENTS.contains(&method), "{method}");
         }
     }
