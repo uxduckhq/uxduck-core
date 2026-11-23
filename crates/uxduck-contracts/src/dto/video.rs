@@ -299,6 +299,10 @@ pub struct VideoSource {
     pub state: VideoState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_detail: Option<String>,
+    /// What the picture says while it plays, such as a WebRTC camera's
+    /// connection carrying too little for its pictures (ADR-0064 W7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_note: Option<String>,
     /// The vehicle it belongs to: by the sender's address, or chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_id: Option<String>,

@@ -2,7 +2,9 @@
 //! the hub, NACKs without RTX, the answer's candidates kept on the
 //! address's host, an ICE restart following the vehicle, a new session and
 //! then RTSP when the restart fails, a pinned certificate, and a stall
-//! that moves to the RTSP address kept set up (ADR-0057 D12 and D13).
+//! that moves to the RTSP address kept set up (ADR-0057 D12 and D13). A
+//! squeezed link keeps the WHEP session, and a dead one falls back to RTSP
+//! on its host and comes back at a keyframe.
 //!
 //! The `MediaMTX` tests need `MediaMTX` 1.21 (`MEDIAMTX`, else `mediamtx` on the
 //! path) and an `FFmpeg` with `libx264`, so they are ignored by default:
@@ -285,15 +287,22 @@ impl Node {
 
     /// The `WebRTC` sessions `MediaMTX` holds now.
     async fn sessions(&self) -> usize {
-        let listed: serde_json::Value = reqwest::get(format!(
-            "http://127.0.0.1:{}/v3/webrtcsessions/list",
-            self.api
-        ))
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+        self.listed("webrtcsessions").await
+    }
+
+    /// The RTSP sessions `MediaMTX` holds now, the publisher's included.
+    async fn rtsp_sessions(&self) -> usize {
+        self.listed("rtspsessions").await
+    }
+
+    async fn listed(&self, what: &str) -> usize {
+        let listed: serde_json::Value =
+            reqwest::get(format!("http://127.0.0.1:{}/v3/{what}/list", self.api))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
         listed["items"].as_array().map_or(0, Vec::len)
     }
 }
@@ -313,6 +322,12 @@ struct Connection {
     requests: Arc<Mutex<Vec<String>>>,
     /// RTSP connections asked for, those a cut drops included.
     rtsp_connections: Arc<AtomicUsize>,
+    /// WebRTC alone is down: its UDP is dropped and its HTTP refused, as
+    /// when the WHEP sender restarts, while RTSP passes.
+    whep_down: Arc<AtomicBool>,
+    /// The bits a second `MediaMTX`'s UDP may send through, the rest dropped
+    /// as a squeezed link drops them. No cap at 0.
+    rate_bps: Arc<AtomicUsize>,
 }
 
 impl Connection {
@@ -326,10 +341,12 @@ impl Connection {
             let (mut up, mut down) = (vec![0u8; 2048], vec![0u8; 2048]);
             let mut client = None;
             let mut from_server = 0usize;
+            // A token bucket for `rate_bps`, holding at most 100 ms of it.
+            let (mut tokens, mut filled) = (0.0f64, Instant::now());
             loop {
                 tokio::select! {
                     Ok((n, from)) = outside.recv_from(&mut up) => {
-                        if relay.cut.load(Ordering::SeqCst) {
+                        if relay.cut.load(Ordering::SeqCst) || relay.whep_down.load(Ordering::SeqCst) {
                             continue;
                         }
                         client = Some(from);
@@ -337,8 +354,21 @@ impl Connection {
                         let _ = inside.send_to(&up[..n], server).await;
                     }
                     Ok((n, _)) = inside.recv_from(&mut down) => {
-                        if relay.cut.load(Ordering::SeqCst) {
+                        if relay.cut.load(Ordering::SeqCst) || relay.whep_down.load(Ordering::SeqCst) {
                             continue;
+                        }
+                        #[allow(clippy::cast_precision_loss, reason = "bytes a second")]
+                        let rate = relay.rate_bps.load(Ordering::SeqCst) as f64 / 8.0;
+                        if rate > 0.0 {
+                            let now = Instant::now();
+                            tokens = (tokens + (now - filled).as_secs_f64() * rate).min(rate / 10.0);
+                            filled = now;
+                            #[allow(clippy::cast_precision_loss, reason = "a datagram's size")]
+                            let size = n as f64;
+                            if tokens < size {
+                                continue;
+                            }
+                            tokens -= size;
                         }
                         relay.datagrams.fetch_add(1, Ordering::SeqCst);
                         let every = relay.lose_every.load(Ordering::SeqCst);
@@ -370,7 +400,9 @@ impl Connection {
                 if !http {
                     relay.rtsp_connections.fetch_add(1, Ordering::SeqCst);
                 }
-                if relay.cut.load(Ordering::SeqCst) {
+                if relay.cut.load(Ordering::SeqCst)
+                    || (http && relay.whep_down.load(Ordering::SeqCst))
+                {
                     continue;
                 }
                 let relay = relay.clone();
@@ -384,7 +416,10 @@ impl Connection {
                     let upstream = async {
                         let mut buf = vec![0u8; 16384];
                         while let Ok(n) = from_client.read(&mut buf).await {
-                            if n == 0 || relay.cut.load(Ordering::SeqCst) {
+                            if n == 0
+                                || relay.cut.load(Ordering::SeqCst)
+                                || (http && relay.whep_down.load(Ordering::SeqCst))
+                            {
                                 break;
                             }
                             if http {
@@ -757,4 +792,173 @@ async fn a_pinned_certificate_is_refused_once_it_changes() {
             .len()
             >= 50
     );
+}
+
+#[test]
+fn the_senders_note_on_this_camera_is_found_in_its_status() {
+    let floor = "The connection carries about 120 kbit/s, under this camera's lowest 150 kbit/s, so its picture runs late.";
+    let status = serde_json::json!({
+        "cameras": [
+            { "path": "rear", "note": null },
+            { "path": "front", "note": floor },
+        ],
+        "addresses": [],
+    });
+    assert_eq!(note_for(&status, "front").as_deref(), Some(floor));
+    assert_eq!(note_for(&status, "rear"), None);
+    assert_eq!(note_for(&status, "side"), None);
+    assert_eq!(
+        note_for(&serde_json::json!("Not a WHEP address."), "front"),
+        None
+    );
+    assert!(uxduck_sender(Some("UXDuck/0.20.0")));
+    assert!(!uxduck_sender(Some("mediamtx")));
+    assert!(!uxduck_sender(None));
+}
+
+#[test]
+fn a_slow_picture_says_what_arrives() {
+    assert_eq!(
+        late(120_400),
+        "The connection carries about 120 kbit/s, too little for this camera's pictures, so its picture runs late."
+    );
+    assert_eq!(
+        late(0),
+        "The connection carries too little for this camera's pictures, so its picture runs late."
+    );
+}
+
+#[test]
+fn a_keyframe_is_a_picture_with_an_idr_slice() {
+    assert!(keyframe(&[
+        0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 1, 0, 0, 0, 1, 0x65, 0x88
+    ]));
+    assert!(!keyframe(&[0, 0, 0, 1, 0x41, 0x9a]));
+}
+
+/// The vehicle uses the connection the camera's two addresses are on, as
+/// the Plane uses Tailscale with the camera's WHEP and RTSP addresses there.
+fn on_the_vehicles_connection(camera: &Camera) {
+    let route = Some(AddressRoute {
+        link_id: "tailscale".into(),
+        up: true,
+        in_use: true,
+        returns: false,
+    });
+    camera.worker.route(&[route.clone(), route]);
+}
+
+/// The longest wait between two pictures after `since`.
+fn longest_gap(pictures: &Pictures, since: Instant) -> Duration {
+    pictures
+        .since(since)
+        .windows(2)
+        .map(|pair| pair[1].0 - pair[0].0)
+        .max()
+        .unwrap_or(Duration::MAX)
+}
+
+async fn until(what: &str, within: Duration, done: impl Fn() -> bool) -> Instant {
+    let deadline = Instant::now() + within;
+    while !done() {
+        assert!(Instant::now() < deadline, "{what} within {within:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Instant::now()
+}
+
+/// The link squeezed under what the pictures need, as the Plane's 4G was
+/// under its sender's 150 kbit/s floor: the pictures stop or come late
+/// while ICE holds and the sender's packets still arrive. The camera keeps
+/// its WHEP session and never asks RTSP on the same connection, which
+/// would share the squeeze and run later still, and the pictures come back
+/// in the same session when the link does.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs MediaMTX and FFmpeg: MEDIAMTX=… cargo test -p uxduck --bin uxduck whep -- --ignored"]
+async fn a_whep_camera_on_a_squeezed_link_keeps_its_session_and_never_moves_to_rtsp() {
+    let node = Node::start(None).await;
+    let link = Connection::open(RADIO, &node, true).await;
+    let camera = camera(&[whep(RADIO, &node), rtsp_url(RADIO, &node)]);
+    on_the_vehicles_connection(&camera);
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    // The test picture sends about 1.5 Mbit/s.
+    link.rate_bps.store(120_000, Ordering::SeqCst);
+    let squeezed = Instant::now();
+    tokio::time::sleep(Duration::from_secs(14)).await;
+    println!(
+        "{} pictures in the 12 s of the squeeze after its first 2 s, the longest wait {:?}",
+        camera
+            .pictures
+            .since(squeezed + Duration::from_secs(2))
+            .len(),
+        longest_gap(&camera.pictures, squeezed)
+    );
+    assert_eq!(link.rtsp_connections.load(Ordering::SeqCst), 0);
+    assert_eq!(link.requests(), ["POST"]);
+    assert_eq!(node.sessions().await, 1);
+    link.rate_bps.store(0, Ordering::SeqCst);
+    let lifted = Instant::now();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let after = camera.pictures.since(lifted + Duration::from_secs(3)).len();
+    println!("{after} pictures in the 3 s from 3 s after the link came back");
+    assert!(after >= 60, "{after} pictures in 3 s");
+    assert_eq!(link.requests(), ["POST"]);
+    assert_eq!(link.rtsp_connections.load(Ordering::SeqCst), 0);
+}
+
+/// The WHEP sender stops, as when it restarted for 6 s on the Plane: the
+/// dead session falls back to RTSP on the same host and connection. When
+/// WHEP answers again, the camera goes back to it after the 30 s wait and
+/// two probes 15 s apart, though the vehicle never moves, opening the WHEP
+/// session beside RTSP and switching at its first keyframe, so the picture
+/// is never empty. The test picture comes every 33 ms, and a new session's
+/// first keyframe after RTSP closed came about 300 ms later on loopback, so
+/// a gap under 150 ms is a switch with the session already playing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs MediaMTX and FFmpeg: MEDIAMTX=… cargo test -p uxduck --bin uxduck whep -- --ignored"]
+async fn a_dead_whep_session_falls_back_to_rtsp_on_its_host_and_comes_back_at_a_keyframe() {
+    let node = Node::start(None).await;
+    let link = Connection::open(RADIO, &node, true).await;
+    let camera = camera(&[whep(RADIO, &node), rtsp_url(RADIO, &node)]);
+    on_the_vehicles_connection(&camera);
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(link.requests(), ["POST"]);
+    link.whep_down.store(true, Ordering::SeqCst);
+    let down = Instant::now();
+    let fell = until("RTSP on the same host", Duration::from_secs(10), || {
+        link.rtsp_connections.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    println!(
+        "fell back to RTSP {} ms after WHEP stopped",
+        (fell - down).as_millis()
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(camera.pictures.since(fell + Duration::from_secs(1)).len() >= 40);
+    link.whep_down.store(false, Ordering::SeqCst);
+    let posted = until("a new WHEP session", Duration::from_secs(55), || {
+        link.requests().iter().filter(|m| *m == "POST").count() == 2
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    println!(
+        "back on WHEP {} s after the fall back, the requests {:?}, the longest wait between pictures from 2 s after the fall back {:?}",
+        (posted - fell).as_secs(),
+        link.requests(),
+        longest_gap(&camera.pictures, fell + Duration::from_secs(2))
+    );
+    assert!(
+        posted - fell >= Duration::from_secs(44),
+        "{:?}",
+        posted - fell
+    );
+    assert!(
+        longest_gap(&camera.pictures, fell + Duration::from_secs(2)) < Duration::from_millis(150),
+        "the picture went empty while it went back"
+    );
+    assert!(camera.pictures.since(posted + Duration::from_secs(2)).len() >= 50);
+    // One WebRTC session, and the RTSP reader gone: only the publisher's.
+    assert_eq!(node.sessions().await, 1);
+    assert_eq!(node.rtsp_sessions().await, 1);
+    assert_eq!(link.rtsp_connections.load(Ordering::SeqCst), 1);
 }

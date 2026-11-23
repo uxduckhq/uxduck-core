@@ -218,6 +218,7 @@ fn scenario() -> (Vec<Event>, State) {
             klv: true,
             id: None,
             note: None,
+            picture_note: None,
             audio: None,
             counters: VideoCounters {
                 bitrate_bps: 4_000_000,

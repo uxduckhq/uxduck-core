@@ -7,6 +7,8 @@
 //! the WHEP client's tests are), the sender reads a real `MediaMTX` path.
 
 use std::net::Ipv4Addr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use super::mediamtx::tests::{FRONT, Fake, rpi};
@@ -38,6 +40,11 @@ fn pictures() -> Vec<(Vec<u8>, bool)> {
 /// Feeds the pattern, over and over at 30 a second, while someone watches
 /// `path`, as the RTSP reader would.
 fn feed(running: &Running, path: &'static str) {
+    feed_unless(running, path, Arc::default());
+}
+
+/// Feeds as `feed` does, sending nothing while `paused`.
+fn feed_unless(running: &Running, path: &'static str, paused: Arc<AtomicBool>) {
     let mut wanted = running.wanted.clone();
     let to = running.pictures.clone();
     tokio::spawn(async move {
@@ -53,6 +60,9 @@ fn feed(running: &Running, path: &'static str) {
                 continue;
             }
             rtp += 3000;
+            if paused.load(Ordering::SeqCst) {
+                continue;
+            }
             let frame = Frame {
                 annex_b: annex_b.clone(),
                 rtp,
@@ -230,6 +240,89 @@ async fn a_patch_restarts_ice_and_moves_the_video_to_the_new_address_in_the_same
         sent(&later, RADIO) - radio_then
     );
     assert!(sent(&later, INTERNET) > internet_then);
+}
+
+/// The camera's pictures stop for 8 s while its WHEP session holds and the
+/// sender still sends its reports, as when the link is under the sender's
+/// floor and its picture runs late (ADR-0064 W7). The daemon keeps the
+/// session and never asks the RTSP address after it on the same host, the
+/// sender says why at the root of its WHEP port, and the pictures come back
+/// in the same session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_whep_picture_that_runs_late_keeps_its_session_and_the_sender_says_why() {
+    let fake = Fake::start(&[("cam", rpi(FRONT))]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let running = start(Options {
+        api: Api::new(&fake.url).unwrap(),
+        hosts: Hosts::Addresses(vec![RADIO.into()]),
+        whep: SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        udp_port: 0,
+        state_file: dir.path().join("video-sender.json"),
+        // Above any estimate on loopback, so the sender's note is on.
+        cameras: vec![CameraConfig {
+            path: "cam".into(),
+            floor_bitrate: 1_000_000_000,
+            follow: true,
+        }],
+        recording: watch::channel(BTreeMap::new()).1,
+    })
+    .await
+    .unwrap();
+    let paused = Arc::new(AtomicBool::new(false));
+    feed_unless(&running, "cam", paused.clone());
+    let rtsp = std::net::TcpListener::bind((RADIO, 0)).unwrap();
+    let rtsp_port = rtsp.local_addr().unwrap().port();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = asked.clone();
+    std::thread::spawn(move || {
+        for stream in rtsp.incoming() {
+            counted.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    let camera = camera(&[
+        whep(RADIO, &running),
+        format!("rtsp://{RADIO}:{rtsp_port}/cam"),
+    ]);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        camera
+            .pictures
+            .since(Instant::now().checked_sub(Duration::from_secs(2)).unwrap())
+            .len()
+            >= 40
+    );
+
+    paused.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "RTSP was asked");
+    assert_eq!(status(&running).await["cameras"][0]["viewers"], 1);
+    let note = crate::video::whep::sender_note(
+        &crate::video::whep::address(&whep(RADIO, &running)).unwrap(),
+    )
+    .await;
+    println!("the sender says: {note:?}");
+    assert!(
+        note.as_deref()
+            .is_some_and(|n| n
+                .contains("under this camera's lowest 1000000 kbit/s, so its picture runs late.")),
+        "{note:?}"
+    );
+
+    paused.store(false, Ordering::SeqCst);
+    let resumed = Instant::now();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let after = camera
+        .pictures
+        .since(resumed + Duration::from_secs(1))
+        .len();
+    assert!(after >= 40, "{after} pictures in the 2 s after");
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "RTSP was asked");
+    assert_eq!(
+        status(&running).await["cameras"][0]["viewers"],
+        1,
+        "the same session"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

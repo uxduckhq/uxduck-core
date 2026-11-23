@@ -106,6 +106,7 @@ impl From<&core::VideoSource> for dto::VideoSource {
             frame_rate: v.frame_rate,
             state: v.state.into(),
             state_detail: v.state_detail.clone(),
+            picture_note: v.picture_note.clone(),
             vehicle_id: v.vehicle_id.clone(),
             assigned_by_hand: v.assigned_by_hand,
             vehicle_camera: v.vehicle_camera,

@@ -20,11 +20,22 @@
 //! streams, so the hub keeps one source. The RTSP worker opens a new session
 //! when the PATCH fails, then falls back to RTSP (`rtsp.rs`).
 //!
+//! A slow connection keeps the session. While ICE holds and the sender
+//! still sends RTP or RTCP, pictures that come late or not at all only make
+//! the picture say the connection is slow, in the sender's own words when
+//! it is UXDuck's (ADR-0064 W7), because RTSP on the same connection runs
+//! later still. The session ends when it is dead: ICE lost for 5 s, nothing
+//! at all from the sender for 5 s, the server closing it or refusing a
+//! request. A camera that fell back to RTSP comes back through `warm`: a
+//! session opened beside the RTSP address and taken over at its first
+//! keyframe, so the picture is never empty.
+//!
 //! An https:// address may pin its certificate's SHA-256 with `#sha256=`
 //! (W10): the certificate must be that one, whoever signed it. Without a
 //! pin, the system's certificates decide. A user and password in the
 //! address go as HTTP Basic authentication, as `MediaMTX` reads them.
 
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -34,26 +45,42 @@ use sha2::{Digest, Sha256};
 use str0m::change::SdpAnswer;
 use str0m::media::{Direction, MediaKind};
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, Input, Output, Rtc, RtcConfig};
+use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use uxduck_core::domain::video::{AddressReason, is_whep, redact};
 use uxduck_media::latency::Arrival;
-use uxduck_media::nal::Codec;
+use uxduck_media::nal::{Codec, split_annex_b};
 use uxduck_media::rtcp::SenderReport;
 use uxduck_media::rtp::Picture;
 use uxduck_media::source::Source;
 
 use super::listener::{item, metadata_due, report};
 use super::rtsp::{
-    Camera, ConnectionLog, Moving, NO_PICTURES, Progress, REPORT_EVERY, SILENT_FOR, STALL_AFTER,
-    START_WITHIN, decode, wall_us, wall_us_at,
+    Camera, ConnectionLog, Moving, Progress, REPORT_EVERY, SILENT_FOR, STALL_AFTER, START_WITHIN,
+    decode, wall_us, wall_us_at,
 };
 
 const USER_AGENT: &str = concat!("UXDuck/", env!("CARGO_PKG_VERSION"));
 /// Each WHEP request, so a server that took the connection and went
 /// silent is given up on, as RTSP's set-up is.
 const ASK_FOR: Duration = Duration::from_secs(10);
+/// No picture for this long while the session is alive: the connection
+/// carries less than the pictures need, and the picture says it is slow.
+/// The adaptive sender runs late and says so rather than stop (ADR-0064
+/// W7), and its lowest frame rate, a tenth of the camera's own, still sends
+/// a picture every 0.2 to 0.4 s, so 2 s without one is a picture running
+/// late, not a slow camera.
+const SLOW_AFTER: Duration = Duration::from_secs(2);
+/// While the picture runs slow, UXDuck's sender is asked again this often
+/// for its own words, because their figure follows its estimate. Each ask is
+/// one small HTTP request and answer, about 1.5 kB, so one every 10 s is
+/// about 1% of the sender's lowest 150 kbit/s.
+const SLOW_ASK_EVERY: Duration = Duration::from_secs(10);
+/// Why playing ends when ICE has lost the sender for `SILENT_FOR`.
+const ICE_LOST: &str = "WebRTC lost its connection to the camera for 5 s";
+/// Why playing ends when nothing at all, not even RTCP, came for `SILENT_FOR`.
+const SENDER_QUIET: &str = "nothing from the WebRTC sender for 5 s";
 /// Seconds from 1900, NTP's epoch, to 1970.
 const NTP_TO_UNIX_S: u64 = 2_208_988_800;
 
@@ -307,6 +334,59 @@ pub(super) async fn probe(url: &str) -> Result<(), String> {
     }
 }
 
+/// Whether the WHEP server is UXDuck's own sender (S385), which says why a
+/// picture runs late at the root of its WHEP port.
+fn uxduck_sender(server: Option<&str>) -> bool {
+    server.is_some_and(|s| s.starts_with("UXDuck/"))
+}
+
+/// What UXDuck's sender says about the camera at `address`, from its status
+/// (`GET /` on the WHEP port): its note, such as "The connection carries
+/// about 120 kbit/s, under this camera's lowest 150 kbit/s, so its picture
+/// runs late." None when it says nothing or does not answer.
+pub(super) async fn sender_note(address: &Address) -> Option<String> {
+    let mut root = reqwest::Url::parse(&address.url).ok()?;
+    let path = root
+        .path()
+        .trim_start_matches('/')
+        .strip_suffix("/whep")?
+        .to_owned();
+    root.set_path("/");
+    root.set_query(None);
+    let status: serde_json::Value = authorized(client(address).ok()?.get(root), address)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    note_for(&status, &path)
+}
+
+/// The note on the camera at `path` in a UXDuck sender's status.
+fn note_for(status: &serde_json::Value, path: &str) -> Option<String> {
+    status["cameras"]
+        .as_array()?
+        .iter()
+        .find(|camera| camera["path"] == path)?["note"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// The picture's words for a slow connection when the sender gives none,
+/// from the bits a second that arrived.
+fn late(bps: u64) -> String {
+    if bps < 1000 {
+        return "The connection carries too little for this camera's pictures, so its picture runs late.".into();
+    }
+    format!(
+        "The connection carries about {} kbit/s, too little for this camera's pictures, so its picture runs late.",
+        bps / 1000
+    )
+}
+
 /// The address's host's IP addresses: the camera's on one connection.
 async fn hosts(address: &Address) -> Result<Vec<IpAddr>, String> {
     let mut found: Vec<IpAddr> = tokio::net::lookup_host((address.host.as_str(), address.port))
@@ -540,6 +620,98 @@ async fn open(address: &Address) -> Result<Opened, String> {
     })
 }
 
+/// A WHEP session opened beside the address playing and played, unseen, up
+/// to its first keyframe, so a move to it never leaves the picture empty.
+pub(super) struct Warm {
+    opened: Opened,
+    /// What came up to and with the first keyframe, for `play` to take first.
+    early: Vec<Event>,
+    offered_us: u64,
+}
+
+/// Whether a picture holds an IDR slice, which a decoder starts from.
+fn keyframe(annex_b: &[u8]) -> bool {
+    split_annex_b(annex_b)
+        .iter()
+        .any(|nal| nal.first().is_some_and(|b| b & 0x1f == 5))
+}
+
+/// Opens a session at `url` and plays it without showing it until its first
+/// keyframe.
+///
+/// # Errors
+/// The session did not open, or showed no keyframe within `START_WITHIN`.
+pub(super) async fn warm(url: &str) -> Result<Warm, String> {
+    let address = address(url)?;
+    let offered_us = wall_us();
+    let warming = async {
+        let mut opened = open(&address).await?;
+        let mut early = Vec::new();
+        let mut buf = vec![0u8; 2048];
+        loop {
+            let deadline = loop {
+                let output = opened
+                    .rtc
+                    .poll_output()
+                    .map_err(|e| format!("WebRTC failed: {e}"))?;
+                match output {
+                    Output::Timeout(at) => break at,
+                    Output::Transmit(t) => {
+                        if t.source == opened.link.local {
+                            let _ = opened.link.socket.send_to(&t.contents, t.destination).await;
+                        }
+                    }
+                    Output::Event(Event::MediaData(data)) => {
+                        if let Some(stream) =
+                            opened.rtc.direct_api().stream_rx_by_mid(data.mid, None)
+                        {
+                            stream.suppress_nack(false);
+                        }
+                        if keyframe(&data.data) {
+                            early.push(Event::MediaData(data));
+                            return Ok(Warm {
+                                opened,
+                                early,
+                                offered_us,
+                            });
+                        }
+                    }
+                    Output::Event(report @ Event::SenderFeedback(_)) => early.push(report),
+                    Output::Event(Event::Closed) => {
+                        return Err("the WHEP server closed the session".to_owned());
+                    }
+                    Output::Event(_) => {}
+                }
+            };
+            tokio::select! {
+                received = opened.link.socket.recv_from(&mut buf) => {
+                    let (n, from) = received.map_err(|e| format!("WebRTC's socket failed: {e}"))?;
+                    let Ok(contents) = buf[..n].try_into() else {
+                        continue;
+                    };
+                    let input = Input::Receive(
+                        Instant::now(),
+                        Receive {
+                            proto: Protocol::Udp,
+                            source: from,
+                            destination: opened.link.local,
+                            contents,
+                        },
+                    );
+                    opened.rtc.handle_input(input).map_err(|e| format!("WebRTC failed: {e}"))?;
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    opened.rtc.handle_input(Input::Timeout(Instant::now()))
+                        .map_err(|e| format!("WebRTC failed: {e}"))?;
+                }
+            }
+        }
+    };
+    Box::pin(tokio::time::timeout(START_WITHIN, warming))
+        .await
+        .map_err(|_| "WebRTC showed no keyframe within 15 s".to_owned())?
+}
+
 /// An ICE restart over WHEP PATCH to `to`, the session's path at that
 /// address: new credentials and the candidate on the new connection, which
 /// becomes the only one, and the answer's credentials and candidates on
@@ -636,10 +808,12 @@ async fn restart(
     Ok((link, restarted))
 }
 
-/// Connects, plays and relays until the session fails, following the
-/// vehicle to another address when `follows` asks. `silent` says when
-/// nothing has come for `STALL_AFTER`, and `progress` times a move to the
-/// address, or an ICE restart to another, until its first keyframe
+/// Connects, or takes the session `warm` opened, plays and relays until the
+/// session is dead, following the vehicle to another address when
+/// `follows` asks. Pictures that stop while ICE holds and the sender still
+/// sends only make the picture say the connection is slow. `silent` says
+/// when nothing has come for `STALL_AFTER`, and `progress` times a move to
+/// the address, or an ICE restart to another, until its first keyframe
 /// (ADR-0057 D13 and D14).
 #[allow(
     clippy::too_many_lines,
@@ -648,6 +822,7 @@ async fn restart(
 pub(super) async fn play(
     camera: Camera<'_>,
     url: &str,
+    warm: Option<Warm>,
     connection_log: &mut ConnectionLog,
     silent: &tokio::sync::watch::Sender<bool>,
     progress: &mut Progress,
@@ -657,16 +832,24 @@ pub(super) async fn play(
     let mut address = address(url)?;
     let mut playing_url = url.to_owned();
     // The offer asks for the pictures, as PLAY does over RTSP.
-    let offered_us = wall_us();
+    let (opened, early, offered_us) = if let Some(warm) = warm {
+        (warm.opened, warm.early, warm.offered_us)
+    } else {
+        let offered_us = wall_us();
+        let opened = tokio::time::timeout(START_WITHIN, open(&address))
+            .await
+            .map_err(|_| "the camera did not start within 15 s".to_owned())??;
+        (opened, Vec::new(), offered_us)
+    };
+    let mut early = VecDeque::from(early);
     let Opened {
         mut rtc,
         mut link,
         mut session,
         mut answer,
         server,
-    } = tokio::time::timeout(START_WITHIN, open(&address))
-        .await
-        .map_err(|_| "the camera did not start within 15 s".to_owned())??;
+    } = opened;
+    let asks_sender = uxduck_sender(server.as_deref());
     if let Some(moving) = progress.moving.as_mut() {
         moving.play_sent_us = Some(offered_us);
     }
@@ -686,14 +869,28 @@ pub(super) async fn play(
     let mut last_picture = tokio::time::Instant::now();
     // When anything at all last came, for a stall.
     let mut last_heard = last_picture;
-    let mut reported = (Instant::now(), 0u64, 0u64);
+    // When the sender last sent RTP or RTCP, which says it is alive.
+    let mut last_sent = last_picture;
+    // Since when ICE has lost the sender.
+    let mut ice_lost: Option<tokio::time::Instant> = None;
+    // Whether the picture runs slow, what the sender says about it, and
+    // when it is asked next.
+    let mut slow = false;
+    let mut sender_says: Option<String> = None;
+    let mut next_ask: Option<tokio::time::Instant> = None;
+    let (said, mut says) = mpsc::unbounded_channel::<Option<String>>();
+    let mut heard_bytes = 0u64;
+    let mut reported = (Instant::now(), 0u64, 0u64, 0u64);
     let mut klv_posted = None;
     let mut buf = vec![0u8; 2048];
     loop {
         let deadline = loop {
-            let output = rtc
-                .poll_output()
-                .map_err(|e| format!("WebRTC failed: {e}"))?;
+            let output = match early.pop_front() {
+                Some(event) => Output::Event(event),
+                None => rtc
+                    .poll_output()
+                    .map_err(|e| format!("WebRTC failed: {e}"))?,
+            };
             match output {
                 Output::Timeout(at) => break at,
                 Output::Transmit(t) => {
@@ -732,6 +929,12 @@ pub(super) async fn play(
                     );
                     if let Some(output) = unit {
                         last_picture = tokio::time::Instant::now();
+                        if slow {
+                            slow = false;
+                            sender_says = None;
+                            next_ask = None;
+                            tracing::info!(source = %source_id, "a WHEP camera's pictures came back up to speed");
+                        }
                         connection_log.receiving(source_id, Instant::now());
                         if let uxduck_media::source::Output::Unit(unit) = &output {
                             progress.picture(camera, &playing_url, unit.key);
@@ -770,6 +973,11 @@ pub(super) async fn play(
                 }
                 Output::Event(Event::IceConnectionStateChange(state)) => {
                     tracing::debug!(source = %source_id, ?state, "a WHEP camera's ICE");
+                    if state == IceConnectionState::Disconnected {
+                        ice_lost.get_or_insert_with(tokio::time::Instant::now);
+                    } else if state.is_connected() {
+                        ice_lost = None;
+                    }
                 }
                 Output::Event(Event::Closed) => {
                     return Err("the WHEP server closed the session".into());
@@ -799,10 +1007,27 @@ pub(super) async fn play(
             );
             observed.id = Some(source_id.to_owned());
             observed.counters.hold_us = camera.hub.hold_us(source_id);
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss,
+                reason = "bits a second"
+            )]
+            let arriving = (heard_bytes.saturating_sub(reported.3) * 8) as f64 / elapsed;
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "bits a second"
+            )]
+            let arriving = arriving as u64;
+            if slow {
+                observed.picture_note = Some(sender_says.clone().unwrap_or_else(|| late(arriving)));
+            }
             reported = (
                 Instant::now(),
                 status.counters.bytes,
                 status.counters.pictures,
+                heard_bytes,
             );
             camera.post(move |e, _| e.rtsp_observed(observed));
         }
@@ -833,6 +1058,11 @@ pub(super) async fn play(
                         // is the one the vehicle left.
                         last_picture = tokio::time::Instant::now();
                         last_heard = last_picture;
+                        last_sent = last_picture;
+                        ice_lost = None;
+                        slow = false;
+                        sender_says = None;
+                        next_ask = None;
                         // Timed as a move, with the PATCH as its PLAY, to the
                         // first keyframe on either connection.
                         progress.moving = Some(Moving {
@@ -854,6 +1084,12 @@ pub(super) async fn play(
             received = link.socket.recv_from(&mut buf) => {
                 let (n, from) = received.map_err(|e| format!("WebRTC's socket failed: {e}"))?;
                 last_heard = tokio::time::Instant::now();
+                heard_bytes += n as u64;
+                // RTP and RTCP start with 128 to 191 (RFC 7983), STUN and
+                // DTLS below: the sender is still sending.
+                if buf.first().is_some_and(|b| (128..=191).contains(b)) && n > 0 {
+                    last_sent = last_heard;
+                }
                 silent.send_if_modified(|was| std::mem::replace(was, false));
                 let Ok(contents) = buf[..n].try_into() else {
                     continue;
@@ -873,8 +1109,41 @@ pub(super) async fn play(
                 rtc.handle_input(Input::Timeout(Instant::now()))
                     .map_err(|e| format!("WebRTC failed: {e}"))?;
             }
-            () = tokio::time::sleep_until(last_picture + SILENT_FOR) => {
-                return Err(NO_PICTURES.to_owned());
+            Some(note) = says.recv() => {
+                if slow {
+                    sender_says = note;
+                }
+            }
+            () = tokio::time::sleep_until(last_sent + SILENT_FOR) => {
+                return Err(if ice_lost.is_some() { ICE_LOST } else { SENDER_QUIET }.to_owned());
+            }
+            () = async move {
+                match ice_lost {
+                    Some(since) => tokio::time::sleep_until(since + SILENT_FOR).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                return Err(ICE_LOST.to_owned());
+            }
+            () = tokio::time::sleep_until(last_picture + SLOW_AFTER), if !slow => {
+                slow = true;
+                tracing::info!(
+                    source = %source_id,
+                    "a WHEP camera's pictures run late, so it keeps its session and says the connection is slow"
+                );
+                next_ask = asks_sender.then(tokio::time::Instant::now);
+            }
+            () = async move {
+                match next_ask {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                next_ask = Some(tokio::time::Instant::now() + SLOW_ASK_EVERY);
+                let (asked, said) = (address.clone(), said.clone());
+                tokio::spawn(async move {
+                    let _ = said.send(sender_note(&asked).await);
+                });
             }
             () = tokio::time::sleep_until(last_heard + STALL_AFTER), if !*silent.borrow() => {
                 silent.send_replace(true);

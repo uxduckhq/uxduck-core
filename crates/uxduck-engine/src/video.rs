@@ -783,6 +783,7 @@ impl Engine {
                     "Connecting to {}",
                     uxduck_core::domain::video::redact(uri)
                 )),
+                picture_note: None,
                 vehicle_id: Some(vehicle_id.to_owned()),
                 assigned_by_hand: false,
                 // The vehicle's own camera announced it: it can be told to
@@ -929,6 +930,7 @@ impl Engine {
             frame_rate: None,
             state,
             state_detail: None,
+            picture_note: None,
             vehicle_id: None,
             assigned_by_hand: false,
             vehicle_camera: false,
@@ -991,6 +993,7 @@ impl Engine {
         }
         source.state = state;
         source.state_detail = report.unsupported.clone().or_else(|| report.note.clone());
+        source.picture_note.clone_from(&report.picture_note);
         // Its sound, once known, stays until the stream says otherwise (S147).
         if report.audio.is_some() {
             source.audio.clone_from(&report.audio);
@@ -1145,6 +1148,7 @@ impl Engine {
         }
         source.state = VideoState::Stopped;
         source.state_detail = why;
+        source.picture_note = None;
         source.version += 1;
         self.video
             .journaled_at
@@ -2293,6 +2297,7 @@ impl Engine {
                 frame_rate: None,
                 state: VideoState::Stopped,
                 state_detail: None,
+                picture_note: None,
                 vehicle_id: None,
                 assigned_by_hand: false,
                 vehicle_camera: false,
@@ -2409,6 +2414,7 @@ impl Engine {
             frame_rate: None,
             state: VideoState::Stopped,
             state_detail: None,
+            picture_note: None,
             vehicle_id: None,
             assigned_by_hand: false,
             vehicle_camera: false,
@@ -2635,6 +2641,7 @@ impl Engine {
             frame_rate: None,
             state: VideoState::Stopped,
             state_detail: Some(format!("Connecting to {}", redact(&url))),
+            picture_note: None,
             assigned_by_hand: vehicle_id.is_some(),
             vehicle_id,
             vehicle_camera: false,
@@ -2823,6 +2830,7 @@ impl Engine {
             frame_rate: None,
             state: VideoState::Stopped,
             state_detail: Some(format!("Waiting for video on UDP {port}")),
+            picture_note: None,
             assigned_by_hand: vehicle_id.is_some(),
             vehicle_id,
             vehicle_camera: false,

@@ -355,6 +355,7 @@ pub(super) fn report(
         }),
         id: None,
         note: None,
+        picture_note: None,
         counters: VideoCounters {
             bitrate_bps: bitrate as u64,
             datagrams: c.datagrams,

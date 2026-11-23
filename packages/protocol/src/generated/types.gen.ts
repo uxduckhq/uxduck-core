@@ -21672,6 +21672,11 @@ export type VideoSource = {
      */
     namedByHand?: boolean;
     /**
+     * What the picture says while it plays, such as a WebRTC camera's
+     * connection carrying too little for its pictures (ADR-0064 W7).
+     */
+    pictureNote?: string | null;
+    /**
      * The UDP port it arrives on.
      */
     port: number;

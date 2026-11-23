@@ -390,6 +390,10 @@ pub struct VideoSource {
     /// Why it is unsupported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_detail: Option<String>,
+    /// What its picture says while it plays, such as a WebRTC camera's
+    /// connection carrying too little for its pictures (ADR-0064 W7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_id: Option<String>,
     /// Someone chose the vehicle; the sender's address no longer decides.
@@ -501,6 +505,9 @@ pub struct VideoReport {
     /// Something to say while it plays, such as a KLV track the camera
     /// refused (S91); its `state_detail`.
     pub note: Option<String>,
+    /// What the picture says while it plays, such as a slow connection;
+    /// its `picture_note`.
+    pub picture_note: Option<String>,
     /// Its sound, once its stream is known (S147).
     pub audio: Option<VideoAudio>,
 }

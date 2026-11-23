@@ -89,6 +89,18 @@ const AHEAD_WAIT: Duration = Duration::from_secs(30);
 /// for good is used again within 5 min. The vehicle still takes the camera
 /// back with it as soon as it returns.
 const AHEAD_WAIT_MAX: Duration = Duration::from_mins(5);
+/// How long a camera on a fallback waits before it probes the earlier
+/// addresses (ADR-0057 D3).
+const RETURN_WAIT: Duration = Duration::from_secs(30);
+/// The longest wait before a camera tries again to go back to a WHEP
+/// address whose session answered but showed no keyframe within
+/// `START_WITHIN`. Each such try opens a WebRTC session beside the
+/// fallback and spends up to 15 s of video on the vehicle's link, which may
+/// be metered, so each failed try doubles the wait from `RETURN_WAIT`. At
+/// 5 min a WHEP address that answers but never carries a picture costs at
+/// most 15 s of video in 5 min, and one that has come back for good is used
+/// again within 5 min.
+const RETURN_WAIT_MAX: Duration = Duration::from_mins(5);
 /// Why playing ends when the pictures stop.
 pub(super) const NO_PICTURES: &str = "no video pictures for 5 s";
 const OFFLINE_LOG_EVERY: Duration = Duration::from_mins(5);
@@ -1456,8 +1468,16 @@ async fn answers_now(url: &str, kept: Option<Standby>) -> bool {
     }
 }
 
-/// Wait for a preferred address, one of those at the places `to`, to
-/// answer twice. Playback continues during these small control-only probes.
+/// The wait before the probes of the earlier addresses, after `failed`
+/// tries in a row to go back to a WHEP address that showed no keyframe.
+fn return_wait(failed: u32) -> Duration {
+    RETURN_WAIT
+        .saturating_mul(2u32.saturating_pow(failed))
+        .min(RETURN_WAIT_MAX)
+}
+
+/// Wait `hold`, then for a preferred address, one of those at the places
+/// `to`, to answer twice. Playback continues during these small control-only probes.
 /// The delay also limits flapping when a server answers DESCRIBE but its
 /// video still cannot play. `next` hears how long until each round of
 /// probes, or, with nothing to go back to on its own, that there is none.
@@ -1466,13 +1486,14 @@ async fn preferred(
     to: Vec<usize>,
     kept: tokio::sync::watch::Receiver<Option<Standby>>,
     next: impl Fn(Option<Duration>),
+    hold: Duration,
 ) -> usize {
     if to.is_empty() {
         next(None);
         return std::future::pending().await;
     }
-    next(Some(Duration::from_secs(30)));
-    tokio::time::sleep(Duration::from_secs(30)).await;
+    next(Some(hold));
+    tokio::time::sleep(hold).await;
     let mut previous = None;
     loop {
         let mut healthy = None;
@@ -1648,12 +1669,30 @@ fn with_vehicle(routes: &[Option<AddressRoute>], current: usize) -> bool {
 /// The earlier addresses a camera playing `current` may go back to on its
 /// own: those the engine allows (ADR-0057 D11), any before it says, and
 /// always its address on the connection its vehicle uses, so a camera
-/// that left it while the vehicle stayed comes back (ADR-0057 D13).
+/// that left it while the vehicle stayed comes back (ADR-0057 D13). On the
+/// connection its vehicle uses, only the earlier addresses on that same
+/// connection, such as the WHEP address before the RTSP one on the same
+/// host: going back to one never takes the video off the vehicle's
+/// connection, which is what waits for the vehicle.
 fn may_go_back(
     allowed: Option<&[usize]>,
     routes: &[Option<AddressRoute>],
     current: usize,
 ) -> Vec<usize> {
+    if let Some(here) = routes
+        .get(current)
+        .and_then(Option::as_ref)
+        .filter(|r| r.in_use)
+    {
+        return (0..current)
+            .filter(|index| {
+                routes
+                    .get(*index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|r| r.link_id == here.link_id)
+            })
+            .collect();
+    }
     (0..current)
         .filter(|index| allowed.is_none_or(|to| to.contains(index)) || with_vehicle(routes, *index))
         .collect()
@@ -1877,6 +1916,10 @@ enum Move {
     Stalled(usize),
     /// Back ahead of the vehicle to the address set up at this index.
     Ahead(usize),
+    /// Back to the WHEP address at this index, whose session opened beside
+    /// the address playing when the return was decided and has shown its
+    /// first keyframe.
+    Warmed(usize, u64, Box<super::whep::Warm>),
 }
 
 /// One worker per physical camera, with at most one PLAY session. Dropping
@@ -1927,6 +1970,10 @@ pub fn spawn(
         // The last picture before a move, and when it was decided.
         let mut decided: Option<(Option<u64>, u64)> = None;
         let mut ahead = Ahead::default();
+        // A WHEP session opened beside the address that played, to go on.
+        let mut warmed: Option<super::whep::Warm> = None;
+        // Tries in a row to go back to a WHEP address that showed no keyframe.
+        let mut warm_failed = 0u32;
         let next_check = |wait: Option<Duration>| {
             let in_us = wait.map(|w| u64::try_from(w.as_micros()).unwrap_or(u64::MAX));
             camera.post(move |e, id| e.rtsp_next_check(id, in_us));
@@ -1957,7 +2004,7 @@ pub fn spawn(
                 reason,
                 last_picture_us,
                 decided_us,
-                pre_opened: pre_opened.is_some(),
+                pre_opened: pre_opened.is_some() || warmed.is_some(),
                 play_sent_us: None,
                 first_picture_us: None,
             });
@@ -1975,19 +2022,29 @@ pub fn spawn(
             // A WHEP session follows the vehicle with an ICE restart
             // (ADR-0064 W14), so a move to another WHEP address asks it.
             let (follow, mut follows) = tokio::sync::mpsc::unbounded_channel();
+            let warm = warmed.take();
             let outcome = {
                 let playing = async {
                     let (log, progress) = (&mut connection_log, &mut progress);
                     if is_whep(url) {
-                        Box::pin(super::whep::play(camera, url, log, &silent, progress, &mut follows))
+                        Box::pin(super::whep::play(camera, url, warm, log, &silent, progress, &mut follows))
                             .await
                     } else {
                         play(camera, url, pre_opened, log, &silent, progress).await
                     }
                 };
                 tokio::pin!(playing);
-                let recovered = preferred(&urls, returning.clone(), lent.subscribe(), next_check);
+                let recovered = preferred(
+                    &urls,
+                    returning.clone(),
+                    lent.subscribe(),
+                    next_check,
+                    return_wait(warm_failed),
+                );
                 tokio::pin!(recovered);
+                // A WHEP session opening beside the address playing, to go
+                // back to at its first keyframe: where, since when, and it.
+                let mut warming = None;
                 // A return to the first address waits for it to answer, and
                 // the current address keeps playing meanwhile.
                 let mut probing = None;
@@ -2003,7 +2060,9 @@ pub fn spawn(
                         rethink = false;
                         let to = ahead_to(&routes, current);
                         let wait = to.and(ahead.waiting(Instant::now()));
-                        if following {
+                        // On the vehicle's connection with an earlier address
+                        // on it, the probes of that address say when.
+                        if following && (wait.is_some() || returning.is_empty()) {
                             next_check(wait);
                         }
                         going = to
@@ -2071,7 +2130,7 @@ pub fn spawn(
                             let now = may_go_back(allowed.borrow().as_deref(), &routes, current);
                             if now != returning || (was && !following) {
                                 returning = now;
-                                recovered.set(preferred(&urls, returning.clone(), lent.subscribe(), next_check));
+                                recovered.set(preferred(&urls, returning.clone(), lent.subscribe(), next_check, return_wait(warm_failed)));
                             }
                         }
                         Some(answered) = async {
@@ -2141,14 +2200,14 @@ pub fn spawn(
                             keep_standby(camera, &urls, current, &routes, &mut standby, &lent, &held);
                             following = with_vehicle(&routes, current);
                             returning = may_go_back(allowed.borrow().as_deref(), &routes, current);
-                            recovered.set(preferred(&urls, returning.clone(), lent.subscribe(), next_check));
+                            recovered.set(preferred(&urls, returning.clone(), lent.subscribe(), next_check, return_wait(warm_failed)));
                             rethink = true;
                         }
                         Ok(()) = allowed.changed() => {
                             let now = may_go_back(allowed.borrow_and_update().as_deref(), &routes, current);
                             if now != returning {
                                 returning = now;
-                                recovered.set(preferred(&urls, returning.clone(), lent.subscribe(), next_check));
+                                recovered.set(preferred(&urls, returning.clone(), lent.subscribe(), next_check, return_wait(warm_failed)));
                             }
                         }
                         result = &mut playing => {
@@ -2170,8 +2229,46 @@ pub fn spawn(
                             camera.post(move |e, id| e.rtsp_standby(id, told));
                             rethink = true;
                         }
-                        index = &mut recovered, if current > 0 && !following => {
-                            break Move::Recovered(index);
+                        index = &mut recovered, if current > 0
+                            && warming.is_none()
+                            && (!following || !returning.is_empty()) => {
+                            if !is_whep(&urls[index]) {
+                                break Move::Recovered(index);
+                            }
+                            // The RTSP address plays on until WebRTC's first
+                            // keyframe, so the picture is never empty.
+                            tracing::info!(
+                                source = %source_id,
+                                to = %redact(&urls[index]),
+                                "a camera opens WebRTC beside the address playing, to go back at its first keyframe"
+                            );
+                            warming = Some((index, wall_us(), Box::pin(super::whep::warm(&urls[index]))));
+                        }
+                        Some((index, began_us, result)) = async {
+                            match warming.as_mut() {
+                                Some((index, began_us, warm)) => Some((*index, *began_us, warm.await)),
+                                None => None,
+                            }
+                        }, if warming.is_some() => {
+                            warming = None;
+                            match result {
+                                Ok(warm) => {
+                                    warm_failed = 0;
+                                    break Move::Warmed(index, began_us, Box::new(warm));
+                                }
+                                Err(error) => {
+                                    warm_failed = warm_failed.saturating_add(1);
+                                    let wait = return_wait(warm_failed);
+                                    tracing::info!(
+                                        source = %source_id,
+                                        to = %redact(&urls[index]),
+                                        %error,
+                                        wait_s = wait.as_secs(),
+                                        "a camera could not go back to WebRTC, so it stays and tries again later"
+                                    );
+                                    recovered.set(preferred(&urls, returning.clone(), lent.subscribe(), next_check, wait));
+                                }
+                            }
                         }
                     }
                 }
@@ -2208,6 +2305,17 @@ pub fn spawn(
                     AddressReason::AheadOfVehicle,
                     "Going back ahead of the vehicle".to_owned(),
                 ),
+                Move::Warmed(index, began_us, warm) => {
+                    warmed = Some(*warm);
+                    // Timed from when the return was decided and its
+                    // session opened, beside the address that played.
+                    decided = decided.map(|(last_picture_us, _)| (last_picture_us, began_us));
+                    (
+                        index,
+                        AddressReason::Preferred,
+                        "Returning to WebRTC on a preferred camera address".to_owned(),
+                    )
+                }
                 Move::Failed(error) => {
                     if started.elapsed() > Duration::from_secs(30) {
                         failures = 0;
@@ -2352,9 +2460,15 @@ mod tests {
         let (_lent, kept) = tokio::sync::watch::channel(None);
         let waited = tokio::time::timeout(
             Duration::from_millis(100),
-            preferred(&urls, Vec::new(), kept, |next| {
-                told.lock().unwrap().push(next);
-            }),
+            preferred(
+                &urls,
+                Vec::new(),
+                kept,
+                |next| {
+                    told.lock().unwrap().push(next);
+                },
+                return_wait(0),
+            ),
         )
         .await;
         assert!(waited.is_err(), "it never goes back on its own");
@@ -2680,6 +2794,33 @@ mod tests {
         ];
         assert!(may_go_back(Some(&[]), &elsewhere, 1).is_empty());
         assert!(may_go_back(None, &[], 0).is_empty());
+    }
+
+    /// The Plane's camera on Tailscale: a WHEP and an RTSP address on the
+    /// radio, then on Tailscale, the vehicle on Tailscale. On the RTSP
+    /// address there after WHEP failed, it may go back to WHEP on the same
+    /// connection on its own, and still waits for the vehicle for the radio,
+    /// whatever the engine allows.
+    #[test]
+    fn on_its_vehicles_connection_a_camera_may_go_back_to_an_earlier_address_on_that_connection() {
+        let routes = [
+            Some(route("radio", true, false)),
+            Some(route("radio", true, false)),
+            Some(route("tailscale", true, true)),
+            Some(route("tailscale", true, true)),
+        ];
+        assert_eq!(may_go_back(None, &routes, 3), [2]);
+        assert_eq!(may_go_back(Some(&[0, 1]), &routes, 3), [2]);
+        assert_eq!(may_go_back(Some(&[]), &routes, 3), [2]);
+        assert!(may_go_back(None, &routes, 2).is_empty());
+    }
+
+    /// Each failed try to go back to WHEP doubles the wait, up to 5 min.
+    #[test]
+    fn a_failed_return_to_whep_waits_longer_each_time() {
+        let waits: Vec<u64> = (0..7).map(|n| return_wait(n).as_secs()).collect();
+        assert_eq!(waits, [30, 60, 120, 240, 300, 300, 300]);
+        assert_eq!(return_wait(u32::MAX), RETURN_WAIT_MAX);
     }
 
     /// A camera on its vehicle's connection goes back ahead of it only to an
