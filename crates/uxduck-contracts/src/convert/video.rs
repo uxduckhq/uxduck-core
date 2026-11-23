@@ -109,6 +109,7 @@ impl From<&core::VideoSource> for dto::VideoSource {
             vehicle_id: v.vehicle_id.clone(),
             assigned_by_hand: v.assigned_by_hand,
             vehicle_camera: v.vehicle_camera,
+            vehicle_only: v.vehicle_only,
             served_by: v.served_by.clone(),
             record_alone: v.record_alone,
             klv: v.klv,

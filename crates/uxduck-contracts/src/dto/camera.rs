@@ -704,6 +704,18 @@ pub struct Camera {
     /// `set-mode` and `start-recording` to have it record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_not_asked: Option<String>,
+    /// The video source whose picture it records on the vehicle, for a
+    /// camera that names no stream of its own: `uxduck companion`'s
+    /// recording camera, whose model names the picture's path (ADR-0066
+    /// R5). It starts and stops by the vehicle's own mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    /// The latest warning `uxduck companion`'s recording camera said, such
+    /// as "Deleted 450 MB of earlier recordings to keep recording, 160 MB
+    /// free" (ADR-0066 R11), until it next starts recording. The Record
+    /// menu's vehicle line shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }

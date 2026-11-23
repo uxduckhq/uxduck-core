@@ -21,6 +21,7 @@ use uxduck_contracts::dto::trace::Transport;
 use uxduck_core::domain::companion::CompanionClock;
 use uxduck_core::domain::companion_cameras::{
     CameraLinger, CameraWatchdog, CompanionCameraPath, CompanionCameras, PicturePreset,
+    VehicleRecordMode, VehicleRecording,
 };
 use uxduck_core::domain::link::Link;
 use uxduck_core::domain::vehicle::{Observation, Presence};
@@ -731,6 +732,11 @@ fn cameras(linger_at_risk: bool) -> CompanionCameras {
                 ready: true,
                 readers: 1,
                 bytes: 4_000_000,
+                record: Some(VehicleRecording {
+                    path: "cam_record".into(),
+                    mode: VehicleRecordMode::Armed,
+                    settings: None,
+                }),
             },
             CompanionCameraPath {
                 name: "front_cam".into(),
@@ -743,6 +749,7 @@ fn cameras(linger_at_risk: bool) -> CompanionCameras {
                 ready: true,
                 readers: 0,
                 bytes: 0,
+                record: None,
             },
             CompanionCameraPath {
                 name: "relay".into(),
@@ -755,11 +762,13 @@ fn cameras(linger_at_risk: bool) -> CompanionCameras {
                 ready: false,
                 readers: 0,
                 bytes: 0,
+                record: None,
             },
         ],
         watchdog: CameraWatchdog::default(),
         applied: None,
         problem: None,
+        record_problem: None,
     }
 }
 
@@ -875,6 +884,10 @@ fn camera_changes_are_checked_serialized_with_networks_and_refused_while_armed()
             json!({"vehicleId":"v","computerId":id,"linger":true,"watchdog":"install"}),
             "one camera change",
         ),
+        (
+            json!({"vehicleId":"v","computerId":id,"record":{"path":"relay","mode":"always"}}),
+            "does not record relay on the vehicle",
+        ),
     ] {
         let error = refused(&mut engine, &mut ui, "computer/cameras", params);
         assert!(error.contains(why), "{error}");
@@ -895,6 +908,41 @@ fn camera_changes_are_checked_serialized_with_networks_and_refused_while_armed()
     assert_eq!(input["apply"]["path"], "cam");
     assert_eq!(input["apply"]["settings"], low);
     assert_eq!(input["linger"], false);
+    assert!(input["record"].is_null());
+
+    // When a camera records on the vehicle (ADR-0066 R9), written over SSH.
+    engine.companion_checked(CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.clone(),
+        result: Ok(Found {
+            host_key: Some("SHA256:known".into()),
+            cameras: Some(cameras(true)),
+            ..Found::default()
+        }),
+    });
+    let always = json!({"vehicleId":"v","computerId":id,"record":{"path":"cam","mode":"always"}});
+    let vehicle = ok(&mut engine, &mut ui, "computer/check", read.clone());
+    assert_eq!(
+        vehicle["companions"][0]["check"]["cameras"]["paths"][0]["record"],
+        json!({"path": "cam_record", "mode": "armed"})
+    );
+    ssh.0.lock().unwrap().clear();
+    engine.companion_checked(CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.clone(),
+        result: Ok(Found {
+            host_key: Some("SHA256:known".into()),
+            ..Found::default()
+        }),
+    });
+    ok(&mut engine, &mut ui, "computer/cameras", always.clone());
+    let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
+    let [CompanionOrder::Cameras { input, .. }] = &orders[..] else {
+        panic!("{orders:?}");
+    };
+    let input: Value = serde_json::from_str(input).unwrap();
+    assert_eq!(input["record"], json!({"path": "cam", "mode": "always"}));
+    assert!(input["apply"].is_null());
 
     let restarted = self::engine(engine.state().clone(), &keys);
     let check = restarted.state().vehicles["v"].companions[0]
@@ -918,6 +966,7 @@ fn camera_changes_are_checked_serialized_with_networks_and_refused_while_armed()
         json!({"vehicleId":"v","computerId":id,"linger":true}),
         json!({"vehicleId":"v","computerId":id,"watchdog":"install"}),
         json!({"vehicleId":"v","computerId":id,"watchdog":"remove"}),
+        always,
     ] {
         assert!(refused(&mut armed, &mut ui, "computer/cameras", params).contains("Disarm"));
     }

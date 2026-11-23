@@ -727,7 +727,8 @@ impl Engine {
         let mut vehicle = self.companion_vehicle(&params.vehicle_id)?;
         let changes = usize::from(params.apply.is_some())
             + usize::from(params.linger)
-            + usize::from(params.watchdog.is_some());
+            + usize::from(params.watchdog.is_some())
+            + usize::from(params.record.is_some());
         if changes > 1 {
             return Err(invalid("Make one camera change at a time."));
         }
@@ -773,6 +774,20 @@ impl Engine {
                 ));
             }
         }
+        if let Some(record) = &params.record {
+            let recorded = computer
+                .check
+                .as_ref()
+                .and_then(|c| c.cameras.as_ref())
+                .and_then(|c| c.paths.iter().find(|p| p.name == record.path))
+                .and_then(|p| p.record.as_ref());
+            if recorded.is_none() {
+                return Err(invalid(format!(
+                    "{} does not record {} on the vehicle. Read its cameras again, or set up recording on the vehicle first.",
+                    computer.name, record.path
+                )));
+            }
+        }
         let waits = self.take_computer(&computer.id, false)?;
         let input = if changes == 0 {
             "{}".to_owned()
@@ -781,6 +796,7 @@ impl Engine {
                 "apply": params.apply,
                 "linger": params.linger,
                 "watchdog": params.watchdog,
+                "record": params.record,
             })
             .to_string()
         };

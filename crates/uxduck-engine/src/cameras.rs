@@ -22,6 +22,7 @@ use uxduck_core::domain::camera::{
 };
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::{Command, Receipt};
+use uxduck_core::domain::companion_cameras::address_names;
 use uxduck_core::domain::vehicle::Presence;
 use uxduck_core::events::Change;
 use uxduck_mavlink::camera as seen;
@@ -153,6 +154,8 @@ impl Engine {
             photos_dropped: before.map_or(0, |b| b.photos_dropped),
             sources: Vec::new(),
             recording_not_asked: before.and_then(|b| b.recording_not_asked.clone()),
+            source_id: None,
+            warning: before.and_then(|b| b.warning.clone()),
             version: before.map_or(0, |b| b.version),
         };
         // The sensors it has said it has, with those it said before
@@ -164,6 +167,9 @@ impl Engine {
         }
         camera.version += 1;
         self.commit_as(data_plane(), Change::CameraUpserted { camera });
+        // Whether the vehicle records a picture decides whether this computer
+        // does, for a picture recorded on the vehicle only (ADR-0066 R6).
+        self.review_recordings();
     }
 
     /// A camera that was listed is no camera of its own: its autopilot was
@@ -197,12 +203,14 @@ impl Engine {
                     || camera.photos_listed > 0
                     || camera.photos_dropped > 0
                     || camera.recording_not_asked.is_some()
+                    || camera.warning.is_some()
             })
             .cloned()
             .collect();
         for mut camera in heard {
             camera.present = false;
             camera.recording_not_asked = None;
+            camera.warning = None;
             camera.settings = None;
             camera.capture = None;
             camera.storage = None;
@@ -267,6 +275,11 @@ impl Engine {
             photos_awaited: capture.images_awaited,
             available_mib: capture.available_mib,
         });
+        // A warning lasts until the next recording (ADR-0066 R11).
+        let recording = |capture: Option<CameraCapture>| capture.is_some_and(|c| c.recording);
+        if recording(camera.capture) && !recording(before.capture) {
+            camera.warning = None;
+        }
         let shorter = matches!(
             (before.capture, camera.capture),
             (Some(was), Some(now)) if now.photo_count < was.photo_count
@@ -547,6 +560,32 @@ impl Engine {
                 })
                 .map(|source| source.id.clone());
         }
+        // `uxduck companion`'s recording camera names no stream: its model
+        // is the name of the picture's path on the vehicle (ADR-0066 R5).
+        camera.source_id = camera
+            .information
+            .as_ref()
+            .filter(|information| information.on_the_companion() && information.records_video())
+            .and_then(|information| {
+                self.state
+                    .video_sources
+                    .values()
+                    .filter(|source| {
+                        source
+                            .vehicle_id
+                            .as_deref()
+                            .and_then(|id| self.vehicle(id))
+                            .is_some_and(|vehicle| vehicle.id == camera.vehicle_id)
+                    })
+                    .find(|source| {
+                        source
+                            .url
+                            .iter()
+                            .chain(&source.fallback_urls)
+                            .any(|address| address_names(address, &information.model))
+                    })
+            })
+            .map(|source| source.id.clone());
     }
 
     /// Whether anything on a vehicle is known to take images or record
@@ -625,8 +664,13 @@ impl Engine {
                     .cameras
                     .values()
                     .filter(|other| other.vehicle_id == camera.vehicle_id)
-                    .flat_map(|other| &other.streams)
-                    .filter_map(|stream| stream.source_id.as_ref())
+                    .flat_map(|other| {
+                        other
+                            .streams
+                            .iter()
+                            .filter_map(|stream| stream.source_id.as_ref())
+                            .chain(&other.source_id)
+                    })
                     .collect();
                 let sources: Vec<_> = joined
                     .into_iter()

@@ -34,6 +34,7 @@ use uxduck_contracts::dto::messages::{
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::{ClientRequest, ServerNotification};
+use uxduck_core::domain::camera::CameraInformation;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::Command;
 use uxduck_core::domain::link::LinkKind;
@@ -44,6 +45,7 @@ use uxduck_core::domain::setup::{Fix, SetupRow, fix_for};
 use uxduck_core::domain::telemetry::{TelemetryItem, Unit};
 use uxduck_core::domain::vehicle::Vehicle;
 use uxduck_core::events::Change;
+use uxduck_mavlink::onboard_camera::NOTICE;
 
 use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
@@ -305,6 +307,9 @@ impl Engine {
         if self.battery_message(&vehicle.id, text) {
             return;
         }
+        if self.recorder_said(&vehicle, component_id, severity, text, new, shown.id) {
+            return;
+        }
         if self.kept_in_the_log(&vehicle, text, prearm.is_some()) {
             return;
         }
@@ -420,6 +425,91 @@ impl Engine {
             condition: Some(condition),
             report: None,
         });
+    }
+
+    /// A warning from `uxduck companion`'s recording camera, such as that it
+    /// deleted earlier recordings to keep recording (ADR-0066 R11, maintainer,
+    /// 2026-11-22: "warn loud but keep recording"). It is kept on the camera
+    /// for the Record menu, and is always a notice naming the vehicle and the
+    /// camera, "Plane front: Deleted 450 MB …", whatever the operator's
+    /// threshold, the vehicle's start-up or a simulated flight controller,
+    /// since the camera's card is real. Each new one alerts again in place of
+    /// the one before. Its notice that the trouble has passed, "Recording
+    /// front is under control again", clears the warning and its alert and
+    /// goes on as any message. False when the component is no such camera or
+    /// the message is no warning.
+    fn recorder_said(
+        &mut self,
+        vehicle: &Vehicle,
+        component_id: u8,
+        level: u8,
+        text: &str,
+        new: bool,
+        message_id: u64,
+    ) -> bool {
+        let Some(camera) = self
+            .state
+            .cameras
+            .values()
+            .find(|camera| {
+                camera.vehicle_id == vehicle.id
+                    && camera.component_id == component_id
+                    && camera.device_id.is_none()
+                    && camera
+                        .information
+                        .as_ref()
+                        .is_some_and(CameraInformation::on_the_companion)
+            })
+            .cloned()
+        else {
+            return false;
+        };
+        let model = camera
+            .information
+            .as_ref()
+            .map_or_else(String::new, |information| information.model.clone());
+        let condition = format!("vehicle-recorder:{}", camera.id);
+        if severity_of(level) == Severity::Info {
+            if level == NOTICE && camera.warning.is_some() {
+                let mut camera = camera;
+                camera.warning = None;
+                camera.version += 1;
+                self.commit_as(
+                    crate::vehicles::data_plane(),
+                    Change::CameraUpserted { camera },
+                );
+                self.resolve(&condition);
+            }
+            return false;
+        }
+        if camera.warning.as_deref() != Some(text) {
+            let mut camera = camera;
+            camera.warning = Some(text.to_owned());
+            camera.version += 1;
+            self.commit_as(
+                crate::vehicles::data_plane(),
+                Change::CameraUpserted { camera },
+            );
+        }
+        // The same words again within the quiet window, as over a second
+        // link, are the same warning.
+        if !new {
+            return true;
+        }
+        self.resolve(&condition);
+        self.raise(Raise {
+            severity: severity_of(level),
+            kind: NotificationKind::Persistent,
+            subject: Subject::Vehicle {
+                id: vehicle.id.clone(),
+            },
+            title: format!("{} {model}: {text}", vehicle.name),
+            body: None,
+            actions: vec![show_in_messages(&vehicle.id, message_id)],
+            condition: Some(condition),
+            report: None,
+        });
+        true
     }
 
     /// A simulated vehicle's messages stay in its log (maintainer,

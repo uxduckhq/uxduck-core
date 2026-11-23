@@ -314,6 +314,8 @@ impl From<&core::Camera> for dto::Camera {
             photos_not_listed: v.photos_not_listed(),
             sources: v.sources.iter().copied().map(Into::into).collect(),
             recording_not_asked: v.recording_not_asked.clone(),
+            source_id: v.source_id.clone(),
+            warning: v.warning.clone(),
             version: v.version,
         }
     }
@@ -340,6 +342,8 @@ mod tests {
             photos_dropped: 0,
             sources: Vec::new(),
             recording_not_asked: None,
+            source_id: None,
+            warning: None,
             version: 1,
         }
     }

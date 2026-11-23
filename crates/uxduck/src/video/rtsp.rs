@@ -609,7 +609,7 @@ pub fn authorization(
 
 /// A response, or an RTP packet on an interleaved channel.
 #[derive(Debug)]
-enum Frame {
+pub(super) enum Frame {
     Response {
         status: u16,
         headers: HashMap<String, String>,
@@ -622,7 +622,7 @@ enum Frame {
 }
 
 /// One RTSP connection.
-struct Session {
+pub(super) struct Session {
     stream: TcpStream,
     buffer: Vec<u8>,
     /// Where each read lands, on the heap so the futures stay small.
@@ -631,14 +631,14 @@ struct Session {
     address: Address,
     challenge: Option<String>,
     /// The `Session` header SETUP gave.
-    id: Option<String>,
+    pub(super) id: Option<String>,
     /// When the latest read came: the last bytes of the frame just parsed
     /// arrived then (S355).
     read_at: Arrival,
 }
 
 impl Session {
-    async fn connect(address: Address) -> Result<Self, String> {
+    pub(super) async fn connect(address: Address) -> Result<Self, String> {
         let stream = tokio::time::timeout(
             SILENT_FOR,
             TcpStream::connect((address.host.as_str(), address.port)),
@@ -693,7 +693,7 @@ impl Session {
     }
 
     /// A request and its answer, asking again once with credentials.
-    async fn ask(
+    pub(super) async fn ask(
         &mut self,
         method: &str,
         uri: &str,
@@ -756,7 +756,7 @@ impl Session {
         Ok(())
     }
 
-    async fn frame(&mut self) -> Result<Frame, String> {
+    pub(super) async fn frame(&mut self) -> Result<Frame, String> {
         loop {
             if let Some((frame, used)) = parse_frame(&self.buffer)? {
                 self.buffer.drain(..used);
@@ -780,7 +780,7 @@ impl Session {
 
     /// `GET_PARAMETER`, which any answer shows the session still holds,
     /// and its `CSeq`.
-    async fn ping(&mut self, uri: &str) -> Result<u32, String> {
+    pub(super) async fn ping(&mut self, uri: &str) -> Result<u32, String> {
         self.send("GET_PARAMETER", uri, &[]).await?;
         Ok(self.cseq)
     }

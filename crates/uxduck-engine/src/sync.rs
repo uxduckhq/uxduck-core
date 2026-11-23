@@ -464,6 +464,7 @@ pub fn shared_camera(source: &VideoSource) -> Option<Result<SharedCamera, KeptHe
         vehicle_camera: source
             .vehicle_camera_by_hand
             .then_some(source.vehicle_camera),
+        vehicle_only: source.vehicle_only,
     }))
 }
 

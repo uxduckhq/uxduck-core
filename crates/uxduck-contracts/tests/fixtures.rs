@@ -583,7 +583,8 @@ fn check(name: &str) {
             | "video_file"
             | "video_vehicleCamera"
             | "video_servedBy"
-            | "video_recordWithOthers",
+            | "video_recordWithOthers"
+            | "video_recordWhere",
         ) => {
             round_trip::<uxduck_contracts::dto::video::VideoSource>(name, &json);
         }

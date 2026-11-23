@@ -3,6 +3,7 @@
 //! daemon parses and relays; it never decodes a picture (V1).
 
 pub mod capture;
+pub mod companion;
 pub mod created;
 pub mod demos;
 pub mod file;
@@ -10,11 +11,13 @@ pub mod folder;
 pub mod hub;
 pub mod listener;
 pub mod look;
+pub mod onboard_recording;
 pub mod permission;
 pub mod playback;
 pub mod recorder;
 pub mod reencode;
 pub mod rtsp;
+pub mod sender;
 pub mod slice;
 pub mod socket;
 pub mod thumbnail;

@@ -24,6 +24,7 @@ use uxduck_core::domain::thread::{ItemKind, ItemStatus};
 use uxduck_core::events::{Actor, Change};
 
 use crate::commands::Raise;
+use crate::recordings::record_where_words;
 use crate::rpc::handlers::to_value;
 use crate::{ConnectionId, Engine, rpc};
 
@@ -97,6 +98,7 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::VideoRecord(_)
         | ClientRequest::VideoRecordAll(_)
         | ClientRequest::VideoRecordWithOthers(_)
+        | ClientRequest::VideoRecordWhere(_)
         | ClientRequest::VideoPhoto(_)
         | ClientRequest::VideoVehicleCamera(_)
         | ClientRequest::VideoServedBy(_)
@@ -664,6 +666,7 @@ impl Engine {
                 if params.on { "include" } else { "leave out" },
                 params.source_id
             ),
+            ClientRequest::VideoRecordWhere(params) => record_where_words(params),
             ClientRequest::VideoVehicleCamera(params) => format!(
                 "{} the vehicle's own camera along with the camera {}",
                 if params.on { "use" } else { "stop using" },
@@ -808,6 +811,7 @@ impl Engine {
             | ClientRequest::VideoRecord(_)
             | ClientRequest::VideoRecordAll(_)
             | ClientRequest::VideoRecordWithOthers(_)
+            | ClientRequest::VideoRecordWhere(_)
             | ClientRequest::VideoPhoto(_)
             | ClientRequest::VideoVehicleCamera(_)
             | ClientRequest::VideoServedBy(_)

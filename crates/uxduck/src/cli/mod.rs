@@ -68,6 +68,7 @@ pub enum Command {
     /// A computer on the vehicle that carries no vehicle traffic, such as a
     /// second Raspberry Pi: once a second it sends its temperature, CPU,
     /// memory and storage to the ground station as an onboard computer.
+    /// With --config it also sends its cameras over WebRTC and records them.
     /// `uxduck companion --to udp:192.168.1.20:15010 --computer-id 192`
     Companion(companion::CompanionArgs),
     /// A terminal on a vehicle's companion computer, through UXDuck on this

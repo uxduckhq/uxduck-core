@@ -86,8 +86,14 @@ pub struct CameraInformation {
     pub gimbal_device_id: u8,
 }
 
+/// The vendor `uxduck companion` names its recording cameras with (ADR-0066
+/// R4): a camera that records a fixed-quality stream on the vehicle by its
+/// own schedule, and whose model is the name of the live picture's path.
+pub const COMPANION_VENDOR: &str = "UXDuck companion";
+
 impl CameraInformation {
     const CAPTURES: u32 = 1 | 2;
+    const CAPTURE_VIDEO: u32 = 1;
     const VIDEO_STREAM: u32 = 256;
     /// The thermal range is said alongside a video stream, and asks
     /// nothing of the camera.
@@ -97,6 +103,20 @@ impl CameraInformation {
     #[must_use]
     pub fn captures(&self) -> bool {
         self.flags & Self::CAPTURES != 0
+    }
+
+    /// Whether it can record video itself.
+    #[must_use]
+    pub fn records_video(&self) -> bool {
+        self.flags & Self::CAPTURE_VIDEO != 0
+    }
+
+    /// Whether it is `uxduck companion`'s recording camera (ADR-0066 R4),
+    /// which starts and stops by the vehicle's own mode, so UXDuck's
+    /// recording setting never tells it to (R7).
+    #[must_use]
+    pub fn on_the_companion(&self) -> bool {
+        self.vendor == COMPANION_VENDOR
     }
 
     /// Whether it only sends video: it has a video stream and nothing to
@@ -787,6 +807,16 @@ pub struct Camera {
     /// mode for the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_not_asked: Option<String>,
+    /// The video source whose picture it records, for a camera that names
+    /// no stream: `uxduck companion`'s camera, whose model is the name of
+    /// the picture's path on the vehicle (ADR-0066 R5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    /// The latest warning `uxduck companion`'s recording camera said, such
+    /// as "Deleted 450 MB of earlier recordings to keep recording, 160 MB
+    /// free" (ADR-0066 R11), until it next starts recording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     pub version: u64,
 }
 
@@ -1139,6 +1169,8 @@ mod tests {
             photos_dropped: 0,
             sources: Vec::new(),
             recording_not_asked: None,
+            source_id: None,
+            warning: None,
             version: 1,
         }
     }

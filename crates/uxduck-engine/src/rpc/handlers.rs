@@ -605,6 +605,7 @@ pub(crate) fn handle(
         | ClientRequest::VideoRecord(_)
         | ClientRequest::VideoRecordAll(_)
         | ClientRequest::VideoRecordWithOthers(_)
+        | ClientRequest::VideoRecordWhere(_)
         | ClientRequest::VideoPlayback(_)
         | ClientRequest::VideoRename(_)
         | ClientRequest::VideoAddresses(_)

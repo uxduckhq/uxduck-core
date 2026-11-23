@@ -31,6 +31,10 @@ pub struct CompanionCameras {
     /// Why the cameras could not be read, for people.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// Why `/etc/uxduck/companion.toml`'s recordings could not be read,
+    /// for people (ADR-0066 R10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_problem: Option<String>,
 }
 
 /// The `MediaMTX` unit's login user (C7).
@@ -121,6 +125,34 @@ pub struct CompanionCameraPath {
     #[serde(default)]
     #[schemars(schema_with = "crate::safe::integer")]
     pub bytes: u64,
+    /// Its recording on the vehicle, when `uxduck companion` records it
+    /// (ADR-0066 R1, R10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<VehicleRecording>,
+}
+
+/// When `uxduck companion` records a camera on the vehicle (ADR-0066 R2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum VehicleRecordMode {
+    /// While the vehicle is armed. The default.
+    Armed,
+    Always,
+    /// Only when a ground station asks.
+    Off,
+}
+
+/// A camera's recording on the vehicle (ADR-0066 R1, R10).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleRecording {
+    /// The `MediaMTX` path recorded, such as `front_record`: a second,
+    /// fixed-quality stream of the same camera.
+    pub path: String,
+    pub mode: VehicleRecordMode,
+    /// That path's picture, when `MediaMTX` has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<PictureSettings>,
 }
 
 /// The camera watchdog (C9, C10).
@@ -192,6 +224,19 @@ pub struct ComputerCamerasParams {
     /// Install or remove the camera watchdog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchdog: Option<WatchdogChange>,
+    /// When a camera records on the vehicle (ADR-0066 R9): written to
+    /// `/etc/uxduck/companion.toml`, which `uxduck companion` reads again.
+    /// No camera pauses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<RecordModeParams>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordModeParams {
+    /// The camera's path, such as `front`, whose recording it is.
+    pub path: String,
+    pub mode: VehicleRecordMode,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

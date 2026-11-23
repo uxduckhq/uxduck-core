@@ -70,6 +70,21 @@ fn camera_path(v: &cc::CompanionCameraPath) -> dto::CompanionCameraPath {
         ready: v.ready,
         readers: v.readers,
         bytes: v.bytes,
+        record: v.record.as_ref().map(|r| dto::VehicleRecording {
+            path: r.path.clone(),
+            mode: r.mode.into(),
+            settings: r.settings.as_ref().map(picture),
+        }),
+    }
+}
+
+impl From<cc::VehicleRecordMode> for dto::VehicleRecordMode {
+    fn from(v: cc::VehicleRecordMode) -> Self {
+        match v {
+            cc::VehicleRecordMode::Armed => Self::Armed,
+            cc::VehicleRecordMode::Always => Self::Always,
+            cc::VehicleRecordMode::Off => Self::Off,
+        }
     }
 }
 
@@ -112,6 +127,7 @@ impl From<&cc::CompanionCameras> for dto::CompanionCameras {
                 log: a.log.clone(),
             }),
             problem: v.problem.clone(),
+            record_problem: v.record_problem.clone(),
         }
     }
 }

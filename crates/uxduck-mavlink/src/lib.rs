@@ -40,6 +40,7 @@ pub mod link_health;
 pub mod mission_log;
 #[cfg(feature = "named")]
 pub mod named;
+pub mod onboard_camera;
 pub mod param_log;
 pub mod payload;
 /// ArduPilot modes, shared with the engine.

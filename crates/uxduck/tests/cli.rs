@@ -215,3 +215,79 @@ fn a_plugin_test_without_its_recording_names_the_missing_file() {
     assert!(error.contains("--tlog"), "{error}");
     assert!(!error.contains("connection lost"), "{error}");
 }
+
+/// `systemctl reload uxduck-companion`: a file that does not read keeps the
+/// running configuration and the program, and a changed record mode applies.
+#[cfg(unix)]
+#[test]
+fn a_companion_reload_applies_the_record_mode_and_survives_a_broken_file() {
+    use std::io::BufRead as _;
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().unwrap();
+    let router = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    router
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let config = temp.path().join("companion.toml");
+    let file = |record: &str| {
+        format!(
+            "[mavlink]\nrouter = \"udp:{}\"\n\n[cameras.front]\nrecord_path = \"front_record\"\nrecord = \"{record}\"\n",
+            router.local_addr().unwrap()
+        )
+    };
+    std::fs::write(&config, file("off")).unwrap();
+    let mut companion = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .args(["companion", "--config"])
+        .arg(&config)
+        .env("RUST_LOG", "info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn uxduck");
+    let (lines_tx, lines) = std::sync::mpsc::channel();
+    let stderr = companion.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if lines_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let wait_for = |needle: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match lines.recv_timeout(left) {
+                Ok(line) if line.contains(needle) => return,
+                Ok(line) => seen.push(line),
+                Err(_) => break,
+            }
+        }
+        panic!("no {needle:?} in:\n{}", seen.join("\n"));
+    };
+    let pid = companion.id().to_string();
+    let hang_up = || {
+        let status = Command::new("kill").args(["-HUP", &pid]).status().unwrap();
+        assert!(status.success());
+    };
+    // Its camera's first heartbeat: it runs, its handler installed.
+    router
+        .recv_from(&mut [0; 2048])
+        .expect("the camera's heartbeat");
+
+    std::fs::write(&config, "[cameras.front\nrecord = ").unwrap();
+    hang_up();
+    wait_for("the reload kept the running configuration");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(companion.try_wait().unwrap().is_none(), "still running");
+
+    std::fs::write(&config, file("always")).unwrap();
+    hang_up();
+    wait_for("reloaded");
+    wait_for("the recording's mode changed");
+    assert!(companion.try_wait().unwrap().is_none(), "still running");
+    companion.kill().unwrap();
+    companion.wait().unwrap();
+}

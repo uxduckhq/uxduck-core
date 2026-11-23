@@ -1,11 +1,13 @@
 """MediaMTX cameras on a companion computer (ADR-0060), sent over pinned SSH.
 
 Input is JSON on stdin. {} reads. A change is one of
-{"apply": {"path", "settings", "despiteLinger"}}, {"linger": true} or
-{"watchdog": "install" | "remove", "watchdogScript": "..."}, run as root
-through sudo -n. It prints "cameras=<json>": the systemd unit running
-MediaMTX, its paths as MediaMTX's local API has them, lingering for the
-unit's user, and the camera watchdog.
+{"apply": {"path", "settings", "despiteLinger"}}, {"linger": true},
+{"watchdog": "install" | "remove", "watchdogScript": "..."} or
+{"record": {"path", "mode"}}, run as root through sudo -n. It prints
+"cameras=<json>": the systemd unit running MediaMTX, its paths as MediaMTX's
+local API has them, lingering for the unit's user, the camera watchdog, and
+each camera's recording on the vehicle from /etc/uxduck/companion.toml
+(ADR-0066 R10).
 
 A picture is written as MediaMTX's own environment overrides in one systemd
 drop-in UXDuck owns, never into the person's YAML. The restart that applies
@@ -37,6 +39,14 @@ CHANGE_UNIT = "uxduck-camera-change"
 WATCHDOG_SCRIPT = pathlib.Path("/usr/local/lib/uxduck/camera-watchdog.py")
 WATCHDOG_UNIT = "uxduck-camera-watchdog.service"
 WATCHDOG_STATE = pathlib.Path("/run/uxduck/camera-watchdog.json")
+COMPANION_TOML = pathlib.Path("/etc/uxduck/companion.toml")
+COMPANION_UNIT = "uxduck-companion.service"
+RECORD_MODES = ("armed", "always", "off")
+# The [cameras.<path>] tables UXDuck reads and writes in companion.toml
+# (ADR-0066 R10): standard tables of basic strings, one key to a line.
+CAMERAS_TABLE = re.compile(r'^\s*\[\s*cameras\.(?:"([^"\\]+)"|([A-Za-z0-9_-]+))\s*\]\s*(?:#.*)?$')
+ANY_TABLE = re.compile(r"^\s*\[")
+STRING_KEY = re.compile(r'^\s*([A-Za-z0-9_-]+)\s*=\s*"([^"\\]*)"\s*(?:#.*)?$')
 READY_WAIT_S = 20.0
 POLL_S = 0.5
 # The JSON field, and MediaMTX's field as it reads it from the environment.
@@ -372,7 +382,90 @@ def read():
             if sensor:
                 entry["sensor"] = sensor
         status["paths"].append(entry)
+    recordings(status)
     return status
+
+
+def record_tables(text):
+    """Each [cameras.<path>] table of companion.toml: its record_path, its
+    record mode, the line of its header and the line of its record key."""
+    tables, current = {}, None
+    for number, line in enumerate(text.splitlines()):
+        table = CAMERAS_TABLE.match(line)
+        if table:
+            current = tables.setdefault(table.group(1) or table.group(2), {"header": number})
+            continue
+        if ANY_TABLE.match(line):
+            current = None
+            continue
+        key = STRING_KEY.match(line) if current is not None else None
+        if key and key.group(1) == "record_path":
+            current["recordPath"] = key.group(2)
+        elif key and key.group(1) == "record":
+            current["mode"], current["modeLine"] = key.group(2), number
+    return tables
+
+
+def recordings(status):
+    """Attaches each camera's recording on the vehicle to its path, and takes
+    the recorded paths out of the list: they are the same camera's second,
+    fixed-quality stream, which UXDuck does not adjust (ADR-0066 R1)."""
+    try:
+        text = COMPANION_TOML.read_text()
+    except FileNotFoundError:
+        return
+    except (OSError, UnicodeDecodeError) as error:
+        status["recordProblem"] = "UXDuck could not read " + str(COMPANION_TOML) + " (" + str(error)[:200] + ")."
+        return
+    by_name = {p["name"]: p for p in status["paths"]}
+    recorded, problems = set(), []
+    for name, table in record_tables(text).items():
+        path, mode = table.get("recordPath"), table.get("mode", "armed")
+        if not path or name not in by_name:
+            continue
+        if mode not in RECORD_MODES:
+            problems.append("[cameras." + name + '] has record = "' + mode[:40] + '", which is not armed, always or off.')
+            continue
+        record = {"path": path, "mode": mode}
+        if by_name.get(path, {}).get("settings"):
+            record["settings"] = by_name[path]["settings"]
+        by_name[name]["record"] = record
+        recorded.add(path)
+    status["paths"] = [p for p in status["paths"] if p["name"] not in recorded]
+    if problems:
+        status["recordProblem"] = " ".join(problems)
+
+
+def set_record(change, found):
+    """Writes one camera's record mode into companion.toml, keeping every
+    other line as it was, and has uxduck companion read the file again."""
+    if not isinstance(change, dict):
+        raise ValueError("The recording change is missing.")
+    name, mode = change.get("path"), change.get("mode")
+    if mode not in RECORD_MODES:
+        raise ValueError("Record on the vehicle is armed, always or off.")
+    if not any(p["name"] == name and p.get("record") for p in found["paths"]):
+        raise ValueError("This computer does not record " + str(name)[:80] + " on the vehicle. Set up recording on the vehicle first.")
+    text = COMPANION_TOML.read_text()
+    table = record_tables(text).get(name)
+    if not table or not table.get("recordPath"):
+        raise ValueError("[cameras." + str(name)[:80] + "] in " + str(COMPANION_TOML) + " has no record_path, so it does not record on the vehicle. Read its cameras again.")
+    lines = text.splitlines(keepends=True)
+    entry = 'record = "' + mode + '"\n'
+    if "modeLine" in table:
+        lines[table["modeLine"]] = entry
+    else:
+        if not lines[table["header"]].endswith("\n"):
+            lines[table["header"]] += "\n"
+        lines.insert(table["header"] + 1, entry)
+    write_atomic(COMPANION_TOML, "".join(lines).encode(), mode=COMPANION_TOML.stat().st_mode & 0o777)
+    if active(COMPANION_UNIT):
+        try:
+            run("systemctl", "reload", "--", COMPANION_UNIT, timeout=30)
+        except (RuntimeError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError("Record on the vehicle is saved as " + mode + " in " + str(COMPANION_TOML) +
+                               ", but uxduck companion did not read it again (" + str(error)[:200] +
+                               "). It takes effect when uxduck companion next starts.") from error
 
 
 def own_source():
@@ -538,7 +631,7 @@ def remove_watchdog():
 
 def main():
     request = json.loads(sys.stdin.read() or "{}")
-    changes = [key for key in ("apply", "linger", "watchdog") if request.get(key)]
+    changes = [key for key in ("apply", "linger", "watchdog", "record") if request.get(key)]
     if len(changes) > 1:
         raise ValueError("Make one camera change at a time.")
     found = read()
@@ -553,6 +646,8 @@ def main():
         remove_watchdog()
     elif request.get("watchdog"):
         raise ValueError("Install or remove the watchdog.")
+    elif request.get("record"):
+        set_record(request["record"], found)
     if changes:
         found = read()
     if applied:

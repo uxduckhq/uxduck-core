@@ -599,6 +599,7 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "video/demos",
     "video/remove",
     "video/recordWithOthers",
+    "video/recordWhere",
     "video/playback",
     "video/track",
     "video/addresses",

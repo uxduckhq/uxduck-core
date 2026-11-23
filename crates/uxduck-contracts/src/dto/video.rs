@@ -309,6 +309,11 @@ pub struct VideoSource {
     /// off, until set by hand (`video/vehicleCamera`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vehicle_camera: bool,
+    /// Recorded on the vehicle only (ADR-0066 R6, `video/recordWhere`):
+    /// this computer records nothing of it while its vehicle has a camera
+    /// that records it, and records it as before while the vehicle has none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vehicle_only: bool,
     /// The companion computer serving an RTSP camera, by its id in the
     /// vehicle's `companions`, chosen by hand (S358, `video/servedBy`): its
     /// TIMESYNC clock dates the pictures. Absent: the computer whose host is
@@ -978,6 +983,26 @@ pub struct VideoRecordWithOthersParams {
     /// Whether the recording setting and Record all start this camera; its
     /// own Record does either way.
     pub on: bool,
+}
+
+/// Where a camera's recordings are made (ADR-0066 R6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordPlace {
+    /// On this computer only: the vehicle's camera is not told.
+    Computer,
+    /// On the vehicle only, by its camera that records this picture. This
+    /// computer records it while the vehicle has no such camera.
+    Vehicle,
+    /// On this computer, and on the vehicle by its camera.
+    Both,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoRecordWhereParams {
+    pub source_id: String,
+    pub place: RecordPlace,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

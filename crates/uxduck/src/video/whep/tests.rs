@@ -30,8 +30,8 @@ use crate::daemon::engine_task::EngineHandle;
 use crate::video::hub::{Hub, Item};
 use crate::video::rtsp;
 
-const RADIO: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
-const INTERNET: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 3);
+pub(in crate::video) const RADIO: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
+pub(in crate::video) const INTERNET: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 3);
 
 #[test]
 fn a_whep_address_is_taken_apart() {
@@ -87,7 +87,7 @@ fn only_udp_candidates_on_the_addresss_host_are_kept() {
     assert_eq!(on_host(answer, &["192.168.1.9".parse().unwrap()]).1, 0);
 }
 
-fn test_engine() -> EngineHandle {
+pub(in crate::video) fn test_engine() -> EngineHandle {
     use crate::adapters::system::{OsRandom, SystemClock};
     use uxduck_engine::runtime::{
         Forget, MemoryCredentials, NoAgent, NoLinks, NoPlugins, NoSystem, Ports,
@@ -135,14 +135,14 @@ fn free_udp() -> u16 {
 
 /// `MediaMTX` with `WebRTC` on, and `FFmpeg` publishing a test picture to it over
 /// RTSP: 640×360 at 30 pictures a second, a keyframe each second.
-struct Node {
+pub(in crate::video) struct Node {
     _dir: tempfile::TempDir,
     server: Child,
     publisher: Child,
     http: u16,
     udp: u16,
-    rtsp: u16,
-    api: u16,
+    pub(in crate::video) rtsp: u16,
+    pub(in crate::video) api: u16,
 }
 
 impl Drop for Node {
@@ -160,7 +160,7 @@ impl Node {
         clippy::too_many_lines,
         reason = "one fixture: its configuration, MediaMTX and the publisher"
     )]
-    async fn start(tls: Option<(&str, &str)>) -> Self {
+    pub(in crate::video) async fn start(tls: Option<(&str, &str)>) -> Self {
         let mediamtx = std::env::var("MEDIAMTX").unwrap_or_else(|_| "mediamtx".into());
         let dir = tempfile::tempdir().unwrap();
         let (http, udp, rtsp, api) = (free_tcp(), free_udp(), free_tcp(), free_tcp());
@@ -201,6 +201,7 @@ impl Node {
                  \x20     - action: read\n\
                  \x20     - action: api\n\
                  paths:\n\
+                 \x20 cam: {{}}\n\
                  \x20 all_others: {{}}\n"
             ),
         )
@@ -437,7 +438,7 @@ impl Connection {
 /// The pictures a camera's worker put into the hub, as a recording takes
 /// them: when each came and whether it was a keyframe.
 #[derive(Clone, Default)]
-struct Pictures(Arc<Mutex<Vec<(Instant, bool, u64)>>>);
+pub(in crate::video) struct Pictures(Arc<Mutex<Vec<(Instant, bool, u64)>>>);
 
 impl Pictures {
     fn recording(hub: &Hub, source_id: &str) -> Self {
@@ -458,7 +459,7 @@ impl Pictures {
         pictures
     }
 
-    fn since(&self, at: Instant) -> Vec<(Instant, bool, u64)> {
+    pub(in crate::video) fn since(&self, at: Instant) -> Vec<(Instant, bool, u64)> {
         self.0
             .lock()
             .unwrap()
@@ -469,13 +470,13 @@ impl Pictures {
     }
 }
 
-struct Camera {
-    worker: rtsp::Worker,
-    pictures: Pictures,
+pub(in crate::video) struct Camera {
+    pub(in crate::video) worker: rtsp::Worker,
+    pub(in crate::video) pictures: Pictures,
     _dir: tempfile::TempDir,
 }
 
-fn camera(urls: &[String]) -> Camera {
+pub(in crate::video) fn camera(urls: &[String]) -> Camera {
     let dir = tempfile::tempdir().unwrap();
     let hub = Arc::new(Hub::new(dir.path().to_owned()));
     let pictures = Pictures::recording(&hub, "cam");

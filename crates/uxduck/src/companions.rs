@@ -2332,7 +2332,10 @@ mod tests {
         let cameras: uxduck_core::domain::companion_cameras::CompanionCameras = serde_json::from_str(
             r#"{"paths": [{"name": "cam", "source": "rpiCamera", "onDemand": false, "ready": true, "readers": 1, "bytes": 123456, "cameraId": 0,
                 "settings": {"width": 1536, "height": 864, "fps": 50, "mode": "2304:1296:10:P", "idrPeriod": 50, "bitrate": 2000000},
-                "setByUxduck": true, "sensor": "imx708"}, {"name": "relay", "source": "rtsp", "onDemand": true, "ready": false, "readers": 0, "bytes": 0}],
+                "setByUxduck": true, "sensor": "imx708", "record": {"path": "cam_record", "mode": "always",
+                "settings": {"width": 1280, "height": 720, "fps": 30, "mode": "", "idrPeriod": 30, "bitrate": 4000000}}},
+                {"name": "relay", "source": "rtsp", "onDemand": true, "ready": false, "readers": 0, "bytes": 0}],
+               "recordProblem": "[cameras.rear] has record = \"x\", which is not armed, always or off.",
                "watchdog": {"installed": true, "running": true, "gaveUp": true, "restarts": [{"atUs": 1700000000500000, "path": "cam"}]},
                "unit": "mediamtx.service", "dropIn": "/etc/systemd/system/mediamtx.service.d/60-uxduck-camera.conf",
                "config": "/usr/local/etc/mediamtx.yml", "linger": {"user": "pi", "lingering": false, "removeIpc": true},
@@ -2357,6 +2360,17 @@ mod tests {
         );
         assert_eq!(applied.log, ["ERR [path cam] gone"]);
         assert!(cameras.drop_in.unwrap().ends_with("60-uxduck-camera.conf"));
+        let record = cam.record.as_ref().unwrap();
+        assert_eq!(
+            (record.path.as_str(), record.mode),
+            (
+                "cam_record",
+                uxduck_core::domain::companion_cameras::VehicleRecordMode::Always
+            )
+        );
+        assert_eq!(record.settings.as_ref().unwrap().bitrate, 4_000_000);
+        assert!(cameras.paths[1].record.is_none());
+        assert!(cameras.record_problem.unwrap().contains("[cameras.rear]"));
     }
 
     #[test]

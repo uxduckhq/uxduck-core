@@ -284,6 +284,9 @@ pub struct SharedCamera {
     /// as someone set it (S145).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_camera: Option<bool>,
+    /// Recorded on the vehicle only (ADR-0066 R6).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vehicle_only: bool,
 }
 
 impl SharedCamera {

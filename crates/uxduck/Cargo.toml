@@ -40,6 +40,8 @@ reqwest = { workspace = true, features = ["json", "query", "stream"] }
 rustls.workspace = true
 # WHEP cameras (ADR-0064 W1, W2).
 str0m.workspace = true
+# The companion's desired state, /etc/uxduck/companion.toml (ADR-0061 B4).
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 rust-embed = { workspace = true, optional = true }
 gilrs = { workspace = true, optional = true }
 gilrs-core = { workspace = true, optional = true }

@@ -100,9 +100,10 @@ use crate::dto::video::{
     VideoAddParams, VideoAddressesParams, VideoAssignParams, VideoCaptureEnableParams,
     VideoCaptureParams, VideoCaptureSettingsParams, VideoDemosParams, VideoFileParams,
     VideoFrameParams, VideoPhotoParams, VideoPhotoShowParams, VideoPhotoThumbnailsParams,
-    VideoPlaybackParams, VideoRecordAllParams, VideoRecordParams, VideoRecordWithOthersParams,
-    VideoRemoveParams, VideoRenameParams, VideoRevealParams, VideoServedByParams, VideoTrackParams,
-    VideoUnwatchParams, VideoVehicleCameraParams, VideoWatchParams,
+    VideoPlaybackParams, VideoRecordAllParams, VideoRecordParams, VideoRecordWhereParams,
+    VideoRecordWithOthersParams, VideoRemoveParams, VideoRenameParams, VideoRevealParams,
+    VideoServedByParams, VideoTrackParams, VideoUnwatchParams, VideoVehicleCameraParams,
+    VideoWatchParams,
 };
 
 /// A request from a client to the daemon. Results are listed in `Result`
@@ -2063,6 +2064,13 @@ pub enum ClientRequest {
     /// Result: `VideoSource`.
     #[serde(rename = "video/recordWithOthers")]
     VideoRecordWithOthers(VideoRecordWithOthersParams),
+    /// Where a camera's recordings are made (ADR-0066 R6): on this
+    /// computer, on the vehicle by its camera that records this picture, or
+    /// both. `vehicle` needs such a camera. Sets `vehicleCamera` and
+    /// `vehicleOnly`, kept with the camera. Needs `config`. Result:
+    /// `VideoSource`.
+    #[serde(rename = "video/recordWhere")]
+    VideoRecordWhere(VideoRecordWhereParams),
     /// A recording to play: an MP4 path on the daemon's origin, good for an
     /// hour. Needs `read`. Result: `VideoPlaybackResult`.
     #[serde(rename = "video/playback")]
@@ -2446,7 +2454,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 425] = [
+    pub const METHODS: [&'static str; 426] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2768,6 +2776,7 @@ impl ClientRequest {
         "video/record",
         "video/recordAll",
         "video/recordWithOthers",
+        "video/recordWhere",
         "video/playback",
         "video/rename",
         "video/track",

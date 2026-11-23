@@ -400,6 +400,9 @@ pub(crate) struct Video {
     /// Vehicles whose onboard cameras were told to record (S145): the start
     /// receipt, shared by every stream because the command targets all cameras.
     pub(crate) camera_recording: BTreeMap<String, String>,
+    /// What UXDuck last asked each of `uxduck companion`'s recording
+    /// cameras, by camera id: to record, or to stop (ADR-0066 R7).
+    pub(crate) companion_asked: BTreeMap<String, bool>,
     /// Each configured capture run, independent of updates to its source counters.
     capture_epochs: BTreeMap<String, u64>,
     /// Permission failures need an explicit selection to request/recheck access.
@@ -786,6 +789,7 @@ impl Engine {
                 // shoot (V20), unless its cameras say none of them does (S404).
                 vehicle_camera: self.vehicle_captures(vehicle_id),
                 vehicle_camera_by_hand: false,
+                vehicle_only: false,
                 served_by: None,
                 record_alone: false,
                 klv: false,
@@ -929,6 +933,7 @@ impl Engine {
             assigned_by_hand: false,
             vehicle_camera: false,
             vehicle_camera_by_hand: false,
+            vehicle_only: false,
             served_by: None,
             record_alone: false,
             klv: false,
@@ -955,6 +960,7 @@ impl Engine {
             source.assigned_by_hand = waiting.assigned_by_hand;
             source.vehicle_camera = waiting.vehicle_camera;
             source.vehicle_camera_by_hand = waiting.vehicle_camera_by_hand;
+            source.vehicle_only = waiting.vehicle_only;
             source.record_alone = waiting.record_alone;
             source.from_account = waiting.from_account;
             source.added_by_hand = true;
@@ -2099,6 +2105,7 @@ impl Engine {
         }
         source.vehicle_camera = params.on;
         source.vehicle_camera_by_hand = true;
+        source.vehicle_only &= params.on;
         source.version += 1;
         self.commit_as(
             actor(),
@@ -2290,6 +2297,7 @@ impl Engine {
                 assigned_by_hand: false,
                 vehicle_camera: false,
                 vehicle_camera_by_hand: false,
+                vehicle_only: false,
                 served_by: None,
                 record_alone: false,
                 klv: false,
@@ -2405,6 +2413,7 @@ impl Engine {
             assigned_by_hand: false,
             vehicle_camera: false,
             vehicle_camera_by_hand: false,
+            vehicle_only: false,
             served_by: None,
             record_alone: false,
             klv: false,
@@ -2630,6 +2639,7 @@ impl Engine {
             vehicle_id,
             vehicle_camera: false,
             vehicle_camera_by_hand: false,
+            vehicle_only: false,
             served_by: None,
             record_alone: false,
             klv: false,
@@ -2757,6 +2767,7 @@ impl Engine {
         source.added_by_hand = true;
         source.from_account = true;
         source.record_alone = camera.record_alone;
+        source.vehicle_only = camera.vehicle_only;
         if let Some(on) = camera.vehicle_camera {
             source.vehicle_camera = on;
             source.vehicle_camera_by_hand = true;
@@ -2816,6 +2827,7 @@ impl Engine {
             vehicle_id,
             vehicle_camera: false,
             vehicle_camera_by_hand: false,
+            vehicle_only: false,
             served_by: None,
             record_alone: false,
             klv: false,
@@ -3057,6 +3069,7 @@ impl Engine {
         let mut opened = Vec::new();
         for mut source in sources {
             let recording = self.recording_intent(&source).is_some()
+                && self.records_here(&source)
                 && source.capture.as_ref().is_none_or(|c| c.enabled);
             // Nobody watching (after a restart, say): nothing re-encodes it.
             let stale_reencoding = source.reencoding.is_some() && !watched.contains(&source.id);
@@ -3423,6 +3436,11 @@ pub(crate) fn handle(
         ClientRequest::VideoRecordWithOthers(params) => {
             require(Capability::Config)?;
             let source = crate::recordings::record_with_others(engine, &params)?;
+            to_value(&VideoSourceDto::from(&source))
+        }
+        ClientRequest::VideoRecordWhere(params) => {
+            require(Capability::Config)?;
+            let source = crate::recordings::record_where(engine, &params)?;
             to_value(&VideoSourceDto::from(&source))
         }
         ClientRequest::VideoPlayback(params) => {

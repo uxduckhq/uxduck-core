@@ -113,6 +113,7 @@ class CameraTests(unittest.TestCase):
                             "LOGIND": self.root / "logind.conf", "LOGIND_DIRS": (self.root / "logind.conf.d",),
                             "LOGIN_DEFS": self.root / "login.defs", "SENSOR_NAMES": (self.root / "video4linux",),
                             "WATCHDOG_SCRIPT": self.root / "lib/camera-watchdog.py", "WATCHDOG_STATE": self.root / "run/camera-watchdog.json",
+                            "COMPANION_TOML": self.root / "uxduck/companion.toml",
                             "READY_WAIT_S": 1.0, "POLL_S": 0.02}.items():
             patcher = patch.object(camera, name, value)
             patcher.start()
@@ -133,6 +134,67 @@ class CameraTests(unittest.TestCase):
     def plan(self, values):
         return {"unit": "mediamtx.service", "dropIn": str(self.drop_in), "content": camera.render(values),
                 "api": self.api.address, "target": "cam", "paths": ["cam", "rear"]}
+
+    def companion_toml(self, text):
+        path = self.root / "uxduck/companion.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        path.chmod(0o640)
+        return path
+
+    def test_a_cameras_recording_on_the_vehicle_is_read_with_it_and_its_recorded_path_leaves_the_list(self):
+        # ADR-0066 R10: a [cameras.<path>] table names the recorded path and the mode.
+        self.companion_toml('# Written by UXDuck\n[features]\ncameras = true\n\n[cameras.front]\nrecord_path = "front_record"  # 720p30\n'
+                            '\n[cameras."rear"]\nrecord_path = "rear_record"\nrecord = "always"\n\n[cameras.side]\nrecord = "off"\n')
+        record = {"width": 1280, "height": 720, "fps": 30, "mode": "", "idrPeriod": 30, "bitrate": 4_000_000}
+        status = {"paths": [{"name": "front", "source": "rpiCamera"}, {"name": "front_record", "source": "rpiCamera", "settings": record},
+                            {"name": "rear", "source": "rpiCamera"}, {"name": "rear_record", "source": "rpiCamera"},
+                            {"name": "side", "source": "rpiCamera"}]}
+        camera.recordings(status)
+        self.assertEqual(status["paths"], [
+            {"name": "front", "source": "rpiCamera", "record": {"path": "front_record", "mode": "armed", "settings": record}},
+            {"name": "rear", "source": "rpiCamera", "record": {"path": "rear_record", "mode": "always"}},
+            {"name": "side", "source": "rpiCamera"}])
+        self.assertNotIn("recordProblem", status)
+
+    def test_a_record_mode_uxduck_does_not_know_is_said_and_the_rest_is_read(self):
+        self.companion_toml('[cameras.front]\nrecord_path = "front_record"\nrecord = "sometimes"\n')
+        status = {"paths": [{"name": "front", "source": "rpiCamera"}, {"name": "front_record", "source": "rpiCamera"}]}
+        camera.recordings(status)
+        self.assertIn('record = "sometimes"', status["recordProblem"])
+        self.assertEqual([p["name"] for p in status["paths"]], ["front", "front_record"])
+        empty = {"paths": [{"name": "front", "source": "rpiCamera"}]}
+        (self.root / "uxduck/companion.toml").unlink()
+        camera.recordings(empty)
+        self.assertEqual(empty, {"paths": [{"name": "front", "source": "rpiCamera"}]})
+
+    def test_a_record_mode_is_written_on_its_own_line_and_every_other_line_is_kept(self):
+        text = '# Written by UXDuck\n[cameras.front]\nrecord_path = "front_record"\n\n[cameras.rear]  # the back one\nrecord_path = "rear_record"\nrecord = "armed" # default\n'
+        path = self.companion_toml(text)
+        found = {"paths": [{"name": "front", "record": {"path": "front_record", "mode": "armed"}},
+                           {"name": "rear", "record": {"path": "rear_record", "mode": "armed"}}, {"name": "side"}]}
+        camera.set_record({"path": "front", "mode": "always"}, found)
+        camera.set_record({"path": "rear", "mode": "off"}, found)
+        self.assertEqual(path.read_text(), '# Written by UXDuck\n[cameras.front]\nrecord = "always"\nrecord_path = "front_record"\n\n'
+                                           '[cameras.rear]  # the back one\nrecord_path = "rear_record"\nrecord = "off"\n')
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+        # Nothing runs while uxduck companion is not running: it reads the file when it starts.
+        self.assertEqual([c for c in self.calls() if c[:2] == ["systemctl", "reload"]], [])
+        with patch.object(camera, "active", return_value=True):
+            camera.set_record({"path": "front", "mode": "armed"}, found)
+        self.assertIn(["systemctl", "reload", "--", "uxduck-companion.service"], self.calls())
+        for change, why in [({"path": "front", "mode": "sometimes"}, "armed, always or off"),
+                            ({"path": "side", "mode": "off"}, "does not record side"),
+                            ({"path": 'front"\nrecord = "off', "mode": "off"}, "does not record")]:
+            with self.assertRaisesRegex(ValueError, why):
+                camera.set_record(change, found)
+        self.assertIn('[cameras.front]\nrecord = "armed"\n', path.read_text())
+        # uxduck companion refuses a record line in a table with no record_path, so one
+        # removed since the last read is never written.
+        path.write_text('[cameras.front]\nfollow = true\n')
+        with self.assertRaisesRegex(ValueError, "has no record_path"):
+            camera.set_record({"path": "front", "mode": "off"}, found)
+        self.assertEqual(path.read_text(), '[cameras.front]\nfollow = true\n')
 
     def test_drop_in_holds_only_overrides_and_keeps_other_cameras(self):
         self.drop_in.parent.mkdir(parents=True)

@@ -1837,6 +1837,13 @@ export type Camera = {
      */
     settings?: CameraSettings | null;
     /**
+     * The video source whose picture it records on the vehicle, for a
+     * camera that names no stream of its own: `uxduck companion`'s
+     * recording camera, whose model names the picture's path (ADR-0066
+     * R5). It starts and stops by the vehicle's own mode.
+     */
+    sourceId?: string | null;
+    /**
      * The sensors it has said it has since UXDuck first heard it:
      * `thermal` from a thermal range it can give or a stream that is
      * thermal, and `daylight` from a stream that is not. A camera with
@@ -1856,6 +1863,13 @@ export type Camera = {
      * It only sends video: it has a video stream and nothing to control.
      */
     videoOnly?: boolean;
+    /**
+     * The latest warning `uxduck companion`'s recording camera said, such
+     * as "Deleted 450 MB of earlier recordings to keep recording, 160 MB
+     * free" (ADR-0066 R11), until it next starts recording. The Record
+     * menu's vehicle line shows it.
+     */
+    warning?: string | null;
 };
 
 /**
@@ -4319,6 +4333,9 @@ export type ClientRequest = {
     method: 'video/recordWithOthers';
     params: VideoRecordWithOthersParams;
 } | {
+    method: 'video/recordWhere';
+    params: VideoRecordWhereParams;
+} | {
     method: 'video/playback';
     params: VideoPlaybackParams;
 } | {
@@ -4833,6 +4850,11 @@ export type CompanionCameraPath = {
     readers?: number;
     ready?: boolean;
     /**
+     * Its recording on the vehicle, when `uxduck companion` records it
+     * (ADR-0066 R1, R10).
+     */
+    record?: VehicleRecording | null;
+    /**
      * Why UXDuck cannot set its picture, for people.
      */
     refused?: string | null;
@@ -4884,6 +4906,11 @@ export type CompanionCameras = {
      * Why the cameras could not be read, for people.
      */
     problem?: string | null;
+    /**
+     * Why `/etc/uxduck/companion.toml`'s recordings could not be read,
+     * for people (ADR-0066 R10).
+     */
+    recordProblem?: string | null;
     /**
      * The systemd unit running a `mediamtx` binary; absent when none runs.
      */
@@ -5140,6 +5167,12 @@ export type ComputerCamerasParams = {
      * (`loginctl enable-linger`).
      */
     linger?: boolean;
+    /**
+     * When a camera records on the vehicle (ADR-0066 R9): written to
+     * `/etc/uxduck/companion.toml`, which `uxduck companion` reads again.
+     * No camera pauses.
+     */
+    record?: RecordModeParams | null;
     vehicleId: string;
     /**
      * Install or remove the camera watchdog.
@@ -14821,6 +14854,19 @@ export type Receipt = {
 
 export type ReceiptStatus = 'accepted' | 'sent' | 'rejected' | 'timeout' | 'not-sent' | 'interrupted';
 
+export type RecordModeParams = {
+    mode: VehicleRecordMode;
+    /**
+     * The camera's path, such as `front`, whose recording it is.
+     */
+    path: string;
+};
+
+/**
+ * Where a camera's recordings are made (ADR-0066 R6).
+ */
+export type RecordPlace = 'computer' | 'vehicle' | 'both';
+
 /**
  * When a camera's video is recorded.
  */
@@ -20671,6 +20717,27 @@ export type VehicleModelReadResult = {
  */
 export type VehiclePosition = 'level' | 'left' | 'right' | 'nose-down' | 'nose-up' | 'back';
 
+/**
+ * When `uxduck companion` records a camera on the vehicle (ADR-0066 R2).
+ */
+export type VehicleRecordMode = 'always' | 'armed' | 'off';
+
+/**
+ * A camera's recording on the vehicle (ADR-0066 R1, R10).
+ */
+export type VehicleRecording = {
+    mode: VehicleRecordMode;
+    /**
+     * The `MediaMTX` path recorded, such as `front_record`: a second,
+     * fixed-quality stream of the same camera.
+     */
+    path: string;
+    /**
+     * That path's picture, when `MediaMTX` has it.
+     */
+    settings?: PictureSettings | null;
+};
+
 export type VehicleRoute = {
     lastHeartbeatUs: number;
     lastReceiveAgeMs: number | null;
@@ -21417,6 +21484,11 @@ export type VideoRecordParams = {
     sourceId: string;
 };
 
+export type VideoRecordWhereParams = {
+    place: RecordPlace;
+    sourceId: string;
+};
+
 export type VideoRecordWithOthersParams = {
     /**
      * Whether the recording setting and Record all start this camera; its
@@ -21650,6 +21722,12 @@ export type VideoSource = {
      * The vehicle it belongs to: by the sender's address, or chosen.
      */
     vehicleId?: string | null;
+    /**
+     * Recorded on the vehicle only (ADR-0066 R6, `video/recordWhere`):
+     * this computer records nothing of it while its vehicle has a camera
+     * that records it, and records it as before while the vehicle has none.
+     */
+    vehicleOnly?: boolean;
     version: number;
     width?: number | null;
 };

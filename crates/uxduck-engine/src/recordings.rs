@@ -8,8 +8,8 @@ use serde_json::Value;
 use uxduck_contracts::dto::Empty;
 use uxduck_contracts::dto::state::{EntityChange, EntityType};
 use uxduck_contracts::dto::video::{
-    VideoPlaybackParams, VideoPlaybackResult, VideoRecordAllParams, VideoRecordParams,
-    VideoRecordWithOthersParams,
+    RecordPlace, VideoPlaybackParams, VideoPlaybackResult, VideoRecordAllParams, VideoRecordParams,
+    VideoRecordWhereParams, VideoRecordWithOthersParams,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_core::domain::video::{
@@ -199,6 +199,8 @@ impl Engine {
             .video_sources
             .values()
             .filter(|source| source.vehicle_camera)
+            // The companion's camera keeps its own schedule (ADR-0066 R7).
+            .filter(|source| self.companion_recorder(source).is_none())
             .filter(|source| match self.recording_intent(source) {
                 Some(RecordingTrigger::Always) => source.state == VideoState::Receiving,
                 Some(_) => true,
@@ -259,6 +261,115 @@ impl Engine {
         }
     }
 
+    /// Starts and stops `uxduck companion`'s recording cameras for what a
+    /// person asked, and nothing else (ADR-0066 R7). The vehicle starts and
+    /// stops them by its own mode, so UXDuck's recording setting, while
+    /// armed or always, never tells them to. A Record pressed for a picture
+    /// that records on the vehicle asks its camera to record, and a Stop
+    /// asks it to stop, also when the vehicle started it, because a person
+    /// asked. A Stop lasts until the vehicle next arms (S153), so the next
+    /// Stop asks again.
+    fn review_companion_recorders(&mut self) {
+        use uxduck_core::domain::camera::CameraAction;
+
+        let mut wanted = std::collections::BTreeMap::<String, bool>::default();
+        for source in self.state.video_sources.values() {
+            if !source.vehicle_camera {
+                continue;
+            }
+            let (Some(camera), Some(&on)) = (
+                self.companion_recorder(source),
+                self.video.by_hand.get(&source.id),
+            ) else {
+                continue;
+            };
+            *wanted.entry(camera.id.clone()).or_insert(on) |= on;
+        }
+        let mut told = Vec::new();
+        for (camera_id, on) in &wanted {
+            let asked = self.video.companion_asked.get(camera_id).copied();
+            let Some(camera) = self.state.cameras.get(camera_id) else {
+                continue;
+            };
+            let recording = camera.capture.is_some_and(|capture| capture.recording);
+            if asked == Some(*on) || (!on && asked.is_none() && !recording) {
+                continue;
+            }
+            told.push((camera.clone(), *on));
+        }
+        // A camera asked to record that no picture wants any more, such as
+        // one whose picture now records on this computer only, is stopped.
+        for (camera_id, asked) in self.video.companion_asked.clone() {
+            if asked
+                && !wanted.contains_key(&camera_id)
+                && let Some(camera) = self.state.cameras.get(&camera_id)
+            {
+                told.push((camera.clone(), false));
+            }
+        }
+        self.video
+            .companion_asked
+            .retain(|id, _| wanted.contains_key(id));
+        for (camera, on) in told {
+            self.tell_vehicle_camera(
+                &camera.vehicle_id,
+                Some((camera.component_id, camera.device_id)),
+                if on {
+                    CameraAction::StartRecording
+                } else {
+                    CameraAction::StopRecording
+                },
+            );
+            if wanted.contains_key(&camera.id) {
+                self.video.companion_asked.insert(camera.id, on);
+            }
+        }
+    }
+
+    /// The vehicle's camera that records a picture on the vehicle: one that
+    /// says it records video and is heard, and whose stream is the picture
+    /// or, for `uxduck companion`'s, whose model names the picture's path
+    /// (ADR-0066 R5).
+    pub(crate) fn vehicle_recorder(
+        &self,
+        source: &VideoSource,
+    ) -> Option<&uxduck_core::domain::camera::Camera> {
+        self.state.cameras.values().find(|camera| {
+            camera.present
+                && camera
+                    .information
+                    .as_ref()
+                    .is_some_and(uxduck_core::domain::camera::CameraInformation::records_video)
+                && (camera.source_id.as_ref() == Some(&source.id)
+                    || camera
+                        .streams
+                        .iter()
+                        .any(|stream| stream.source_id.as_ref() == Some(&source.id)))
+        })
+    }
+
+    /// `uxduck companion`'s recording camera for a picture, which keeps its
+    /// own schedule (ADR-0066 R7).
+    fn companion_recorder(
+        &self,
+        source: &VideoSource,
+    ) -> Option<&uxduck_core::domain::camera::Camera> {
+        self.vehicle_recorder(source).filter(|camera| {
+            camera
+                .information
+                .as_ref()
+                .is_some_and(uxduck_core::domain::camera::CameraInformation::on_the_companion)
+        })
+    }
+
+    /// Whether this computer records a picture when it should be recorded:
+    /// always, except one recorded on the vehicle only while its vehicle
+    /// has a camera that records it (ADR-0066 R6). Without that camera it
+    /// is recorded here, so nothing goes unrecorded.
+    pub(crate) fn records_here(&self, source: &VideoSource) -> bool {
+        !(source.vehicle_only && source.vehicle_camera && self.vehicle_recorder(source).is_some())
+    }
+
     /// Why a camera should be recording now, if it should.
     pub(crate) fn recording_intent(&self, source: &VideoSource) -> Option<RecordingTrigger> {
         if let Some(on) = self.video.by_hand.get(&source.id) {
@@ -288,9 +399,10 @@ impl Engine {
         }
         self.review_video_demand();
         self.review_vehicle_cameras();
+        self.review_companion_recorders();
         let sources: Vec<VideoSource> = self.state.video_sources.values().cloned().collect();
         for source in sources {
-            let wanted = (source.state == VideoState::Receiving)
+            let wanted = (source.state == VideoState::Receiving && self.records_here(&source))
                 .then(|| self.recording_intent(&source))
                 .flatten();
             let active = self.video.recording.get(&source.id).cloned();
@@ -741,6 +853,49 @@ impl Engine {
         Ok(source)
     }
 
+    /// `video/recordWhere` (ADR-0066 R6): set by hand, kept with the camera.
+    /// The vehicle only needs a camera there that records this picture.
+    fn video_record_where(
+        &mut self,
+        params: &VideoRecordWhereParams,
+    ) -> Result<VideoSource, ApiError> {
+        let mut source = self
+            .state
+            .video_sources
+            .get(&params.source_id)
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::new(
+                    ErrorKind::NotFound,
+                    format!("no video source {}", params.source_id),
+                )
+            })?;
+        if params.place != RecordPlace::Computer && source.file.is_some() {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Recorded footage cannot be recorded on a vehicle.",
+            ));
+        }
+        if params.place == RecordPlace::Vehicle && self.vehicle_recorder(&source).is_none() {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "The vehicle has no camera that records this picture. Record it on this computer.",
+            ));
+        }
+        source.vehicle_camera = params.place != RecordPlace::Computer;
+        source.vehicle_camera_by_hand = true;
+        source.vehicle_only = params.place == RecordPlace::Vehicle;
+        source.version += 1;
+        self.commit_as(
+            actor(),
+            Change::VideoSourceUpserted {
+                source: source.clone(),
+            },
+        );
+        self.review_recordings();
+        Ok(source)
+    }
+
     /// A vehicle arms: a Stop pressed for its cameras lasts until now, so
     /// "while armed" and "always" record its next flight (S153). A Record
     /// pressed stays.
@@ -922,6 +1077,25 @@ pub(crate) fn record_with_others(
     params: &VideoRecordWithOthersParams,
 ) -> Result<VideoSource, ApiError> {
     engine.video_record_with_others(params)
+}
+
+/// `video/recordWhere` in the words of an approval: "record the camera
+/// front on the vehicle".
+pub(crate) fn record_where_words(params: &VideoRecordWhereParams) -> String {
+    use uxduck_contracts::dto::video::RecordPlace;
+    let place = match params.place {
+        RecordPlace::Computer => "on this computer",
+        RecordPlace::Vehicle => "on the vehicle",
+        RecordPlace::Both => "on this computer and the vehicle",
+    };
+    format!("record the camera {} {place}", params.source_id)
+}
+
+pub(crate) fn record_where(
+    engine: &mut Engine,
+    params: &VideoRecordWhereParams,
+) -> Result<VideoSource, ApiError> {
+    engine.video_record_where(params)
 }
 
 pub(crate) fn playback(

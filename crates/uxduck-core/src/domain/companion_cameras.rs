@@ -287,6 +287,10 @@ pub struct CompanionCameras {
     /// Why the cameras could not be read, for people.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// Why `/etc/uxduck/companion.toml`'s recordings could not be read,
+    /// for people (ADR-0066 R10). The cameras are read all the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_problem: Option<String>,
 }
 
 impl CompanionCameras {
@@ -300,17 +304,28 @@ impl CompanionCameras {
         &self,
         addresses: impl IntoIterator<Item = &'a str>,
     ) -> Option<&CompanionCameraPath> {
-        let paths: Vec<&str> = addresses.into_iter().filter_map(address_path).collect();
+        let addresses: Vec<&str> = addresses.into_iter().collect();
         self.paths.iter().find(|camera| {
             camera.source == "rpiCamera"
-                && paths.iter().any(|path| {
-                    *path == camera.name
-                        || path
-                            .strip_suffix(camera.name.as_str())
-                            .is_some_and(|before| before.ends_with('/'))
-                })
+                && addresses
+                    .iter()
+                    .any(|address| address_names(address, &camera.name))
         })
     }
+}
+
+/// Whether an address names a camera path: its path is the name, or ends
+/// in `/` and the name, such as `rtsp://gateway:8554/front` for `front`
+/// (ADR-0060 C8, ADR-0066 R5).
+#[must_use]
+pub fn address_names(address: &str, name: &str) -> bool {
+    !name.is_empty()
+        && address_path(address).is_some_and(|path| {
+            path == name
+                || path
+                    .strip_suffix(name)
+                    .is_some_and(|before| before.ends_with('/'))
+        })
 }
 
 /// An address's path without its leading and trailing `/`, query or
@@ -371,6 +386,37 @@ pub struct CompanionCameraPath {
     /// Bytes it has received since `MediaMTX` started.
     #[serde(default)]
     pub bytes: u64,
+    /// Its recording on the vehicle, when `uxduck companion` records it
+    /// (ADR-0066 R1, R10): a `[cameras.<name>]` table in
+    /// `/etc/uxduck/companion.toml` with a `record_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<VehicleRecording>,
+}
+
+/// When `uxduck companion` records a camera on the vehicle (ADR-0066 R2):
+/// `record` in its `[cameras.<path>]` table. A table without it records
+/// while armed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VehicleRecordMode {
+    #[default]
+    Armed,
+    Always,
+    /// Only when a ground station asks.
+    Off,
+}
+
+/// A camera's recording on the vehicle (ADR-0066 R1, R10).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleRecording {
+    /// The `MediaMTX` path recorded, such as `front_record`: a second,
+    /// fixed-quality stream of the same camera.
+    pub path: String,
+    pub mode: VehicleRecordMode,
+    /// That path's picture, when `MediaMTX` has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<PictureSettings>,
 }
 
 impl CompanionCameraPath {
@@ -537,6 +583,7 @@ mod tests {
             ready: true,
             readers: 0,
             bytes: 0,
+            record: None,
         };
         assert!(proxy.adjustable().unwrap_err().contains("rpiCamera"));
     }
@@ -554,6 +601,7 @@ mod tests {
             ready: false,
             readers: 0,
             bytes: 0,
+            record: None,
         };
         let cameras = CompanionCameras {
             unit: None,
@@ -567,6 +615,7 @@ mod tests {
                 path("relay", "rtsp"),
             ],
             watchdog: CameraWatchdog::default(),
+            record_problem: None,
             applied: None,
             problem: None,
         };

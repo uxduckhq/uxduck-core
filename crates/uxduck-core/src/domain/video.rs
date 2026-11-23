@@ -403,6 +403,11 @@ pub struct VideoSource {
     /// Someone set `vehicle_camera`; announcements no longer do.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vehicle_camera_by_hand: bool,
+    /// Recorded on the vehicle only (ADR-0066 R6): this computer records
+    /// nothing of it while its vehicle has a camera that records it, and
+    /// records it as before while the vehicle has none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vehicle_only: bool,
     /// The companion computer serving an RTSP camera, by its id in its
     /// vehicle's profile, chosen by hand (S358): its clock dates the
     /// pictures. None: the computer at the camera address's host (S357).

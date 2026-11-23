@@ -884,4 +884,4 @@ pub(super) async fn play(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
