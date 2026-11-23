@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "e3a649f1f6242e2590dcb48460efb5c68bc3fd08",
+  "sourceCommit": "6f750ddda95150c3a11c69296cab999840e4b4f3",
   "licenseReady": true,
   "files": [
     {
@@ -7991,7 +7991,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/link_health.rs",
-      "sha256": "f4186e0b9663f71277ee06ba287fb1aad95fed182846bbe0be0a1cd6df12348f",
+      "sha256": "4eece925d34e790e7b6bf08df3a38d64e3edf845a770ce77d8fc130a14577a03",
       "executable": false
     },
     {
@@ -8856,7 +8856,7 @@
     },
     {
       "path": "crates/uxduck/src/daemon/data_plane.rs",
-      "sha256": "391d2d92a5934d3fe3ac3d1846ccb6ba4dc4213a812b1b29f0af2ad4c5a205c1",
+      "sha256": "aaeeeb02f25d1b840dcfb4cff49faae4e0b51b6cdad87b05aa87dbd8356bd8c1",
       "executable": false
     },
     {

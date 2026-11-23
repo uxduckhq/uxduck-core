@@ -761,7 +761,7 @@ impl Plane {
             plugin_feed,
             simulators,
             withheld: std::collections::HashSet::new(),
-            health: uxduck_mavlink::link_health::Tracker::default(),
+            health: uxduck_mavlink::link_health::Tracker::new(config.stale_after_us),
             registration_vehicles: HashMap::new(),
             reported: std::collections::BTreeMap::new(),
             started: std::time::Instant::now(),

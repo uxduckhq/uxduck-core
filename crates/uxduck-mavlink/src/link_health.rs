@@ -22,8 +22,20 @@
 //! - **Loss**: gaps in each sender's 8-bit sequence (link, peer, system and
 //!   component), over the last [`LOSS_WINDOW_US`]. The 255 to 0 wrap is a
 //!   step of one; a duplicate is ignored; a frame up to [`REORDER`] behind
-//!   fills the gap it left. A sender silent for [`SILENCE_US`] starts again
-//!   without a gap: the silence is the telemetry's age, not a loss.
+//!   fills the gap it left. An address heard nothing from for the time after
+//!   which its vehicle is not responding ([`SILENCE_US`] by default, never
+//!   less than [`SILENCE_FLOOR_US`]) has lost everything it would have sent
+//!   since it was last heard: each second
+//!   of the silence counts as many frames lost as a second carried in the
+//!   window before it, and at least the one heartbeat a second every MAVLink
+//!   system sends ([`HEARTBEAT_PER_S`]). So a link that goes quiet climbs to
+//!   100 % rather than having no loss to report, and comes down again over
+//!   the window once it is heard (UXD-348). A paused simulator sends nothing
+//!   and is not a lost vehicle: while it is paused its loss stays what it
+//!   was when it was last heard, and its pause is never counted. A sender
+//!   heard again after
+//!   [`SILENCE_US`] starts its sequence again without a gap, since its
+//!   silence is already counted, or was its own while others were heard.
 //! - **Age**: since anything was last heard from the vehicle's address.
 //! - **Uplink**: whether what UXDuck sends still arrives ([`Tracker::uplink`]).
 //!   A link that has answered `TIMESYNC` and is asked for
@@ -48,8 +60,22 @@ pub const ROUND_TRIP_WINDOW_US: u64 = 5_000_000;
 pub const OUTSTANDING_US: u64 = 5_000_000;
 /// How many requests to one address wait for a reply at once.
 pub const OUTSTANDING: usize = 8;
-/// A sender silent this long starts its sequence again without a gap.
+/// How long a sender may be unheard before it starts its sequence again
+/// without a gap, and by default an address before what it would have sent
+/// counts as lost: the three seconds after which a vehicle whose heartbeat
+/// stops is not responding, the session's default `stale_after_us`.
+/// [`Tracker::new`] takes the session's own for the address.
 pub const SILENCE_US: u64 = 3_000_000;
+/// The least an address may be unheard before its silence counts as lost,
+/// whatever the session's time to not responding (`--presence-stale-ms`,
+/// which tests set to a second or less): two heartbeat periods, so a
+/// healthy link heard only by its once-a-second heartbeat is never silent
+/// between two of them.
+pub const SILENCE_FLOOR_US: u64 = 2_000_000;
+/// The fewest frames a second a silent address counts as lost: the
+/// heartbeat every MAVLink system sends once a second, whatever else it was
+/// asked for.
+pub const HEARTBEAT_PER_S: u32 = 1;
 /// How long a link that has answered `TIMESYNC` may go on being asked with
 /// no reply before its uplink is silent: the three seconds after which a
 /// vehicle whose heartbeat stops is not responding, applied the other way.
@@ -74,9 +100,18 @@ pub enum Uplink {
     Silent,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Tracker {
     addresses: BTreeMap<Address, Health>,
+    /// How long an address may be unheard before its silence is lost: the
+    /// session's time to not responding, at least [`SILENCE_FLOOR_US`].
+    silence_us: u64,
+}
+
+impl Default for Tracker {
+    fn default() -> Self {
+        Self::new(SILENCE_US)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -96,6 +131,17 @@ struct Health {
     last_reply_us: Option<u64>,
     /// Why it is not asked now.
     not_asked: Option<RoundTripMissing>,
+    /// While nothing is heard from it past the silence: how many frames
+    /// each second of it counts as lost, and up to when they are counted.
+    silent: Option<Silent>,
+    /// When its simulator last resumed: its pause is not a silence.
+    resumed_us: Option<u64>,
+}
+
+#[derive(Debug)]
+struct Silent {
+    per_s: u32,
+    counted_to_us: u64,
 }
 
 #[derive(Debug)]
@@ -114,6 +160,17 @@ struct Bucket {
 }
 
 impl Tracker {
+    /// A tracker whose addresses are silent, and lose what they would have
+    /// sent, once unheard for `silence_us`, the session's time after which
+    /// a vehicle is not responding, or [`SILENCE_FLOOR_US`] if that is less.
+    #[must_use]
+    pub fn new(silence_us: u64) -> Self {
+        Self {
+            addresses: BTreeMap::new(),
+            silence_us: silence_us.max(SILENCE_FLOOR_US),
+        }
+    }
+
     /// One whole frame from a vehicle's address: its sequence, when it
     /// arrived, and, for a `TIMESYNC` reply to one of UXDuck's requests, its
     /// round trip. `gcs` is the system id UXDuck sends as. `now_us` is when
@@ -124,6 +181,8 @@ impl Tracker {
             return;
         };
         let health = self.addresses.entry(address.clone()).or_default();
+        health.count_silence(self.silence_us, now_us);
+        health.silent = None;
         health.last_heard_us = Some(now_us);
         health.sequence(header.component_id, header.sequence, now_us);
         if header.message_id == TIMESYNC
@@ -158,7 +217,12 @@ impl Tracker {
             ts1 = ts1.saturating_add(1);
         }
         let health = self.addresses.entry(address.clone()).or_default();
-        if health.not_asked.take().is_some() || health.asked_since_us.is_none() {
+        let was = health.not_asked.take();
+        if was == Some(RoundTripMissing::Paused) {
+            health.resumed_us = Some(now_us);
+            health.silent = None;
+        }
+        if was.is_some() || health.asked_since_us.is_none() {
             health.asked_since_us = Some(now_us);
         }
         health.expire(now_us);
@@ -184,7 +248,14 @@ impl Tracker {
         let Some(health) = self.addresses.get_mut(address) else {
             return LinkHealth::default();
         };
-        health.expire(now_us);
+        // Paused, its loss is what it was when it was last heard.
+        let at_us = if health.not_asked == Some(RoundTripMissing::Paused) {
+            health.last_heard_us.unwrap_or(now_us).min(now_us)
+        } else {
+            now_us
+        };
+        health.count_silence(self.silence_us, at_us);
+        health.expire(at_us);
         let (received, lost) = health
             .buckets
             .iter()
@@ -297,6 +368,49 @@ impl Health {
         }
         let last = self.buckets.len() - 1;
         &mut self.buckets[last]
+    }
+
+    /// Counts the whole seconds of a silence up to `now_us` as lost, once
+    /// nothing has been heard for `silence_us`, from when it was last heard
+    /// or its simulator resumed. Nothing is counted while it is paused.
+    fn count_silence(&mut self, silence_us: u64, now_us: u64) {
+        let Some(heard_us) = self.last_heard_us else {
+            return;
+        };
+        let since_us = heard_us.max(self.resumed_us.unwrap_or(0));
+        if self.not_asked == Some(RoundTripMissing::Paused)
+            || now_us.saturating_sub(since_us) < silence_us
+        {
+            return;
+        }
+        let silent = self.silent.get_or_insert_with(|| {
+            let (frames, first_us) = self
+                .buckets
+                .iter()
+                .filter(|b| heard_us.saturating_sub(b.start_us) < LOSS_WINDOW_US)
+                .fold((0u64, heard_us), |(n, first), b| {
+                    (n + u64::from(b.received + b.lost), first.min(b.start_us))
+                });
+            let span_us = heard_us.saturating_sub(first_us).max(BUCKET_US);
+            Silent {
+                per_s: u32::try_from((frames.saturating_mul(BUCKET_US) + span_us / 2) / span_us)
+                    .unwrap_or(u32::MAX)
+                    .max(HEARTBEAT_PER_S),
+                counted_to_us: since_us,
+            }
+        });
+        let mut at_us = silent
+            .counted_to_us
+            .max(now_us.saturating_sub(LOSS_WINDOW_US));
+        while now_us.saturating_sub(at_us) >= BUCKET_US {
+            self.buckets.push_back(Bucket {
+                start_us: at_us,
+                received: 0,
+                lost: silent.per_s,
+            });
+            at_us += BUCKET_US;
+        }
+        silent.counted_to_us = at_us;
     }
 
     fn sequence(&mut self, component_id: u8, sequence: u8, now_us: u64) {
@@ -708,11 +822,25 @@ mod tests {
         tracker.heard(&a, &heartbeat_frame(1, 1, 8), GCS, 2_000);
         tracker.heard(&a, &camera(201), GCS, 3_000);
         assert_eq!(tracker.report(&a, 3_000).loss_percent, Some(0.0));
-        // Quiet for longer than the silence, back at another number.
-        tracker.heard(&a, &heartbeat_frame(1, 1, 200), GCS, 3_500_000);
-        let health = tracker.report(&a, 3_600_000);
-        assert_eq!(health.loss_percent, Some(0.0), "not 191 lost");
+        // The camera quiet for longer than the silence while the autopilot
+        // is heard, back at another number: its own silence is no loss.
+        for (i, at) in (1_000_000..=4_000_000).step_by(1_000_000).enumerate() {
+            let sequence = 9 + u8::try_from(i).unwrap();
+            tracker.heard(&a, &heartbeat_frame(1, 1, sequence), GCS, at);
+        }
+        tracker.heard(&a, &camera(90), GCS, 4_000_500);
+        assert_eq!(tracker.report(&a, 4_001_000).loss_percent, Some(0.0));
+        // The whole address quiet past the silence, back at another number:
+        // what it would have sent in the silence is lost, its sequence is
+        // not 100 behind.
+        tracker.heard(&a, &heartbeat_frame(1, 1, 113), GCS, 7_500_000);
+        let health = tracker.report(&a, 7_600_000);
         assert_eq!(health.age_ms, Some(100));
+        // Nine frames in the 4 s before the silence (four in its first
+        // second, then one or two a second) is 2 a second. Three whole
+        // seconds of silence from 4.0005 s to 7.0005 s lose 6. Ten heard, so
+        // 6 of 16 lost.
+        assert_eq!(health.loss_percent, Some(37.5));
     }
 
     #[test]
@@ -736,8 +864,165 @@ mod tests {
         assert_eq!(tracker.report(&a, at).loss_percent, Some(0.0));
         assert_eq!(
             tracker.report(&a, at + LOSS_WINDOW_US).loss_percent,
+            Some(100.0),
+            "nothing heard in the window: everything it would have sent is lost"
+        );
+    }
+
+    /// UXD-348: a radio heard, then silent for a minute, then heard again
+    /// read 0 % while it was heard and had no loss at all while it was
+    /// silent, so the graph sat on 0 across a dead radio. Its silence is
+    /// what it would have sent, lost.
+    #[test]
+    fn a_link_heard_then_silent_then_heard_again_loses_its_silence() {
+        let mut tracker = Tracker::default();
+        let a = address();
+        let mut sequence = 0u8;
+        let mut hear_until = |tracker: &mut Tracker, from: u64, to: u64| {
+            let mut at = from;
+            while at < to {
+                tracker.heard(&a, &heartbeat_frame(1, 1, sequence), GCS, at);
+                sequence = sequence.wrapping_add(1);
+                at += 100_000;
+            }
+        };
+        hear_until(&mut tracker, 0, 20_000_000);
+        let heard = tracker.report(&a, 20_000_000);
+        assert_eq!(heard.loss_percent, Some(0.0), "heard at 10 Hz");
+
+        let mut silent = |s: u64| tracker.report(&a, 20_000_000 + s * 1_000_000).loss_percent;
+        assert_eq!(silent(1), Some(0.0), "a second late is not yet silent");
+        let not_responding = silent(SILENCE_US / 1_000_000).unwrap();
+        assert!(
+            (25.0..35.0).contains(&not_responding),
+            "3 s of 10 lost once not responding, {not_responding}"
+        );
+        let mut was = not_responding;
+        for s in 4..=9 {
+            let now = silent(s).unwrap();
+            assert!(now > was, "climbs each second, {now} after {was}");
+            was = now;
+        }
+        assert_eq!(silent(10), Some(100.0), "the whole window silent");
+        assert_eq!(silent(59), Some(100.0), "and stays so, never blank");
+        let report = tracker.report(&a, 79_000_000);
+        assert_eq!(report.age_ms, Some(59_100));
+
+        hear_until(&mut tracker, 80_000_000, 81_000_000);
+        let back = tracker.report(&a, 81_000_000).loss_percent.unwrap();
+        assert!(
+            (80.0..100.0).contains(&back),
+            "a second heard of ten, {back}"
+        );
+        hear_until(&mut tracker, 81_000_000, 86_000_000);
+        let half = tracker.report(&a, 86_000_000).loss_percent.unwrap();
+        assert!(half > 0.0 && half < back, "falls as it is heard, {half}");
+        hear_until(&mut tracker, 86_000_000, 91_000_000);
+        assert_eq!(
+            tracker.report(&a, 91_000_000).loss_percent,
+            Some(0.0),
+            "recovered once the silence leaves the window"
+        );
+    }
+
+    /// A paused simulator sends nothing and is not a lost vehicle: its loss
+    /// stays what it was, and its pause is not counted once it resumes.
+    #[test]
+    fn a_paused_simulator_keeps_its_loss_and_its_pause_is_not_lost() {
+        let mut tracker = Tracker::default();
+        let a = address();
+        let mut sequence = 0u8;
+        let mut at = 0;
+        while at < 10_000_000 {
+            tracker.heard(&a, &heartbeat_frame(1, 1, sequence), GCS, at);
+            // Every tenth frame lost.
+            sequence = sequence.wrapping_add(if sequence % 9 == 8 { 2 } else { 1 });
+            at += 100_000;
+        }
+        let before = tracker.report(&a, 10_000_000).loss_percent.unwrap();
+        assert!(
+            (8.0..12.0).contains(&before),
+            "about a tenth lost, {before}"
+        );
+        tracker.not_asked(&a, RoundTripMissing::Paused);
+        assert_eq!(
+            tracker.report(&a, 40_000_000).loss_percent,
+            Some(before),
+            "30 s paused keeps what it was"
+        );
+        tracker.asked(&a, 40_000_000);
+        assert_eq!(
+            tracker.report(&a, 40_500_000).loss_percent,
             None,
-            "nothing heard in the window"
+            "resumed, nothing heard yet and the pause not lost"
+        );
+        let mut at = 40_500_000;
+        while at < 41_500_000 {
+            tracker.heard(&a, &heartbeat_frame(1, 1, sequence), GCS, at);
+            sequence = sequence.wrapping_add(1);
+            at += 100_000;
+        }
+        assert_eq!(
+            tracker.report(&a, 41_500_000).loss_percent,
+            Some(0.0),
+            "heard again after the pause"
+        );
+        tracker.not_asked(&a, RoundTripMissing::Paused);
+        tracker.asked(&a, 60_000_000);
+        assert_eq!(
+            tracker.report(&a, 62_500_000).loss_percent,
+            None,
+            "resuming counts as heard"
+        );
+        let silent = tracker.report(&a, 64_000_000).loss_percent.unwrap();
+        assert!(silent > 0.0, "silent after it resumed, {silent}");
+    }
+
+    /// The session's time to not responding has a floor: a link heard only
+    /// by its once-a-second heartbeat is never silent between two.
+    #[test]
+    fn a_heartbeat_link_is_not_silent_under_a_short_presence_time() {
+        let mut tracker = Tracker::new(500_000);
+        let a = address();
+        for second in 0..20u8 {
+            tracker.heard(
+                &a,
+                &heartbeat_frame(1, 1, second),
+                GCS,
+                u64::from(second) * 1_000_000 + 50_000 * u64::from(second % 3),
+            );
+            assert_eq!(
+                tracker
+                    .report(&a, u64::from(second) * 1_000_000 + 999_000)
+                    .loss_percent,
+                Some(0.0),
+                "at {second} s"
+            );
+        }
+        assert!(
+            tracker.report(&a, 22_000_000).loss_percent.unwrap() > 0.0,
+            "silent after the floor"
+        );
+    }
+
+    /// A link that only ever sent its heartbeat still loses one a second.
+    #[test]
+    fn a_silent_link_loses_at_least_its_heartbeat() {
+        let mut tracker = Tracker::default();
+        let a = address();
+        tracker.heard(&a, &heartbeat_frame(1, 1, 0), GCS, 0);
+        assert_eq!(tracker.report(&a, 2_000_000).loss_percent, Some(0.0));
+        assert_eq!(
+            tracker.report(&a, 5_000_000).loss_percent,
+            Some(500.0 / 6.0),
+            "one heard, five seconds of heartbeats lost"
+        );
+        let mut slow = Tracker::new(10_000_000);
+        slow.heard(&a, &heartbeat_frame(1, 1, 0), GCS, 0);
+        assert_eq!(
+            slow.report(&a, 5_000_000).loss_percent,
+            Some(0.0),
+            "not silent before the session's own time to not responding"
         );
     }
 }
