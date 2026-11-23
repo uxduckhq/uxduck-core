@@ -431,6 +431,13 @@ pub struct VideoSource {
     /// Other addresses of this same camera, in preference order. Only one plays.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_urls: Vec<String>,
+    /// The names someone typed for its addresses (S430), by place: the first
+    /// names `url`, the rest `fallback_urls` in order. Empty or missing
+    /// where none was typed, where the app names the address by the vehicle
+    /// connection on its host and its protocol. Each stays with its address
+    /// when the addresses are reordered or one is removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub address_names: Vec<String>,
     /// Direct local routes and an optional smaller stream from the same camera.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internet: Option<CameraInternet>,

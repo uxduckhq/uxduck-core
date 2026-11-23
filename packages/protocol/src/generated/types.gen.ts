@@ -21096,6 +21096,12 @@ export type VideoAddResult = {
 };
 
 export type VideoAddressesParams = {
+    /**
+     * A name for each of `urls`, in the same order, empty for none (S430).
+     * Absent: each address keeps the name it had, wherever it moved, and a
+     * new address has none. Changing only names keeps the video playing.
+     */
+    names?: Array<string> | null;
     sourceId: string;
     /**
      * RTSP or WHEP addresses in order, the preferred one first, with no
@@ -21628,6 +21634,14 @@ export type VideoSource = {
      * Added by hand: it stays until removed.
      */
     addedByHand?: boolean;
+    /**
+     * The names someone typed for its addresses (S430), by place: the first
+     * names `url`, the rest `fallbackUrls` in order, such as `Radio
+     * WebRTC`. Empty or missing where none was typed, where the app names
+     * the address by the vehicle connection on its host and its protocol,
+     * such as `Plane 4G · WebRTC`. `video/addresses` sets them.
+     */
+    addressNames?: Array<string>;
     assignedByHand?: boolean;
     /**
      * Its sound, once its stream is known, and whether UXDuck records it

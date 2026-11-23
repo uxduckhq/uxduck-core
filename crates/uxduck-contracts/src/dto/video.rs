@@ -338,6 +338,13 @@ pub struct VideoSource {
     /// Other addresses of this same camera, in preference order. Only one plays.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_urls: Vec<String>,
+    /// The names someone typed for its addresses (S430), by place: the first
+    /// names `url`, the rest `fallbackUrls` in order, such as `Radio
+    /// WebRTC`. Empty or missing where none was typed, where the app names
+    /// the address by the vehicle connection on its host and its protocol,
+    /// such as `Plane 4G · WebRTC`. `video/addresses` sets them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub address_names: Vec<String>,
     /// Direct local routes and an optional smaller stream from the same camera.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internet: Option<CameraInternet>,
@@ -457,6 +464,11 @@ pub struct VideoAddressesParams {
     /// which is its fallback (ADR-0064 W5). Unchanged redacted addresses
     /// retain their stored credentials.
     pub urls: Vec<String>,
+    /// A name for each of `urls`, in the same order, empty for none (S430).
+    /// Absent: each address keeps the name it had, wherever it moved, and a
+    /// new address has none. Changing only names keeps the video playing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

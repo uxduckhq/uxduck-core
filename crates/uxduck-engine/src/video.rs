@@ -796,6 +796,7 @@ impl Engine {
                 klv: false,
                 url: Some(uri.to_owned()),
                 fallback_urls: Vec::new(),
+                address_names: Vec::new(),
                 internet: None,
                 active_url: None,
                 active_choice: None,
@@ -941,6 +942,7 @@ impl Engine {
             klv: false,
             url: None,
             fallback_urls: Vec::new(),
+            address_names: Vec::new(),
             internet: None,
             active_url: None,
             active_choice: None,
@@ -1406,9 +1408,44 @@ impl Engine {
             }
             urls.push(url);
         }
+        let mut names: Vec<String> = match &params.names {
+            Some(given) if given.len() != urls.len() => {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "Give one name for each address, empty for an address without one.",
+                ));
+            }
+            Some(given) => given.iter().map(|name| name.trim().to_owned()).collect(),
+            None => urls
+                .iter()
+                .map(|url| {
+                    previous
+                        .iter()
+                        .position(|before| *before == url)
+                        .and_then(|at| source.address_names.get(at))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect(),
+        };
+        while names.last().is_some_and(String::is_empty) {
+            names.pop();
+        }
         if previous.iter().copied().eq(urls.iter()) {
+            if names == source.address_names {
+                return Ok(source);
+            }
+            source.address_names = names;
+            source.version += 1;
+            self.commit_as(
+                actor(),
+                Change::VideoSourceUpserted {
+                    source: source.clone(),
+                },
+            );
             return Ok(source);
         }
+        source.address_names = names;
         let primary = urls.remove(0);
         if let Input::Rtsp { host, port } | Input::Whep { host, port } = input(&primary)? {
             source.port = port;
@@ -2308,6 +2345,7 @@ impl Engine {
                 klv: false,
                 url: None,
                 fallback_urls: Vec::new(),
+                address_names: Vec::new(),
                 internet: None,
                 active_url: None,
                 active_choice: None,
@@ -2425,6 +2463,7 @@ impl Engine {
             klv: false,
             url: None,
             fallback_urls: Vec::new(),
+            address_names: Vec::new(),
             internet: None,
             active_url: None,
             active_choice: None,
@@ -2652,6 +2691,7 @@ impl Engine {
             klv: false,
             url: Some(url),
             fallback_urls: Vec::new(),
+            address_names: Vec::new(),
             internet: None,
             active_url: None,
             active_choice: None,
@@ -2841,6 +2881,7 @@ impl Engine {
             klv: false,
             url: None,
             fallback_urls: Vec::new(),
+            address_names: Vec::new(),
             internet: None,
             active_url: None,
             active_choice: None,
