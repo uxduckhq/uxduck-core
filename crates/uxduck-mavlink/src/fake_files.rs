@@ -122,6 +122,30 @@ impl Default for FakeFiles {
     }
 }
 
+/// When the fake's first log was written, Unix seconds: 20 November 2026,
+/// 09:00 UTC. Each later log is an hour after the one before.
+const FIRST_LOG_UTC: u32 = 1_795_165_200;
+
+impl FakeFiles {
+    /// Its logs as `LOG_ENTRY` lists them, oldest first: when each was
+    /// written and its size.
+    #[must_use]
+    pub fn logs(&self) -> Vec<(u32, u32)> {
+        self.files
+            .iter()
+            .filter_map(|(path, bytes)| {
+                let number: u32 = path
+                    .strip_prefix("/APM/LOGS/")?
+                    .strip_suffix(".BIN")?
+                    .parse()
+                    .ok()?;
+                let size = u32::try_from(bytes.len()).ok()?;
+                Some((FIRST_LOG_UTC + (number - 1) * 3600, size))
+            })
+            .collect()
+    }
+}
+
 /// What a request changed: a parameter file written to `@PARAM`.
 #[derive(Debug, Default)]
 pub struct Answered {

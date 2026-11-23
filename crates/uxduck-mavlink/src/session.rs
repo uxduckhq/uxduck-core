@@ -108,6 +108,11 @@ fn stream_rates(autopilot: &str) -> impl Iterator<Item = (u32, u32)> + use<> {
 /// A terrain report older than this no longer gives the fused position an
 /// above-ground altitude: the stream stopped, or the data went.
 const TERRAIN_FRESH_US: u64 = 5_000_000;
+/// A log listing ends this long after the autopilot last said anything for
+/// it. ArduPilot sends nothing while armed or while another ground station
+/// downloads a log, and a lost request gets no answer either, so a listing
+/// never waits longer than this for one.
+pub const LOG_LIST_SILENT_US: u64 = 2_000_000;
 
 /// The fused position's altitude above the ground, as an item.
 const ABOVE_TERRAIN: &str = "altitude.above_terrain_m";
@@ -234,6 +239,13 @@ pub enum Effect {
         lat: i32,
         lon: i32,
         height: Option<Option<f32>>,
+    },
+    /// A vehicle's logs as its autopilot lists them (`LOG_ENTRY`), for
+    /// [`Session::list_logs`]: `(id, time_utc, size)` by id. Those that
+    /// came, when it stopped answering before the last.
+    LogsListed {
+        vehicle_id: String,
+        logs: Vec<(u16, u32, u32)>,
     },
     /// A vehicle listed its own modes (`AVAILABLE_MODES`), whole, and the
     /// list differs from the last one it gave.
@@ -448,6 +460,10 @@ pub enum Effect {
 
 /// A long message's parts: link, peer, system, component and message id.
 type TextKey = (String, String, u8, u8, u16);
+
+/// A log listing under way: each entry's time and size by id, and when it
+/// was asked or last answered.
+type LogListing = (BTreeMap<u16, (u32, u32)>, u64);
 
 /// The end of a download of one kind: the mission, or a part (S128).
 fn part_effect(
@@ -1088,6 +1104,9 @@ pub struct Session {
     /// `TERRAIN_CHECK`s waiting for their report (S119), by vehicle: the
     /// point and when it was asked.
     terrain_checks: BTreeMap<String, Vec<(i32, i32, u64)>>,
+    /// Log listings under way, by vehicle: the entries so far by id, and
+    /// when it was asked or last answered.
+    log_lists: BTreeMap<String, LogListing>,
     /// Frames that were not whole frames or failed their checksum.
     pub dropped: u64,
     /// The peer and the address last read, kept so that reading a frame
@@ -1337,6 +1356,7 @@ impl Session {
                     | Message::MissionItem(_)
                     | Message::MissionRequest { .. }
                     | Message::MissionAck { .. }
+                    | Message::LogEntry { .. }
                     | Message::ParamExtValue(_)
                     | Message::ParamExtAck(_)
             );
@@ -1418,6 +1438,19 @@ impl Session {
                 | Message::MissionAck { .. }) => {
                     effects.extend(self.transfer(key, message, received_us, processed_us));
                 }
+                Message::LogEntry {
+                    id,
+                    last_log_num,
+                    time_utc,
+                    size,
+                    ..
+                } => effects.extend(self.log_entry(
+                    key,
+                    id,
+                    last_log_num,
+                    (time_utc, size),
+                    received_us,
+                )),
                 Message::ComponentMetadata { uri } => {
                     effects.extend(self.component_metadata(
                         key,
@@ -3372,6 +3405,7 @@ impl Session {
         effects.extend(self.tick_transfers(now_us));
         effects.extend(self.send_terrain(now_us));
         effects.extend(self.unanswered_checks(now_us));
+        effects.extend(self.unanswered_log_lists(now_us));
         effects.extend(self.rc_calibrations());
         effects.extend(self.cameras_changed());
         effects.extend(self.tick_camera_settings(now_us));
@@ -3451,6 +3485,97 @@ impl Session {
         }
         self.terrain_checks.retain(|_, c| !c.is_empty());
         effects
+    }
+
+    /// Asks a vehicle's autopilot for the list of its logs
+    /// (`LOG_REQUEST_LIST`). The entries come back together as
+    /// [`Effect::LogsListed`], when the last has come or none has for
+    /// [`LOG_LIST_SILENT_US`]. Asked again while a listing is under way,
+    /// that listing answers both, as ArduPilot lists to one asker at a time.
+    pub fn list_logs(&mut self, vehicle_id: &str, now_us: u64) -> Vec<Effect> {
+        let Some(key) = self.find(vehicle_id) else {
+            return vec![Effect::LogsListed {
+                vehicle_id: vehicle_id.to_owned(),
+                logs: Vec::new(),
+            }];
+        };
+        let Some(vehicle) = self.vehicles.get(&key) else {
+            return Vec::new();
+        };
+        let (id, component) = (vehicle.observation.id.clone(), vehicle.autopilot_component);
+        if self.log_lists.contains_key(&id) {
+            return Vec::new();
+        }
+        self.log_lists.insert(id, (BTreeMap::new(), now_us));
+        let (link_id, peer, system_id) = key;
+        let sequence = self.next_sequence();
+        vec![Effect::Send {
+            link_id,
+            peer,
+            bytes: crate::sim::log_request_list_frame(
+                self.config.gcs_system_id,
+                system_id,
+                component,
+                sequence,
+            ),
+        }]
+    }
+
+    /// One `LOG_ENTRY` of a listing; the listing is done at its last.
+    fn log_entry(
+        &mut self,
+        key: &(String, String, u8),
+        id: u16,
+        last: u16,
+        entry: (u32, u32),
+        received_us: u64,
+    ) -> Vec<Effect> {
+        let Some(vehicle_id) = self.vehicles.get(key).map(|v| v.observation.id.clone()) else {
+            return Vec::new();
+        };
+        let Some((logs, heard_us)) = self.log_lists.get_mut(&vehicle_id) else {
+            return Vec::new();
+        };
+        // An autopilot with no logs lists one entry, numbered 0.
+        if id > 0 {
+            logs.insert(id, entry);
+        }
+        *heard_us = received_us;
+        if id < last {
+            return Vec::new();
+        }
+        let (logs, _) = self.log_lists.remove(&vehicle_id).unwrap_or_default();
+        vec![Effect::LogsListed {
+            vehicle_id,
+            logs: logs
+                .into_iter()
+                .map(|(id, (time, size))| (id, time, size))
+                .collect(),
+        }]
+    }
+
+    /// Listings whose autopilot has said nothing for [`LOG_LIST_SILENT_US`]:
+    /// done with what came.
+    fn unanswered_log_lists(&mut self, now_us: u64) -> Vec<Effect> {
+        let silent: Vec<String> = self
+            .log_lists
+            .iter()
+            .filter(|(_, (_, heard_us))| now_us.saturating_sub(*heard_us) > LOG_LIST_SILENT_US)
+            .map(|(id, _)| id.clone())
+            .collect();
+        silent
+            .into_iter()
+            .filter_map(|vehicle_id| {
+                let (logs, _) = self.log_lists.remove(&vehicle_id)?;
+                Some(Effect::LogsListed {
+                    vehicle_id,
+                    logs: logs
+                        .into_iter()
+                        .map(|(id, (time, size))| (id, time, size))
+                        .collect(),
+                })
+            })
+            .collect()
     }
 
     /// Queues a block's terrain answers for a vehicle (S118), keeping
@@ -5341,6 +5466,7 @@ impl Session {
         !self.commands.is_empty()
             || !self.terrain.is_empty()
             || !self.terrain_checks.is_empty()
+            || !self.log_lists.is_empty()
             // A camera or a gimbal heard is found gone only as time goes on.
             || self.cameras.any_heard()
             || self.gimbals.any_heard()
@@ -6514,6 +6640,63 @@ mod tests {
         assert!(
             late.iter()
                 .any(|e| matches!(e, Effect::TerrainChecked { height: None, .. }))
+        );
+    }
+
+    #[test]
+    fn a_log_listing_comes_back_whole_or_with_what_came_before_the_autopilot_went_quiet() {
+        let mut session = Session::new(Config::default());
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        session.ingest("l1", PEER, &fake.heartbeat(), 0);
+        session.tick(1);
+        let vehicle_id = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        let effects = session.list_logs(&vehicle_id, 10);
+        let [Effect::Send { bytes, .. }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        // Asked again while it lists, it is not asked twice.
+        assert!(session.list_logs(&vehicle_id, 11).is_empty());
+        let mut listed = Vec::new();
+        for reply in fake.answer(bytes) {
+            listed.extend(session.ingest("l1", PEER, &reply, 20));
+        }
+        let [Effect::LogsListed { logs, .. }] = listed.as_slice() else {
+            panic!("{listed:?}");
+        };
+        let sizes: Vec<u32> = logs.iter().map(|&(_, _, size)| size).collect();
+        assert_eq!(
+            logs.iter().map(|&(id, ..)| id).collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(&sizes[..3], [3_000, 20_000, 60_000]);
+        assert_eq!(logs[1].1 - logs[0].1, 3600, "an hour apart");
+        // Done: no listing is left to end later.
+        assert!(
+            session
+                .tick(3_000_000)
+                .iter()
+                .all(|e| !matches!(e, Effect::LogsListed { .. }))
+        );
+        // Armed, ArduPilot lists nothing: the listing ends empty once it
+        // has been quiet long enough.
+        fake.armed = true;
+        let effects = session.list_logs(&vehicle_id, 4_000_000);
+        let [Effect::Send { bytes, .. }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert!(fake.answer(bytes).is_empty());
+        assert!(
+            session
+                .tick(4_000_000 + LOG_LIST_SILENT_US)
+                .iter()
+                .all(|e| !matches!(e, Effect::LogsListed { .. }))
+        );
+        let quiet = session.tick(4_000_001 + LOG_LIST_SILENT_US);
+        assert!(
+            quiet
+                .iter()
+                .any(|e| matches!(e, Effect::LogsListed { logs, .. } if logs.is_empty())),
+            "{quiet:?}"
         );
     }
 

@@ -460,6 +460,19 @@ pub enum Message {
         gridbit: u8,
         data: [i16; 16],
     },
+    /// `LOG_REQUEST_LIST`: a ground station asks for the autopilot's logs;
+    /// the fake vehicle answers.
+    LogRequestList,
+    /// `LOG_ENTRY`: one of the autopilot's logs, `id` counting from 1 to
+    /// `last_log_num`. `time_utc` is Unix seconds, 0 when the autopilot
+    /// does not know.
+    LogEntry {
+        id: u16,
+        num_logs: u16,
+        last_log_num: u16,
+        time_utc: u32,
+        size: u32,
+    },
     /// A camera's stream (`VIDEO_STREAM_INFORMATION`, S39).
     VideoStream(Box<crate::camera::Stream>),
     /// How a camera's stream is now (`VIDEO_STREAM_STATUS`, S404).
@@ -1321,6 +1334,14 @@ fn transfer(message: Ardupilotmega) -> Option<Message> {
             index: m.param_index,
         }),
         Ardupilotmega::ParamRequestList(_) => Some(Message::ParamRequestList),
+        Ardupilotmega::LogRequestList(_) => Some(Message::LogRequestList),
+        Ardupilotmega::LogEntry(m) => Some(Message::LogEntry {
+            id: m.id,
+            num_logs: m.num_logs,
+            last_log_num: m.last_log_num,
+            time_utc: m.time_utc,
+            size: m.size,
+        }),
         Ardupilotmega::ParamRequestRead(m) => Some(Message::ParamRequestRead {
             name: param_name(&m.param_id),
             index: m.param_index,

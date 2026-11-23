@@ -38,6 +38,8 @@ const JOURNAL_EVERY_US: u64 = 1_000_000;
 const RATE_WINDOW_US: u64 = 5_000_000;
 /// A waiting transfer is tried again this long after it stopped.
 const RETRY_AFTER_US: u64 = 5_000_000;
+/// An autopilot's clock reads later than this once it was set: 2017.
+const CLOCK_SET_US: u64 = 1_500_000_000_000_000;
 
 /// Keeps a download's copy (S121, ADR-0027 F5). Paths are relative to
 /// "Vehicle files": the vehicle's id, then the path on the vehicle.
@@ -101,6 +103,9 @@ struct Waiting {
 #[derive(Debug)]
 enum Asked {
     List,
+    /// A listing of an ArduPilot log folder, waiting for the autopilot's
+    /// own list of its logs to say when each was written.
+    Dating(Vec<FileEntry>),
     /// A small file read whole, up to `READ_MAX`.
     Read(Vec<u8>),
     /// Removed, made, renamed: answered with nothing.
@@ -185,6 +190,15 @@ fn join(dir: &str, name: &str) -> String {
     } else {
         format!("{dir}/{name}")
     }
+}
+
+/// An ArduPilot log's number, from its name: `00000042.BIN`.
+fn log_number(name: &str) -> Option<u32> {
+    let digits = name.strip_suffix(".BIN")?;
+    if digits.len() != 8 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn name_of(path: &str) -> String {
@@ -484,7 +498,7 @@ impl Engine {
         let path = clean(&params.path);
         let id = self.file_id("fo");
         let op = match what {
-            Asked::List => FileOp::List { path: path.clone() },
+            Asked::List | Asked::Dating(_) => FileOp::List { path: path.clone() },
             Asked::Read(_) | Asked::Change | Asked::Keep { .. } => FileOp::Read {
                 path: path.clone(),
                 from: 0,
@@ -830,6 +844,10 @@ impl Engine {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per report and what was asked"
+    )]
     fn answer_waiting(&mut self, id: &str, report: FileReport) {
         let Some(mut waiting) = self.files.waiting.remove(id) else {
             return;
@@ -843,15 +861,32 @@ impl Engine {
                         name,
                         dir: size.is_none(),
                         size,
+                        logged_at_us: None,
                     })
                     .collect();
                 entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.cmp(&b.name)));
-                // Answered here; the job's `Done` that follows finds nothing.
-                Some(to_value(&FilesListResult {
-                    vehicle_id: waiting.vehicle_id.clone(),
-                    path: waiting.path.clone(),
-                    entries,
-                }))
+                // ArduPilot lists its logs only while disarmed, and says
+                // "Disarm for log download" when asked armed.
+                let datable = entries.iter().any(|e| log_number(&e.name).is_some())
+                    && self
+                        .vehicle(&waiting.vehicle_id)
+                        .is_some_and(|v| v.autopilot == "Ardupilotmega" && !v.armed);
+                if datable {
+                    // Answered with the autopilot's list; the job's `Done`
+                    // that follows finds it still waiting for that.
+                    waiting.what = Asked::Dating(entries);
+                    self.links.transfer(TransferOrder::ListLogs {
+                        vehicle_id: waiting.vehicle_id.clone(),
+                    });
+                    None
+                } else {
+                    // Answered here; the job's `Done` that follows finds nothing.
+                    Some(to_value(&FilesListResult {
+                        vehicle_id: waiting.vehicle_id.clone(),
+                        path: waiting.path.clone(),
+                        entries,
+                    }))
+                }
             }
             (FileReport::Data { bytes, .. }, Asked::Read(read)) => {
                 read.extend_from_slice(&bytes);
@@ -900,6 +935,7 @@ impl Engine {
                     bytes,
                 ))
             }
+            (FileReport::Done { .. }, Asked::Dating(_)) => None,
             (
                 FileReport::Done {
                     result: Err(failure),
@@ -920,12 +956,88 @@ impl Engine {
             self.files.waiting.insert(id.to_owned(), waiting);
             return;
         };
+        self.reply_to(waiting, result);
+    }
+
+    fn reply_to(&mut self, waiting: Waiting, result: Result<Value, ApiError>) {
         if let Some((connection, request_id)) = waiting.reply {
             let frame = match result {
                 Ok(value) => json!({ "jsonrpc": "2.0", "id": request_id, "result": value }),
                 Err(error) => crate::rpc::router::error(&request_id, &error),
             };
             self.send(connection, &frame);
+        }
+    }
+
+    /// A vehicle's autopilot listed its logs (`LOG_ENTRY`), `(id,
+    /// time_utc, size)` by id: its log folders' listings are answered, each
+    /// log with when it was written where that is known.
+    ///
+    /// ArduPilot numbers its list from 1, oldest first, and names each file
+    /// by that number plus the oldest file's number less 1. That offset is
+    /// the one most sizes agree on. A file takes a time only when its size
+    /// is the one listed at its number, so a log still being written, a
+    /// number past a wrap back to 1, or a listing cut short leaves a file
+    /// with no time, never another log's.
+    pub fn logs_listed(&mut self, vehicle_id: &str, logs: &[(u16, u32, u32)]) {
+        let dating: Vec<String> = self
+            .files
+            .waiting
+            .iter()
+            .filter(|(_, w)| w.vehicle_id == vehicle_id && matches!(w.what, Asked::Dating(_)))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut ids_by_size: BTreeMap<u32, Vec<u16>> = BTreeMap::new();
+        for &(id, _, size) in logs {
+            ids_by_size.entry(size).or_default().push(id);
+        }
+        let by_id: BTreeMap<u16, (u32, u32)> = logs
+            .iter()
+            .map(|&(id, time, size)| (id, (time, size)))
+            .collect();
+        for id in dating {
+            let Some(mut waiting) = self.files.waiting.remove(&id) else {
+                continue;
+            };
+            let Asked::Dating(mut entries) = std::mem::replace(&mut waiting.what, Asked::List)
+            else {
+                continue;
+            };
+            let mut votes: BTreeMap<i64, usize> = BTreeMap::new();
+            for entry in &entries {
+                let (Some(number), Some(ids)) = (
+                    log_number(&entry.name),
+                    entry
+                        .size
+                        .and_then(|s| u32::try_from(s).ok())
+                        .and_then(|s| ids_by_size.get(&s)),
+                ) else {
+                    continue;
+                };
+                for &id in ids {
+                    *votes.entry(i64::from(number) - i64::from(id)).or_default() += 1;
+                }
+            }
+            if let Some((offset, _)) = votes.into_iter().max_by_key(|&(_, count)| count) {
+                for entry in &mut entries {
+                    let Some(&(time, size)) = log_number(&entry.name)
+                        .and_then(|number| u16::try_from(i64::from(number) - offset).ok())
+                        .and_then(|id| by_id.get(&id))
+                    else {
+                        continue;
+                    };
+                    let at_us = u64::from(time) * 1_000_000;
+                    if entry.size == Some(u64::from(size)) && at_us >= CLOCK_SET_US {
+                        entry.logged_at_us = Some(at_us);
+                    }
+                }
+            }
+            let result = to_value(&FilesListResult {
+                vehicle_id: waiting.vehicle_id.clone(),
+                path: waiting.path.clone(),
+                entries,
+            });
+            self.reply_to(waiting, result);
         }
     }
 

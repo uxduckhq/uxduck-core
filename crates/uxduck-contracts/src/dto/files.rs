@@ -26,6 +26,13 @@ pub struct FileEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub size: Option<u64>,
+    /// When an ArduPilot log was written by the autopilot's clock, Unix
+    /// microseconds: the time its `LOG_ENTRY` gives, usually when the log
+    /// started. MAVLink FTP gives no times, so other files have none, and
+    /// neither does a log the autopilot gave no time for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub logged_at_us: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

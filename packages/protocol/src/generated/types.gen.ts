@@ -7544,6 +7544,13 @@ export type FileEntry = {
      * A folder rather than a file.
      */
     dir: boolean;
+    /**
+     * When an ArduPilot log was written by the autopilot's clock, Unix
+     * microseconds: the time its `LOG_ENTRY` gives, usually when the log
+     * started. MAVLink FTP gives no times, so other files have none, and
+     * neither does a log the autopilot gave no time for.
+     */
+    loggedAtUs?: number | null;
     name: string;
     /**
      * Its full path on the vehicle.

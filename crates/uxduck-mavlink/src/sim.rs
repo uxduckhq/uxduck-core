@@ -702,6 +702,51 @@ pub fn terrain_check_frame(gcs: u8, sequence: u8, lat: i32, lon: i32) -> Vec<u8>
     )
 }
 
+/// `LOG_REQUEST_LIST` for every log the autopilot has, from the ground
+/// station.
+#[must_use]
+pub fn log_request_list_frame(
+    gcs: u8,
+    target_system: u8,
+    target_component: u8,
+    sequence: u8,
+) -> Vec<u8> {
+    frame(
+        gcs,
+        crate::GCS_COMPONENT_ID,
+        sequence,
+        &mavio::dialects::ardupilotmega::messages::LogRequestList {
+            target_system,
+            target_component,
+            start: 0,
+            end: u16::MAX,
+        },
+    )
+}
+
+/// `LOG_ENTRY`: one of a vehicle's logs, as ArduPilot lists them.
+#[must_use]
+pub fn log_entry_frame(
+    (system_id, component_id): (u8, u8),
+    sequence: u8,
+    (id, last): (u16, u16),
+    time_utc: u32,
+    size: u32,
+) -> Vec<u8> {
+    frame(
+        system_id,
+        component_id,
+        sequence,
+        &mavio::dialects::ardupilotmega::messages::LogEntry {
+            id,
+            num_logs: last,
+            last_log_num: last,
+            time_utc,
+            size,
+        },
+    )
+}
+
 /// `TERRAIN_DATA`: one group's heights for a block, from the ground station
 /// (S118).
 #[must_use]
@@ -2795,6 +2840,31 @@ impl FakeVehicle {
             }
             Decoded::TerrainCheck { lat, lon } => {
                 replies.extend(self.terrain_check_report(lat, lon));
+            }
+            // ArduPilot lists no logs while armed.
+            Decoded::LogRequestList if !self.armed => {
+                let logs = self.files.logs();
+                let last = u16::try_from(logs.len()).unwrap_or(u16::MAX);
+                if logs.is_empty() {
+                    let seq = self.next();
+                    replies.push(crate::sim::log_entry_frame(
+                        (self.system_id, 1),
+                        seq,
+                        (0, 0),
+                        0,
+                        0,
+                    ));
+                }
+                for (id, (time_utc, size)) in (1..=last).zip(logs) {
+                    let seq = self.next();
+                    replies.push(crate::sim::log_entry_frame(
+                        (self.system_id, 1),
+                        seq,
+                        (id, last),
+                        time_utc,
+                        size,
+                    ));
+                }
             }
             Decoded::TerrainData {
                 lat,

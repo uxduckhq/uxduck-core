@@ -221,6 +221,7 @@ pub fn start_transfer(session: &mut Session, order: TransferOrder, now_us: u64) 
             lat,
             lon,
         } => session.terrain_check(&vehicle_id, lat, lon, now_us),
+        TransferOrder::ListLogs { vehicle_id } => session.list_logs(&vehicle_id, now_us),
         TransferOrder::CameraDefinition {
             vehicle_id,
             component_id,
@@ -414,6 +415,9 @@ fn transfer_report(effect: Effect) -> Option<Report> {
             lon,
             height,
         } => Box::new(move |e| e.terrain_checked(&vehicle_id, lat, lon, height)),
+        Effect::LogsListed { vehicle_id, logs } => {
+            Box::new(move |e| e.logs_listed(&vehicle_id, &logs))
+        }
         Effect::Vehicle(_)
         | Effect::Telemetry(_)
         | Effect::Traffic { .. }

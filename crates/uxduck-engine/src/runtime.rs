@@ -390,6 +390,11 @@ pub enum TransferOrder {
         lat: i32,
         lon: i32,
     },
+    /// Asks a vehicle's autopilot for the list of its logs, reported
+    /// through `Engine::logs_listed`.
+    ListLogs {
+        vehicle_id: String,
+    },
 }
 
 /// What a file job does (S121).
