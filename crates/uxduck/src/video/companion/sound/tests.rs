@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use super::*;
-use crate::video::companion::microphones::tests::fixtures;
+use crate::video::companion::microphones::tests::case;
 
 /// A fake `gst-launch-1.0` in `dir`: it writes its words to `args.log`
 /// beside it, then for a capture pipeline sends RTP to each `port=` at its
@@ -141,12 +141,10 @@ async fn a_microphone_starts_its_cameras_process_whose_steps_reach_the_sender() 
     let helper = tempfile::tempdir().unwrap();
     let gst = fake_gst(helper.path(), false);
     let tx = choices(&[("front", Choice::Auto)]);
-    let mut running = start(
-        environment(&fixtures().join("one-usb"), gst),
-        tx.subscribe(),
-    )
-    .await
-    .unwrap();
+    let root = case("one-usb");
+    let mut running = start(environment(root.path(), gst), tx.subscribe())
+        .await
+        .unwrap();
     let status = until(&mut running.status, Duration::from_secs(3), |s| {
         s.cameras
             .get("front")
@@ -261,12 +259,10 @@ async fn a_reloaded_choice_applies_at_once_and_never_takes_another_device() {
     let helper = tempfile::tempdir().unwrap();
     let gst = fake_gst(helper.path(), false);
     let tx = choices(&[("front", Choice::Auto)]);
-    let mut running = start(
-        environment(&fixtures().join("several"), gst),
-        tx.subscribe(),
-    )
-    .await
-    .unwrap();
+    let root = case("several");
+    let mut running = start(environment(root.path(), gst), tx.subscribe())
+        .await
+        .unwrap();
     let status = until(&mut running.status, Duration::from_secs(3), |s| {
         state(s, "front") == State::Available
     })
@@ -323,12 +319,10 @@ async fn a_device_that_refuses_is_said_and_tried_again_with_a_growing_wait() {
     let helper = tempfile::tempdir().unwrap();
     let gst = fake_gst(helper.path(), true);
     let tx = choices(&[("front", Choice::Auto)]);
-    let mut running = start(
-        environment(&fixtures().join("one-usb"), gst),
-        tx.subscribe(),
-    )
-    .await
-    .unwrap();
+    let root = case("one-usb");
+    let mut running = start(environment(root.path(), gst), tx.subscribe())
+        .await
+        .unwrap();
     let status = until(&mut running.status, Duration::from_secs(3), |s| {
         state(s, "front") == State::Failed
     })
@@ -357,11 +351,9 @@ async fn a_device_that_refuses_is_said_and_tried_again_with_a_growing_wait() {
 #[tokio::test(flavor = "multi_thread")]
 async fn without_gstreamer_a_camera_that_wants_sound_fails_loudly_and_one_set_to_none_is_off() {
     let tx = choices(&[("down", Choice::None), ("front", Choice::Auto)]);
+    let root = case("one-usb");
     let running = start(
-        environment(
-            &fixtures().join("one-usb"),
-            PathBuf::from("/nonexistent/gst-launch-1.0"),
-        ),
+        environment(root.path(), PathBuf::from("/nonexistent/gst-launch-1.0")),
         tx.subscribe(),
     )
     .await
@@ -386,12 +378,10 @@ async fn two_cameras_on_one_microphone_the_second_is_refused_and_says_so() {
     let helper = tempfile::tempdir().unwrap();
     let gst = fake_gst(helper.path(), false);
     let tx = choices(&[("down", Choice::Auto), ("front", Choice::Auto)]);
-    let mut running = start(
-        environment(&fixtures().join("one-usb"), gst),
-        tx.subscribe(),
-    )
-    .await
-    .unwrap();
+    let root = case("one-usb");
+    let mut running = start(environment(root.path(), gst), tx.subscribe())
+        .await
+        .unwrap();
     let status = until(&mut running.status, Duration::from_secs(3), |s| {
         state(s, "down") == State::Available
     })

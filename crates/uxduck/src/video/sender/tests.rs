@@ -668,9 +668,9 @@ fn heard(heard: &std::sync::Mutex<Heard>) -> (u64, u64) {
 async fn a_viewer_hears_the_camera_only_between_asking_and_stopping_and_the_picture_goes_on() {
     let fake = Fake::start(&[("cam", rpi(FRONT))]).await;
     let dir = tempfile::tempdir().unwrap();
-    let root = microphones::tests::fixtures().join("one-usb");
+    let root = microphones::tests::case("one-usb");
     let (running, _choices) =
-        sender_with_sound(&fake, dir.path(), &root, microphones::Choice::Auto).await;
+        sender_with_sound(&fake, dir.path(), root.path(), microphones::Choice::Auto).await;
     feed(&running, "cam");
     let (session, listened, _task) = viewer_with_sound(&running).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -749,9 +749,9 @@ async fn a_viewer_hears_the_camera_only_between_asking_and_stopping_and_the_pict
 async fn a_session_says_when_there_is_no_microphone_or_the_chosen_one_is_unplugged() {
     let fake = Fake::start(&[("cam", rpi(FRONT))]).await;
     let dir = tempfile::tempdir().unwrap();
-    let root = microphones::tests::fixtures().join("none");
+    let root = microphones::tests::case("none");
     let (running, choices) =
-        sender_with_sound(&fake, dir.path(), &root, microphones::Choice::Auto).await;
+        sender_with_sound(&fake, dir.path(), root.path(), microphones::Choice::Auto).await;
     let (session, _listened, _task) = viewer_with_sound(&running).await;
     let sound = sound_of(&session).await;
     assert_eq!(

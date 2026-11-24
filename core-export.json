@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "f0768ed48f275cb8110ac422c2270977005c4e12",
+  "sourceCommit": "1b4f0fadc30c55edc2aac3ee10a2b136e70fbdad",
   "licenseReady": true,
   "files": [
     {
@@ -8781,7 +8781,7 @@
     },
     {
       "path": "crates/uxduck/src/companions/camera_test.py",
-      "sha256": "92334be864248f8f2a5f751508a7ebb4f08b2d5427093781c9505b2abdae68b4",
+      "sha256": "05d2d8a44e7f625dcf6c1c1bc60d44029622e3e180b5bd3b7aa579ca463101d2",
       "executable": false
     },
     {
@@ -9346,7 +9346,7 @@
     },
     {
       "path": "crates/uxduck/src/video/companion/microphones/tests.rs",
-      "sha256": "fb94d44eb0109db744ecf3576c5b0b09b0d74b9ecc09387ad56f99b7eb19aa93",
+      "sha256": "140e3c8c5adbabf31faf05d5febb0994e938a29b01a7a5d0ff0a8a0a1de52366",
       "executable": false
     },
     {
@@ -9356,7 +9356,7 @@
     },
     {
       "path": "crates/uxduck/src/video/companion/sound/tests.rs",
-      "sha256": "c7a419e3c49431fb88a10b316b228fd35e752efc5a0d0b858d6b48bf901dd8f3",
+      "sha256": "05ff3d3d85d2bf3d3c7208ee17928bb70af9799bc62d230e82a63a976d7b60a7",
       "executable": false
     },
     {
@@ -9506,7 +9506,7 @@
     },
     {
       "path": "crates/uxduck/src/video/sender/tests.rs",
-      "sha256": "97e598494b640b73d09305eea453a553b5bdc067e98ec507b0e0d8b5c4a724ee",
+      "sha256": "8ee503be12bff5b3905409a0e81a7e5104b618661dda63759e333eb4610f0c16",
       "executable": false
     },
     {

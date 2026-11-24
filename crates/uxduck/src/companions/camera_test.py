@@ -202,11 +202,17 @@ class CameraTests(unittest.TestCase):
         self.assertEqual(path.read_text(), '[cameras.front]\nfollow = true\n')
 
     def microphones_from(self, case):
-        """A copy of one fake microphone tree as this computer's /proc and /sys."""
+        """A copy of one fake microphone tree as this computer's /proc, and its /sys built from
+        devices.json: each card's device folder and the link to it. The repository keeps no sys
+        tree, because a USB device's folder has a colon in its name, which Windows cannot check out."""
         shutil.rmtree(self.root / "proc", ignore_errors=True)
         shutil.rmtree(self.root / "sys", ignore_errors=True)
-        shutil.copytree(MICROPHONES / case / "proc", self.root / "proc", symlinks=True)
-        shutil.copytree(MICROPHONES / case / "sys", self.root / "sys", symlinks=True)
+        shutil.copytree(MICROPHONES / case / "proc", self.root / "proc")
+        devices = json.loads((MICROPHONES / case / "devices.json").read_text())
+        for card, device in devices.items():
+            (self.root / "sys/devices" / device).mkdir(parents=True)
+            (self.root / "sys/class/sound" / card).mkdir(parents=True)
+            os.symlink(f"../../../devices/{device}", self.root / "sys/class/sound" / card / "device")
 
     def test_microphones_are_found_as_every_shared_fake_tree_expects(self):
         cases = sorted(p.name for p in MICROPHONES.iterdir() if p.is_dir())

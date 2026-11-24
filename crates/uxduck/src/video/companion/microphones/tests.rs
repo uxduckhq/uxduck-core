@@ -2,6 +2,7 @@
 //! `camera.py` reads too, a microphone plugged in and pulled out, and what
 //! each choice gives.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::*;
@@ -10,7 +11,11 @@ pub(crate) fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/microphones")
 }
 
-/// A case copied into `to`, its links kept as links.
+/// A case copied into `to`, with its `/sys` built from its `devices.json`:
+/// each card's device folder under `sys/devices` and the
+/// `sys/class/sound/<card>/device` link to it. The repository keeps no
+/// `sys` tree, because a USB device's folder has a colon in its name, which
+/// Windows cannot check out.
 #[cfg(unix)]
 pub(crate) fn copy_case(case: &str, to: &Path) {
     fn copy(from: &Path, to: &Path) {
@@ -18,18 +23,35 @@ pub(crate) fn copy_case(case: &str, to: &Path) {
         for entry in std::fs::read_dir(from).unwrap() {
             let entry = entry.unwrap();
             let target = to.join(entry.file_name());
-            let kind = entry.file_type().unwrap();
-            if kind.is_symlink() {
-                std::os::unix::fs::symlink(std::fs::read_link(entry.path()).unwrap(), &target)
-                    .unwrap();
-            } else if kind.is_dir() {
+            if entry.file_type().unwrap().is_dir() {
                 copy(&entry.path(), &target);
             } else {
                 std::fs::copy(entry.path(), &target).unwrap();
             }
         }
     }
-    copy(&fixtures().join(case), to);
+    let from = fixtures().join(case);
+    copy(&from, to);
+    let devices: BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(from.join("devices.json")).unwrap()).unwrap();
+    for (card, device) in devices {
+        std::fs::create_dir_all(to.join("sys/devices").join(&device)).unwrap();
+        let class = to.join("sys/class/sound").join(card);
+        std::fs::create_dir_all(&class).unwrap();
+        std::os::unix::fs::symlink(
+            Path::new("../../../devices").join(device),
+            class.join("device"),
+        )
+        .unwrap();
+    }
+}
+
+/// A case built in a folder of its own, removed when it is dropped.
+#[cfg(unix)]
+pub(crate) fn case(name: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    copy_case(name, dir.path());
+    dir
 }
 
 #[cfg(unix)]
@@ -37,14 +59,16 @@ pub(crate) fn copy_case(case: &str, to: &Path) {
 fn every_case_finds_the_devices_and_the_automatic_choice_its_expected_json_says() {
     let mut cases = 0;
     for entry in std::fs::read_dir(fixtures()).unwrap() {
-        let dir = entry.unwrap().path();
-        if !dir.is_dir() {
+        let entry = entry.unwrap();
+        if !entry.path().is_dir() {
             continue;
         }
         cases += 1;
+        let built = case(entry.file_name().to_str().unwrap());
+        let dir = built.path();
         let expected: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("expected.json")).unwrap()).unwrap();
-        let found = find(&dir);
+        let found = find(dir);
         let as_json: Vec<serde_json::Value> = found
             .iter()
             .map(|m| {
