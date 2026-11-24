@@ -462,6 +462,20 @@ pub struct HistoryOf<'a> {
     pub system_id: u8,
 }
 
+/// An autopilot log in this computer's logs as read once (S459): what it
+/// covers and each arming it records, with what the Logbook shows of a
+/// flight.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AutopilotLogRead {
+    pub path: String,
+    pub span: uxduck_contracts::dto::replay::LogSpan,
+    /// As its heartbeats say it, such as `Quadrotor`.
+    pub vehicle_type: Option<String>,
+    /// A simulator's: it logged `SIM_` parameters.
+    pub simulated: bool,
+    pub armings: Vec<uxduck_mavlink::autopilot_log::Arming>,
+}
+
 /// The records a replay plays (ADR-0039 R10, R11).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReplayRead {
@@ -555,6 +569,37 @@ impl std::fmt::Debug for ReplayWork {
         f.write_str("ReplayWork")
     }
 }
+
+/// Where an autopilot log to read or import is (S457).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LogSource {
+    /// A file on this computer.
+    Path(String),
+    /// A file's bytes in base64, with its name, from a page that has no
+    /// path to it.
+    Bytes { name: String, data: String },
+    /// A file a page uploaded (`attachment/*`), with its name, where the
+    /// upload is kept on this computer. No original to move.
+    Uploaded { name: String, path: String },
+}
+
+/// This computer's autopilot logs (S457), read and imported off the
+/// engine's task, as a replay's log is ([`System::replay_work`]).
+pub trait AutopilotLogs: Send + Sync {
+    /// A log's name, size and what it covers, or why it could not be read.
+    /// Copies nothing.
+    fn inspect(&self, source: &LogSource) -> uxduck_contracts::dto::replay::InspectedLog;
+    /// Copies logs into this computer's logs, each copy's size checked, and
+    /// reads what each covers. Leaves the originals where they are.
+    fn import(&self, sources: &[LogSource]) -> uxduck_contracts::dto::replay::LogsImportResult;
+}
+
+/// How work off the engine's task reads a replay's log (S460): written to
+/// `out` a record at a time as it is read, so a long log is never held,
+/// as a flight's `.uxflight` is written. The bytes written, or why none.
+pub type LogReader = std::sync::Arc<
+    dyn Fn(&ReplayRead, &mut dyn std::io::Write) -> Result<u64, String> + Send + Sync,
+>;
 
 /// What [`ReplayWork`] made, for [`crate::Engine::replay_worked`].
 pub struct ReplayWorked(pub(crate) crate::replay::Worked);
@@ -712,6 +757,12 @@ pub trait System: Send {
     /// here and returns it, and the engine waits as it always did.
     fn replay_work(&mut self, work: ReplayWork) -> Option<ReplayWorked> {
         Some(work.run())
+    }
+    /// How [`ReplayWork`] reads a flight's logs off the engine's task
+    /// (S460). None where the engine reads them with `replay_read` on its
+    /// own, as UXDuck Web and the engine's tests do.
+    fn log_reader(&self) -> Option<LogReader> {
+        None
     }
     /// Whether a file is there now, such as a `.uxflight` on a disk that
     /// may be unplugged (ADR-0062). None when this host cannot tell.
@@ -922,6 +973,17 @@ pub trait System: Send {
     /// once read (S426), for `flight/list` to match to its flights. Never
     /// reads a log: one not read yet has no span.
     fn copied_logs(&self) -> Vec<uxduck_contracts::dto::replay::CopiedLog> {
+        Vec::new()
+    }
+    /// This computer's autopilot logs to read and import (S457). None where
+    /// no logs are kept, such as UXDuck in a browser.
+    fn autopilot_logs(&self) -> Option<std::sync::Arc<dyn AutopilotLogs>> {
+        None
+    }
+    /// The copied logs read so far, each with the armings it records
+    /// (S459), for the Logbook's entries from a log alone. Never reads a
+    /// log: one not read yet is left out until it is.
+    fn autopilot_log_reads(&self) -> Vec<AutopilotLogRead> {
         Vec::new()
     }
     /// The tlog a link is writing and where its next record goes, for a

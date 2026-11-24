@@ -172,6 +172,8 @@ pub const AGENT_METHODS: &[&str] = &[
     "flight/rename",
     // The logs on a vehicle's SD card plugged in, and those copied (S212).
     "logs/cards",
+    // What an autopilot log covers, read where it is without copying (S457).
+    "logs/inspect",
     // Flights in other ground stations' tlogs (S215).
     "flights/found",
     "vehicle/addNote",
@@ -358,6 +360,8 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "flights/folder",
     // Copying a card's logs is the person's, as plugging it in was.
     "logs/copyCard",
+    // Importing logs is the person's, from the Import dialog (S457).
+    "logs/import",
     // The replay bar's own controls: a person watches at their own pace.
     "replay/play",
     "replay/pause",
@@ -726,6 +730,7 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "operation/removeFlights",
     "flight/rename",
     "logs/cards",
+    "logs/inspect",
     "flights/found",
     "param/diff",
     "param/changes",

@@ -130,6 +130,28 @@ pub struct Flight {
     /// alone: never in the account.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub autopilot_logs: Vec<FlightAutopilotLog>,
+    /// The autopilot's own log this entry was made from (S459): an arming
+    /// it records that no Logbook flight covered. Its replay plays the log.
+    /// This computer's alone: never in the account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autopilot_log: Option<FlightAutopilotLog>,
+    /// Where its telemetry logs hold nothing from its vehicle (S460): the
+    /// stretches of its armed time longer than UXDuck takes a vehicle to be
+    /// lost, over every connection it was heard on. Omitted until its logs
+    /// here were read, and for one whose logs are not here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_gaps: Option<FlightTelemetryGaps>,
+}
+
+/// How much of a flight's telemetry is missing (S460). None missing is
+/// `count` 0.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightTelemetryGaps {
+    /// The gaps added up.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub missing_us: u64,
+    pub count: u32,
 }
 
 /// An autopilot log copied off a card that covers a flight (S426), to
@@ -668,6 +690,19 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
             offload: None,
             size: None,
             autopilot_logs: Vec::new(),
+            telemetry_gaps: f.telemetry_gaps.as_ref().map(|t| FlightTelemetryGaps {
+                missing_us: t.missing_us(),
+                count: u32::try_from(t.gaps.len()).unwrap_or(u32::MAX),
+            }),
+            autopilot_log: f.autopilot_log.as_ref().map(|log| FlightAutopilotLog {
+                path: log.path.clone(),
+                name: log
+                    .path
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(&log.path)
+                    .to_owned(),
+            }),
         }
     }
 }

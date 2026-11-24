@@ -2313,6 +2313,21 @@ pub enum ClientRequest {
     /// says how it goes. Needs `config`. Result: `LogCardsResult`.
     #[serde(rename = "logs/copyCard")]
     LogsCopyCard(crate::dto::replay::LogCopyCardParams),
+    /// Reads `.bin` and `.ulg` autopilot logs, by path on this computer or
+    /// by bytes, without copying them (S457): each one's size, the vehicle
+    /// its system id names, the time it covers and the Logbook entries it
+    /// belongs to, or why it cannot be placed. Changes nothing. Needs `read`.
+    /// Result: `LogsInspectResult`.
+    #[serde(rename = "logs/inspect")]
+    LogsInspect(crate::dto::replay::LogFilesParams),
+    /// Imports `.bin` and `.ulg` autopilot logs into this computer's logs
+    /// (S457), where `logs/cards` lists them and the Logbook ties them to
+    /// their flights. A log already among them, the same size and bytes
+    /// whatever its name, is not copied again. Another of the same name is kept beside
+    /// it under a new name. Each copy's size is checked. Originals are left
+    /// where they are. Needs `config`. Result: `LogsImportResult`.
+    #[serde(rename = "logs/import")]
+    LogsImport(crate::dto::replay::LogFilesParams),
     /// A flight's values over its whole range, decoded from its log without
     /// opening a replay (ADR-0039 R13): battery, heights, speeds, vibration
     /// and any other telemetry key, with each series' lowest and highest and
@@ -2498,7 +2513,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 433] = [
+    pub const METHODS: [&'static str; 435] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2899,6 +2914,8 @@ impl ClientRequest {
         "operation/removeFlights",
         "logs/cards",
         "logs/copyCard",
+        "logs/inspect",
+        "logs/import",
         "flight/series",
         "replay/logFields",
         "replay/motion",

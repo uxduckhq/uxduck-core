@@ -565,8 +565,9 @@ fn shared_flight(
     uxduck_core::domain::flight::Flight {
         recorded_here: false,
         left_account: false,
-        // Paths on this computer's disks (ADR-0062).
+        // Paths on this computer's disks (ADR-0062, S459).
         copies: Vec::new(),
+        autopilot_log: None,
         ..flight.clone()
     }
 }

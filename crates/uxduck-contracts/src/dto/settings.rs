@@ -23,6 +23,22 @@ pub enum AgentCameras {
     Never,
 }
 
+/// What opening an autopilot log (`.bin` or `.ulg`) does (S457): Open a
+/// log…, a file dropped on the window, or a file opened with UXDuck
+/// Desktop. Settings › Logbook › "Opening an autopilot log".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum AutopilotLogOpening {
+    /// The Import dialog says what the log covers and asks.
+    #[default]
+    Ask,
+    /// Imported into this computer's logs, then replayed with the flight
+    /// it covers, else alone.
+    Import,
+    /// Opened as a replay where it is, without importing.
+    Open,
+}
+
 /// What opening UXDuck from its app icon does; not MCP or login startup.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -255,6 +271,15 @@ pub struct Settings {
     /// `terrain/keepArea` and `terrain/removeArea`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub terrain_areas: Vec<crate::dto::terrain::TerrainArea>,
+    /// Settings › Logbook (S457): what opening a `.bin` or `.ulg` does.
+    /// Ask when an older daemon left it out.
+    #[serde(default)]
+    pub autopilot_log_opening: AutopilotLogOpening,
+    /// Settings › Logbook (S457): each imported log's original goes to the
+    /// system Trash once its copy is checked. UXDuck Desktop moves it, on
+    /// the computer the file is on. Off by default.
+    #[serde(default)]
+    pub trash_imported_logs: bool,
 }
 
 const fn on() -> bool {
@@ -384,6 +409,12 @@ pub struct SettingsUpdateParams {
     pub battery_critical_pct: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_rumble: Option<bool>,
+    /// What opening an autopilot log does (S457).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autopilot_log_opening: Option<AutopilotLogOpening>,
+    /// Whether imported logs' originals go to the Trash (S457).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trash_imported_logs: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub companion_update_notices: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

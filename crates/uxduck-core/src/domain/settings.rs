@@ -60,6 +60,17 @@ pub enum AgentCameras {
     Never,
 }
 
+/// What opening an autopilot log does (S457): asked in the Import dialog,
+/// imported, or opened where it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AutopilotLogOpening {
+    #[default]
+    Ask,
+    Import,
+    Open,
+}
+
 /// What a deliberate app launch opens. Background startup never uses it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -319,6 +330,13 @@ pub struct Settings {
     /// to confirm a hold and mark a refusal or a lost link.
     #[serde(default = "controller_rumble")]
     pub controller_rumble: bool,
+    /// Settings › Logbook (S457): what opening a `.bin` or `.ulg` does.
+    #[serde(default)]
+    pub autopilot_log_opening: AutopilotLogOpening,
+    /// Settings › Logbook (S457): imported logs' originals go to the Trash
+    /// once their copies are checked.
+    #[serde(default)]
+    pub trash_imported_logs: bool,
     /// Settings › Vehicles & connections (S297): a notice when a vehicle's
     /// companion computer runs an older UXDuck than this computer, once per
     /// version.
@@ -529,6 +547,8 @@ impl Default for Settings {
             battery_low_pct: battery_low_pct(),
             battery_critical_pct: battery_critical_pct(),
             controller_rumble: controller_rumble(),
+            autopilot_log_opening: AutopilotLogOpening::Ask,
+            trash_imported_logs: false,
             companion_update_notices: companion_update_notices(),
             traffic_controls: TrafficControls::default(),
             terrain_dataset: TerrainDataset::Alos,

@@ -82,6 +82,26 @@ impl From<dto::AgentCameras> for s::AgentCameras {
     }
 }
 
+impl From<s::AutopilotLogOpening> for dto::AutopilotLogOpening {
+    fn from(v: s::AutopilotLogOpening) -> Self {
+        match v {
+            s::AutopilotLogOpening::Ask => Self::Ask,
+            s::AutopilotLogOpening::Import => Self::Import,
+            s::AutopilotLogOpening::Open => Self::Open,
+        }
+    }
+}
+
+impl From<dto::AutopilotLogOpening> for s::AutopilotLogOpening {
+    fn from(v: dto::AutopilotLogOpening) -> Self {
+        match v {
+            dto::AutopilotLogOpening::Ask => Self::Ask,
+            dto::AutopilotLogOpening::Import => Self::Import,
+            dto::AutopilotLogOpening::Open => Self::Open,
+        }
+    }
+}
+
 impl From<s::ClosePolicy> for dto::ClosePolicy {
     fn from(v: s::ClosePolicy) -> Self {
         match v {
@@ -241,6 +261,8 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         battery_low_pct: settings.battery_low_pct,
         battery_critical_pct: settings.battery_critical_pct,
         controller_rumble: settings.controller_rumble,
+        autopilot_log_opening: settings.autopilot_log_opening.into(),
+        trash_imported_logs: settings.trash_imported_logs,
         companion_update_notices: settings.companion_update_notices,
         traffic_controls: settings.traffic_controls.clone().into(),
         terrain_dataset: settings.terrain_dataset.into(),

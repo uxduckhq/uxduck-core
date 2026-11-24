@@ -1,0 +1,47 @@
+{
+  "imported": [
+    {
+      "from": "/Users/ben/Downloads/00000046.BIN",
+      "original": "/Users/ben/Downloads/00000046.BIN",
+      "log": {
+        "path": "/Users/ben/Library/Application Support/UXDuck/logs-from-cards/Imported-2026-11-22/00000046.BIN",
+        "name": "00000046.BIN",
+        "bytes": 48211968,
+        "span": {
+          "systemId": 1,
+          "firmware": "ArduPlane V4.6.2 (abcdef12)",
+          "gpsTime": true,
+          "fromUs": 1795862460000000,
+          "toUs": 1795863300000000
+        },
+        "vehicle": "Plane",
+        "flights": [
+          {
+            "id": "fl8b2d1c0a9e7f6d5c",
+            "name": "Plane",
+            "armedAtUs": 1795862500000000
+          }
+        ]
+      }
+    }
+  ],
+  "skipped": [
+    {
+      "from": "/Users/ben/Downloads/00000045.BIN",
+      "original": "/Users/ben/Downloads/00000045.BIN",
+      "log": {
+        "path": "/Users/ben/Library/Application Support/UXDuck/logs-from-cards/NO NAME-2026-11-20/00000045.BIN",
+        "name": "00000045.BIN",
+        "bytes": 1024,
+        "unread": "This log holds no records UXDuck can read."
+      }
+    }
+  ],
+  "failed": [
+    {
+      "from": "/Users/ben/Downloads/notes.bin",
+      "name": "notes.bin",
+      "why": "This is not an ArduPilot .bin or a PX4 .ulg log."
+    }
+  ]
+}

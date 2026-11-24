@@ -520,6 +520,7 @@ pub(crate) fn handle(
         }
         ClientRequest::LogsCards(_) => {
             require(Read)?;
+            engine.add_log_entries();
             let mut cards = engine
                 .system
                 .log_cards()
@@ -533,12 +534,16 @@ pub(crate) fn handle(
                 .system
                 .copy_card_logs(&params.path)
                 .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            engine.add_log_entries();
             let mut cards = engine
                 .system
                 .log_cards()
                 .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
             engine.match_copied_logs(&mut cards.copied);
             to_value(&cards)
+        }
+        request @ (ClientRequest::LogsInspect(_) | ClientRequest::LogsImport(_)) => {
+            crate::autopilot_logs::handle(engine, request, &granted)
         }
         request @ (ClientRequest::OperationList(_)
         | ClientRequest::OperationCreate(_)
@@ -680,7 +685,12 @@ pub(crate) fn handle(
                     Read.denied_message(),
                 ));
             }
-            to_value(&engine.list_flights(&params)?)
+            // Entries from the autopilot logs read since (S459).
+            engine.add_log_entries();
+            let listed = engine.list_flights(&params)?;
+            // A flight from before is measured the first time it is listed (S460).
+            engine.measure_telemetry_gaps(listed.flights.iter().map(|f| f.id.clone()));
+            to_value(&listed)
         }
         ClientRequest::FlightLog(params) => {
             if !granted.contains(&Read) {

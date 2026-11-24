@@ -225,6 +225,43 @@ pub struct About {
     pub mission: Vec<MissionItemInt>,
     /// Each parameter's default, where its `PARM` records give one.
     pub defaults: BTreeMap<String, f32>,
+    /// The flight controller it was written on, when it says (S459).
+    pub board: Option<Board>,
+}
+
+/// The flight controller a log was written on: ArduPilot's boot banner
+/// ("`MatekH7A3-Wing 002D001F 4B564E04 20204232`") or PX4's `sys_uuid`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Board {
+    /// Such as `MatekH7A3-Wing` or PX4's `ver_hw`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its hardware id as `AUTOPILOT_VERSION.uid2` carries it and UXDuck
+    /// keeps a vehicle's uid: 18 bytes in hex.
+    pub uid: String,
+}
+
+/// The board in ArduPilot's boot banner: its name, then the MCU's unique
+/// id as three 32-bit words, which `AUTOPILOT_VERSION.uid2` sends as
+/// little-endian bytes.
+fn banner_board(text: &str) -> Option<Board> {
+    let mut words = text.split_whitespace();
+    let name = words.next().filter(|n| !n.ends_with(':'))?;
+    let ids = words
+        .map(|w| (w.len() == 8).then(|| u32::from_str_radix(w, 16).ok())?)
+        .collect::<Option<Vec<u32>>>()?;
+    let [a, b, c] = ids.as_slice() else {
+        return None;
+    };
+    let mut uid2 = [0u8; 18];
+    for (at, word) in [a, b, c].into_iter().enumerate() {
+        uid2[at * 4..at * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    Some(Board {
+        name: Some(name.to_owned()),
+        uid: crate::identity::uid_text(0, uid2)?,
+    })
 }
 
 /// The vehicle's type from its firmware's name.
@@ -360,16 +397,22 @@ pub fn to_tlog(bytes: &[u8]) -> Result<(Vec<u8>, About), String> {
                     about.system_id = int::<u8>(id).max(1);
                 }
             }
-            "MSG" if about.firmware.is_none() => {
-                if let Some(text) = format
+            "MSG" if about.firmware.is_none() || about.board.is_none() => {
+                let Some(text) = format
                     .value(payload, "Message")
                     .and_then(|v| v.as_text().map(str::to_owned))
+                else {
+                    continue;
+                };
+                if about.firmware.is_none()
                     && ["Ardu", "Rover", "Blimp"]
                         .iter()
                         .any(|p| text.starts_with(p))
                     && text.contains(" V")
                 {
                     about.firmware = Some(text);
+                } else if about.board.is_none() {
+                    about.board = banner_board(&text);
                 }
             }
             "CMD" => {
@@ -1161,6 +1204,15 @@ pub mod fixture {
             "MSG",
             &[i(1_000_000), i(0), i(0), t("ArduCopter V4.5.1 (abcdef12)")],
         );
+        w.record(
+            "MSG",
+            &[
+                i(1_000_000),
+                i(0),
+                i(1),
+                t("MatekH7A3-Wing 002D001F 4B564E04 20204232"),
+            ],
+        );
         for (id, label) in [
             ('s', "s"),
             ('#', "#"),
@@ -1380,6 +1432,25 @@ mod tests {
     }
 
     #[test]
+    fn only_a_banner_of_a_name_and_three_words_is_a_board() {
+        assert_eq!(
+            banner_board("CubeOrange 00350039 31385115 31343936").map(|b| b.uid),
+            Some("39003500155138313639343100000000000".to_owned() + "0")
+        );
+        for not in [
+            "ChibiOS: 6a85082c",
+            "RCOut: PWM:1-12",
+            "IMU0: fast sampling 1.0kHz/2.0kHz",
+            "Frame: QUAD/X",
+            "Board 0000000 1 2",
+            "Board 00000000 00000000 00000000",
+            "Board 00350039 31385115",
+        ] {
+            assert_eq!(banner_board(not), None, "{not}");
+        }
+    }
+
+    #[test]
     fn the_producer_gives_the_live_sessions_messages_on_gps_time() {
         let bytes = flight();
         let (tlog, about) = to_tlog(&bytes).unwrap();
@@ -1388,6 +1459,14 @@ mod tests {
         assert_eq!(
             about.firmware.as_deref(),
             Some("ArduCopter V4.5.1 (abcdef12)")
+        );
+        // The boot banner's board, its id as AUTOPILOT_VERSION.uid2 sends it.
+        assert_eq!(
+            about.board,
+            Some(Board {
+                name: Some("MatekH7A3-Wing".into()),
+                uid: "1f002d00044e564b32422020000000000000".into(),
+            })
         );
         let records = crate::tlog::read(&tlog);
         // 2389 weeks and 100 000 s after the GPS epoch, less the leap seconds.

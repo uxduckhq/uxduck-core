@@ -535,6 +535,12 @@ impl State {
                     {
                         flight.copies.clone_from(&was.copies);
                     }
+                    // Nor the autopilot log it was made from (S459).
+                    if flight.autopilot_log.is_none()
+                        && let Some(was) = self.flights.get(&flight.id)
+                    {
+                        flight.autopilot_log.clone_from(&was.autopilot_log);
+                    }
                     self.flights.insert(flight.id.clone(), flight);
                 }
             }
@@ -550,8 +556,9 @@ impl State {
                 self.flights.insert(flight.id.clone(), flight.clone());
             }
             Change::FlightRemoved { id } => {
+                // One made here from an autopilot log stays too (S459).
                 if let Some(flight) = self.flights.get_mut(id)
-                    && flight.recorded_here
+                    && (flight.recorded_here || flight.autopilot_log.is_some())
                 {
                     flight.keep = false;
                     flight.left_account = true;

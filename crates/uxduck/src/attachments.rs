@@ -36,17 +36,47 @@ fn whole(root: &Path, id: &str) -> Result<PathBuf, String> {
 
 pub fn write(root: &Path, id: &str, offset: u64, bytes: &[u8]) -> Result<(), String> {
     let dir = folder(root, id)?;
-    fs::create_dir_all(&dir).map_err(|e| format!("Cannot keep the file: {e}"))?;
+    let cannot = |e: std::io::Error| match short_of_space(root, bytes.len() as u64) {
+        Some(short) => format!("Cannot keep the file: {e}. {short}"),
+        None => format!("Cannot keep the file: {e}"),
+    };
+    fs::create_dir_all(&dir).map_err(cannot)?;
     let path = dir.join(PARTIAL);
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(offset == 0)
         .open(&path)
-        .map_err(|e| format!("Cannot keep the file: {e}"))?;
+        .map_err(cannot)?;
     file.seek(SeekFrom::Start(offset))
         .and_then(|_| file.write_all(bytes))
-        .map_err(|e| format!("Cannot keep the file: {e}"))
+        .map_err(cannot)
+}
+
+/// What a full disk is said with: the space measured free on the disk
+/// `dir` is on, against the bytes it needed, when it has less. The disk is
+/// the only bound on a file kept here (maintainer, 2026-11-22: "We should
+/// be able to load log files even larger than that").
+#[must_use]
+pub fn short_of_space(dir: &Path, needed: u64) -> Option<String> {
+    let free = fs4::available_space(dir).ok()?;
+    (free < needed).then(|| {
+        format!(
+            "It needs {} and the disk UXDuck keeps its files on has {} free.",
+            size(needed),
+            size(free)
+        )
+    })
+}
+
+#[allow(clippy::cast_precision_loss, reason = "a size said in words")]
+fn size(bytes: u64) -> String {
+    let mb = bytes as f64 / 1e6;
+    if mb < 1000.0 {
+        format!("{mb:.1} MB")
+    } else {
+        format!("{:.2} GB", mb / 1000.0)
+    }
 }
 
 pub fn finish(root: &Path, id: &str, name: &str, keep: bool) -> Result<(), String> {

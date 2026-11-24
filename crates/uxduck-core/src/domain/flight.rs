@@ -72,6 +72,36 @@ pub struct FlightLink {
     pub tlog: Option<FlightTlog>,
 }
 
+/// Where a flight's telemetry logs hold nothing from its vehicle (S460):
+/// each stretch of its armed time longer than UXDuck takes a vehicle to be
+/// lost, measured once over every connection it was heard on.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryGaps {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<TelemetryGap>,
+}
+
+impl TelemetryGaps {
+    /// The time the gaps add up to.
+    #[must_use]
+    pub fn missing_us(&self) -> u64 {
+        self.gaps
+            .iter()
+            .map(|g| g.to_us.saturating_sub(g.from_us))
+            .sum()
+    }
+}
+
+/// One stretch with nothing from the vehicle: from the last record heard,
+/// or the arming, to the next, or the end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryGap {
+    pub from_us: u64,
+    pub to_us: u64,
+}
+
 /// Where a flight's log begins: the tlog's file name and the offset of its
 /// first record after arming.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +217,12 @@ pub struct Flight {
     /// brought, so a connection that dropped out leaves no gap.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_links: Vec<FlightLink>,
+    /// Where its telemetry logs hold nothing from its vehicle (S460),
+    /// measured once its logs here were read: as it ended, or the first
+    /// time it was listed for one from before. Absent until then, and for
+    /// one whose logs are not here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_gaps: Option<TelemetryGaps>,
     /// Its flight log in the account on its own (2026-10-24): asked for
     /// while "Store flight logs and videos" is off, then stored.
     #[serde(default, skip_serializing_if = "FlightLog::is_none")]
@@ -210,7 +246,19 @@ pub struct Flight {
     /// never sent to the account.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copies: Vec<FlightCopy>,
+    /// The autopilot's own log it was made from (S459): an arming that log
+    /// records and no Logbook flight covered. A path on this computer, so
+    /// never sent to the account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autopilot_log: Option<FlightLogFile>,
     pub version: u64,
+}
+
+/// The autopilot log a Logbook entry was made from (S459).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightLogFile {
+    pub path: String,
 }
 
 /// A flight's `.uxflight` file (ADR-0062).

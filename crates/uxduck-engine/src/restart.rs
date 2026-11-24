@@ -1249,6 +1249,12 @@ fn simulations_and_traffic(
     if let Some(on) = params.controller_rumble {
         settings.controller_rumble = on;
     }
+    if let Some(opening) = params.autopilot_log_opening {
+        settings.autopilot_log_opening = opening.into();
+    }
+    if let Some(on) = params.trash_imported_logs {
+        settings.trash_imported_logs = on;
+    }
     if let Some(on) = params.companion_update_notices {
         settings.companion_update_notices = on;
     }

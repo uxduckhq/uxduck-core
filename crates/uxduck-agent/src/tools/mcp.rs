@@ -66,6 +66,7 @@ pub fn annotations(method: &str) -> Value {
             | "attachment/image"
             | "operation/list"
             | "logs/cards"
+            | "logs/inspect"
             | "flights/found"
             | "gripper/status"
             | "param/history"
@@ -207,6 +208,7 @@ pub fn output_schema(method: &str) -> Option<Value> {
         "flight/series" => schema::<dto::replay::FlightSeriesResult>(),
         "flights/found" => schema::<dto::replay::FoundFlightsResult>(),
         "logs/cards" => schema::<dto::replay::LogCardsResult>(),
+        "logs/inspect" => schema::<dto::replay::LogsInspectResult>(),
         "replay/logFields" => schema::<dto::replay::ReplayLogFieldsResult>(),
         "replay/open" | "replay/seek" | "replay/state" | "replay/close" | "replay/add" => {
             schema::<dto::replay::ReplayState>()

@@ -117,6 +117,11 @@ pub const LOG_LIST_SILENT_US: u64 = 2_000_000;
 /// The fused position's altitude above the ground, as an item.
 const ABOVE_TERRAIN: &str = "altitude.above_terrain_m";
 
+/// Heartbeat age after which a vehicle is `offline`, unless the daemon is
+/// told otherwise: the time UXDuck takes a vehicle to be lost. A flight's
+/// telemetry log silent for longer has a gap (S460).
+pub const OFFLINE_AFTER_US: u64 = 15_000_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     /// Heartbeat age after which a vehicle is `stale`.
@@ -146,7 +151,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             stale_after_us: 3_000_000,
-            offline_after_us: 15_000_000,
+            offline_after_us: OFFLINE_AFTER_US,
             peer_expiry_us: 300_000_000,
             version_retry_us: 3_000_000,
             version_attempts: 5,

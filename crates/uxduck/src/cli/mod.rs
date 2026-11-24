@@ -1249,6 +1249,10 @@ pub enum DevCommand {
         #[arg(long = "loop")]
         repeat: bool,
     },
+    /// Writes the made-up ArduPilot log the tests read (a copter armed for
+    /// 40 s on GPS time, system id 7) to a file, for end-to-end tests of
+    /// autopilot logs.
+    DataflashFixture { path: PathBuf },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1710,6 +1714,10 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
             rtp_video,
             repeat,
         } => video_replay(&capture, &to, rtp, rtp_video, repeat).await,
+        DevCommand::DataflashFixture { path } => {
+            std::fs::write(&path, uxduck_mavlink::dataflash::fixture::flight())
+                .map_err(|e| CliError::Usage(format!("{}: {e}", path.display())))
+        }
         DevCommand::SimGuard { log, command } => match command.split_first() {
             // The build's exit code is passed on, for the daemon to report.
             Some((program, args)) => {

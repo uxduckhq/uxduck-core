@@ -49,6 +49,8 @@
           "batteryLowPct": 20,
           "batteryCriticalPct": 10,
           "controllerRumble": true,
+          "autopilotLogOpening": "ask",
+          "trashImportedLogs": false,
           "companionUpdateNotices": true,
           "trafficControls": {
             "rangeM": 10000,

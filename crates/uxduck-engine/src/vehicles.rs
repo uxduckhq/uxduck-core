@@ -484,13 +484,22 @@ impl Engine {
     }
 
     /// The record of a vehicle heard for the first time: named and coloured
-    /// as nobody chose.
+    /// as nobody chose. A flight controller whose logs came first keeps the
+    /// name they gave it (S459).
     fn first_heard(&self, seen: &Observation) -> Vehicle {
+        let logged = self
+            .state
+            .flights
+            .values()
+            .find(|f| f.autopilot_log.is_some() && f.vehicle_id == seen.id);
         Vehicle {
             connections: None,
             added_links: Vec::new(),
             id: seen.id.clone(),
-            name: self.unchosen_name(&seen.link_id, None),
+            name: logged.map_or_else(
+                || self.unchosen_name(&seen.link_id, None),
+                |f| f.vehicle_name.clone(),
+            ),
             aliases: Vec::new(),
             link_id: String::new(),
             peer: String::new(),
@@ -718,7 +727,8 @@ impl Engine {
     /// The name of a vehicle nobody named, on `link_id`: a simulation's
     /// "Sim n" (instance 0 is Sim 1), so simulations started together are
     /// named the same each time; a real vehicle's callsign, never one
-    /// another real vehicle went by. `except` is the vehicle being named,
+    /// another real vehicle went by, nor one a vehicle known only by its
+    /// logs goes by (S459). `except` is the vehicle being named,
     /// which gets its own callsign back.
     pub(crate) fn unchosen_name(&self, link_id: &str, except: Option<&str>) -> String {
         let others = || {
@@ -727,6 +737,7 @@ impl Engine {
                 .values()
                 .filter(move |v| Some(v.id.as_str()) != except)
                 .map(|v| v.name.as_str())
+                .chain(self.log_vehicle_names())
         };
         if let Some(LinkKind::Simulator { instance, .. }) =
             self.state.links.get(link_id).map(|l| &l.kind)

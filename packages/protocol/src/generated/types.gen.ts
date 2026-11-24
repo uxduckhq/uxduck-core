@@ -1403,6 +1403,13 @@ export type AutoDelete = {
     days: number;
 };
 
+/**
+ * What opening an autopilot log (`.bin` or `.ulg`) does (S457): Open a
+ * log…, a file dropped on the window, or a file opened with UXDuck
+ * Desktop. Settings › Logbook › "Opening an autopilot log".
+ */
+export type AutopilotLogOpening = 'ask' | 'import' | 'open';
+
 export type AxisBinding = {
     axis: GamepadAxis;
     /**
@@ -4541,6 +4548,12 @@ export type ClientRequest = {
     method: 'logs/copyCard';
     params: LogCopyCardParams;
 } | {
+    method: 'logs/inspect';
+    params: LogFilesParams;
+} | {
+    method: 'logs/import';
+    params: LogFilesParams;
+} | {
     method: 'flight/series';
     params: FlightSeriesParams;
 } | {
@@ -7294,6 +7307,18 @@ export type ErrorFrame = {
 export type ErrorKind = 'parse-error' | 'invalid-request' | 'method-not-found' | 'invalid-params' | 'internal' | 'not-initialized' | 'already-initialized' | 'update-required' | 'capability-denied' | 'not-found' | 'version-conflict' | 'invalid-value' | 'busy' | 'port-in-use' | 'confirmation-required';
 
 /**
+ * A log that could not be imported, and why (S457).
+ */
+export type FailedLog = {
+    /**
+     * What was given: its path, else its name.
+     */
+    from: string;
+    name: string;
+    why: string;
+};
+
+/**
  * A part of the app, counted when it is opened.
  */
 export type Feature = 'map' | 'vehicle_panel' | 'vehicles' | 'parameters' | 'mission' | 'controllers' | 'search' | 'plugins' | 'chat_manager' | 'flights' | 'missions' | 'map_3d' | 'globe' | 'history' | 'camera' | 'instruments' | 'flight_display' | 'get_started' | 'mavlink_inspector' | 'settings' | 'practice' | 'places' | 'ducky' | 'airspace';
@@ -8339,6 +8364,12 @@ export type Flight = {
     airUs: number;
     armedAtUs: number;
     /**
+     * The autopilot's own log this entry was made from (S459): an arming
+     * it records that no Logbook flight covered. Its replay plays the log.
+     * This computer's alone: never in the account.
+     */
+    autopilotLog?: FlightAutopilotLog | null;
+    /**
      * The autopilot's own logs copied off its card that cover it (S426),
      * as `flight/list` matches them: its vehicle's system id, and any of
      * its armed time inside the log's span on GPS time. This computer's
@@ -8434,6 +8465,13 @@ export type Flight = {
      * longer knows it.
      */
     systemId?: number | null;
+    /**
+     * Where its telemetry logs hold nothing from its vehicle (S460): the
+     * stretches of its armed time longer than UXDuck takes a vehicle to be
+     * lost, over every connection it was heard on. Omitted until its logs
+     * here were read, and for one whose logs are not here.
+     */
+    telemetryGaps?: FlightTelemetryGaps | null;
     vehicleId: string;
     vehicleName: string;
     vehicleType: string;
@@ -9084,6 +9122,18 @@ export type FlightSize = {
      * UXDuck's own video recordings of it.
      */
     videoBytes: number;
+};
+
+/**
+ * How much of a flight's telemetry is missing (S460). None missing is
+ * `count` 0.
+ */
+export type FlightTelemetryGaps = {
+    count: number;
+    /**
+     * The gaps added up.
+     */
+    missingUs: number;
 };
 
 /**
@@ -9905,6 +9955,27 @@ export type IdParams = {
 };
 
 /**
+ * A log imported, or found imported already (S457).
+ */
+export type ImportedLog = {
+    /**
+     * What was given: its path, else its name.
+     */
+    from: string;
+    /**
+     * The copy in this computer's logs, where `logs/cards` lists it, with
+     * its size, span and flights.
+     */
+    log: InspectedLog;
+    /**
+     * The original on this computer once its copy is checked, to move to
+     * the Trash when asked. Absent for a log given by its bytes, and for
+     * one that is the copy itself.
+     */
+    original?: string | null;
+};
+
+/**
  * Parameters of `initialize`.
  */
 export type InitializeParams = {
@@ -10009,6 +10080,38 @@ export type InputPath = 'either' | 'rc' | 'link';
  * Which way a message went.
  */
 export type InspectDirection = 'received' | 'sent' | 'relayed';
+
+/**
+ * An autopilot log as read, before or after it is imported (S457).
+ */
+export type InspectedLog = {
+    bytes: number;
+    /**
+     * The Logbook's flights it covers, newest first, as `logs/cards`
+     * matches a copied log (S426).
+     */
+    flights?: Array<LogFlight>;
+    name: string;
+    /**
+     * Where it is on this computer: as given, or the imported copy.
+     */
+    path?: string | null;
+    /**
+     * What it covers. Absent when it could not be read.
+     */
+    span?: LogSpan | null;
+    /**
+     * Why it could not be read, so it matches no flight.
+     */
+    unread?: string | null;
+    /**
+     * The vehicle known here it is from: the one whose flight it covers,
+     * else the one whose uid is its flight controller's, else the only
+     * vehicle with its system id. Absent when none is, or when several are
+     * and it covers none of their flights.
+     */
+    vehicle?: string | null;
+};
 
 /**
  * The latest message of one type, one way.
@@ -10987,6 +11090,22 @@ export type LocationStatus = {
 };
 
 /**
+ * The flight controller an autopilot log was written on: ArduPilot's boot
+ * banner, or PX4's `sys_uuid` and `ver_hw`.
+ */
+export type LogBoard = {
+    /**
+     * Such as `MatekH7A3-Wing`.
+     */
+    name?: string | null;
+    /**
+     * Its hardware id as a vehicle's `uid` keeps it, from
+     * `AUTOPILOT_VERSION.uid2`.
+     */
+    uid: string;
+};
+
+/**
  * A vehicle's SD card plugged into this computer, with ArduPilot's logs in
  * its `APM/LOGS` folder or PX4's in `log` (R15).
  */
@@ -11040,10 +11159,45 @@ export type LogCopyCardParams = {
 };
 
 /**
+ * An autopilot log given by its bytes, as a page with no path to the file
+ * gives one (S457).
+ */
+export type LogFileData = {
+    /**
+     * Its bytes in base64.
+     */
+    data: string;
+    /**
+     * Its file name, such as `00000042.BIN`.
+     */
+    name: string;
+};
+
+/**
+ * `logs/inspect` and `logs/import`: `.bin` and `.ulg` logs by their path
+ * on this computer, by their bytes (S457), or uploaded first.
+ */
+export type LogFilesParams = {
+    /**
+     * Logs a page with no path to them uploaded whole with
+     * `attachment/begin`, `attachment/append` and `attachment/finish`, by
+     * id, so a log of any size goes in pieces rather than in one message.
+     * `logs/import` lets go of each upload once it has imported it.
+     */
+    attachments?: Array<string>;
+    files?: Array<LogFileData>;
+    paths?: Array<string>;
+};
+
+/**
  * A Logbook flight an autopilot log covers (S426).
  */
 export type LogFlight = {
     armedAtUs: number;
+    /**
+     * An entry made from this log alone (S459): its replay is the log.
+     */
+    fromLog?: boolean;
     id: string;
     /**
      * Its name, else its vehicle's.
@@ -11077,6 +11231,10 @@ export type LogMessage = {
  * The vehicle an autopilot log names and the time it covers (S426).
  */
 export type LogSpan = {
+    /**
+     * The flight controller it was written on, when it says (S459).
+     */
+    board?: LogBoard | null;
     firmware?: string | null;
     fromUs: number;
     /**
@@ -11104,6 +11262,28 @@ export type LoginItem = {
 };
 
 export type LoginItemState = 'on' | 'off' | 'needs-approval' | 'unavailable';
+
+/**
+ * Result of `logs/import`.
+ */
+export type LogsImportResult = {
+    failed?: Array<FailedLog>;
+    /**
+     * Copied, each copy's size checked against its original's.
+     */
+    imported?: Array<ImportedLog>;
+    /**
+     * Imported or copied off a card before: the same size and bytes, whatever its name.
+     */
+    skipped?: Array<ImportedLog>;
+};
+
+/**
+ * Result of `logs/inspect`: each log in the order given, paths first.
+ */
+export type LogsInspectResult = {
+    logs: Array<InspectedLog>;
+};
 
 export type MapCameraOptions = {
     dragToPan?: boolean | null;
@@ -15961,6 +16141,12 @@ export type ReplayState = {
      */
     startUs: number;
     /**
+     * Stretches of its flights' armed time their telemetry logs hold
+     * nothing from the vehicle (S460), on the replay's clock: drawn, never
+     * skipped, as video and the other sources may cover them.
+     */
+    telemetryGaps?: Array<ReplayGap>;
+    /**
      * The clock, T: where the replay is, between `startUs` and `endUs`.
      * Everything shows each vehicle as it was then.
      */
@@ -15982,6 +16168,13 @@ export type ReplayVehicle = {
      * The vehicle it was, live.
      */
     originalId: string;
+    /**
+     * What it plays, by place in `sources`: its source, and an autopilot
+     * log played as it (S458). A vehicle that goes on into a later source
+     * is listed once for each, so a client tells each copy shown twice
+     * (R20) by its own.
+     */
+    sources?: Array<number>;
 };
 
 /**
@@ -16558,6 +16751,11 @@ export type Settings = {
      */
     autoDelete: Array<AutoDelete>;
     /**
+     * Settings › Logbook (S457): what opening a `.bin` or `.ulg` does.
+     * Ask when an older daemon left it out.
+     */
+    autopilotLogOpening?: AutopilotLogOpening;
+    /**
      * And this share or less "Battery critical": 10 when left out.
      */
     batteryCriticalPct?: number;
@@ -16722,6 +16920,12 @@ export type Settings = {
     trafficAlertUpM?: number;
     trafficControls?: TrafficControls;
     /**
+     * Settings › Logbook (S457): each imported log's original goes to the
+     * system Trash once its copy is checked. UXDuck Desktop moves it, on
+     * the computer the file is on. Off by default.
+     */
+    trashImportedLogs?: boolean;
+    /**
      * A recording's segments go while it records; off, once it ends (S83).
      */
     uploadVideoWhileFlying?: boolean;
@@ -16768,6 +16972,10 @@ export type SettingsUpdateParams = {
      * Replaces the whole list when present.
      */
     autoDelete?: Array<AutoDelete> | null;
+    /**
+     * What opening an autopilot log does (S457).
+     */
+    autopilotLogOpening?: AutopilotLogOpening | null;
     /**
      * 0 (off) to 90, below the low level when both are on.
      */
@@ -16864,6 +17072,10 @@ export type SettingsUpdateParams = {
      */
     trafficAlertUpM?: number | null;
     trafficControls?: TrafficControls | null;
+    /**
+     * Whether imported logs' originals go to the Trash (S457).
+     */
+    trashImportedLogs?: boolean | null;
     uploadVideoWhileFlying?: boolean | null;
     uploadWhileArmed?: boolean | null;
     usageAnalytics?: boolean | null;

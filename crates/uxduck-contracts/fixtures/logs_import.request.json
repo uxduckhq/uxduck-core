@@ -1,0 +1,6 @@
+{
+  "method": "logs/import",
+  "params": {
+    "paths": ["/Users/ben/Downloads/00000046.BIN"]
+  }
+}

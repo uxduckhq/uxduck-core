@@ -1089,6 +1089,13 @@ LinkFailure.message
 # Another connection a flight was heard on (ADR-0039 R10, 2026-11-22):
 # a new type inside an optional field, which no release has stored.
 FlightLink.link_id
+# A flight's telemetry gaps (S460, 2026-11-22): a new type inside an
+# optional field, which no release has stored.
+TelemetryGap.from_us
+TelemetryGap.to_us
+# The autopilot log a Logbook entry was made from (S459, 2026-11-22): a new
+# type inside an optional field, which no release has stored.
+FlightLogFile.path
 # A camera's recording on the vehicle (ADR-0066 R10, 2026-11-22): a new
 # type inside an optional field of a companion's camera path, which no
 # release has stored.

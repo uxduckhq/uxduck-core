@@ -120,6 +120,22 @@ pub struct LogSpan {
     pub from_us: u64,
     #[schemars(schema_with = "crate::safe::integer")]
     pub to_us: u64,
+    /// The flight controller it was written on, when it says (S459).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<LogBoard>,
+}
+
+/// The flight controller an autopilot log was written on: ArduPilot's boot
+/// banner, or PX4's `sys_uuid` and `ver_hw`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LogBoard {
+    /// Such as `MatekH7A3-Wing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its hardware id as a vehicle's `uid` keeps it, from
+    /// `AUTOPILOT_VERSION.uid2`.
+    pub uid: String,
 }
 
 /// A Logbook flight an autopilot log covers (S426).
@@ -131,6 +147,9 @@ pub struct LogFlight {
     pub name: String,
     #[schemars(schema_with = "crate::safe::integer")]
     pub armed_at_us: u64,
+    /// An entry made from this log alone (S459): its replay is the log.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_log: bool,
 }
 
 /// Result of `logs/cards` and `logs/copyCard`.
@@ -155,6 +174,109 @@ pub struct LogCardsResult {
 pub struct LogCopyCardParams {
     /// The card, as `logs/cards` names it.
     pub path: String,
+}
+
+/// An autopilot log given by its bytes, as a page with no path to the file
+/// gives one (S457).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFileData {
+    /// Its file name, such as `00000042.BIN`.
+    pub name: String,
+    /// Its bytes in base64.
+    pub data: String,
+}
+
+/// `logs/inspect` and `logs/import`: `.bin` and `.ulg` logs by their path
+/// on this computer, by their bytes (S457), or uploaded first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFilesParams {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<LogFileData>,
+    /// Logs a page with no path to them uploaded whole with
+    /// `attachment/begin`, `attachment/append` and `attachment/finish`, by
+    /// id, so a log of any size goes in pieces rather than in one message.
+    /// `logs/import` lets go of each upload once it has imported it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
+}
+
+/// An autopilot log as read, before or after it is imported (S457).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectedLog {
+    /// Where it is on this computer: as given, or the imported copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub name: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    /// What it covers. Absent when it could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<LogSpan>,
+    /// Why it could not be read, so it matches no flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<String>,
+    /// The vehicle known here it is from: the one whose flight it covers,
+    /// else the one whose uid is its flight controller's, else the only
+    /// vehicle with its system id. Absent when none is, or when several are
+    /// and it covers none of their flights.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle: Option<String>,
+    /// The Logbook's flights it covers, newest first, as `logs/cards`
+    /// matches a copied log (S426).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flights: Vec<LogFlight>,
+}
+
+/// Result of `logs/inspect`: each log in the order given, paths first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsInspectResult {
+    pub logs: Vec<InspectedLog>,
+}
+
+/// A log imported, or found imported already (S457).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedLog {
+    /// What was given: its path, else its name.
+    pub from: String,
+    /// The original on this computer once its copy is checked, to move to
+    /// the Trash when asked. Absent for a log given by its bytes, and for
+    /// one that is the copy itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<String>,
+    /// The copy in this computer's logs, where `logs/cards` lists it, with
+    /// its size, span and flights.
+    pub log: InspectedLog,
+}
+
+/// A log that could not be imported, and why (S457).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedLog {
+    /// What was given: its path, else its name.
+    pub from: String,
+    pub name: String,
+    pub why: String,
+}
+
+/// Result of `logs/import`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsImportResult {
+    /// Copied, each copy's size checked against its original's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imported: Vec<ImportedLog>,
+    /// Imported or copied off a card before: the same size and bytes, whatever its name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<ImportedLog>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<FailedLog>,
 }
 
 /// `flight/series`: a flight's values over its whole range, decoded from its
@@ -730,6 +852,12 @@ pub struct ReplayVehicle {
     /// The vehicle it was, live.
     pub original_id: String,
     pub name: String,
+    /// What it plays, by place in `sources`: its source, and an autopilot
+    /// log played as it (S458). A vehicle that goes on into a later source
+    /// is listed once for each, so a client tells each copy shown twice
+    /// (R20) by its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<u16>,
 }
 
 /// What a mark on the scrubber is.
@@ -864,6 +992,11 @@ pub struct ReplayState {
     /// Stretches between flights no source covers (R17).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<ReplayGap>,
+    /// Stretches of its flights' armed time their telemetry logs hold
+    /// nothing from the vehicle (S460), on the replay's clock: drawn, never
+    /// skipped, as video and the other sources may cover them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub telemetry_gaps: Vec<ReplayGap>,
     /// The flights of a log saved to the account (`replay/save`), by id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub saved_flight_ids: Vec<String>,

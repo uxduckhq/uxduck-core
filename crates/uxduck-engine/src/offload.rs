@@ -437,6 +437,7 @@ impl Engine {
             job_flights.push(OffloadFlight {
                 flight: Flight {
                     copies: Vec::new(),
+                    autopilot_log: None,
                     ..flight.clone()
                 },
                 stem,
@@ -723,6 +724,7 @@ impl Engine {
                 tlog: None,
                 tlog_end: None,
                 other_links: Vec::new(),
+                telemetry_gaps: None,
                 log: uxduck_core::domain::flight::FlightLog::None,
                 sync_video: false,
                 copies: vec![FlightCopy {

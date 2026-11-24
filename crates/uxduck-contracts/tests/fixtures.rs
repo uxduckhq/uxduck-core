@@ -535,6 +535,12 @@ fn check(name: &str) {
         ("result", "logs_cards" | "logs_copyCard") => {
             round_trip::<uxduck_contracts::dto::replay::LogCardsResult>(name, &json);
         }
+        ("result", "logs_inspect") => {
+            round_trip::<uxduck_contracts::dto::replay::LogsInspectResult>(name, &json);
+        }
+        ("result", "logs_import") => {
+            round_trip::<uxduck_contracts::dto::replay::LogsImportResult>(name, &json);
+        }
         ("result", "traffic_status") => {
             round_trip::<uxduck_contracts::dto::traffic::TrafficStatus>(name, &json);
         }

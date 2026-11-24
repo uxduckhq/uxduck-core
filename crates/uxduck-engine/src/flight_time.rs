@@ -208,7 +208,7 @@ fn seconds(us: u64) -> f64 {
     us as f64 / 1e6
 }
 
-fn flight_actor() -> Actor {
+pub(crate) fn flight_actor() -> Actor {
     Actor {
         client_id: "uxduck-flight".into(),
         operator_id: None,
@@ -323,6 +323,7 @@ impl Engine {
         let simulated = self.is_simulated(&vehicle);
         let mut flight = Flight {
             copies: Vec::new(),
+            autopilot_log: None,
             id: format!("fl{}", &self.random.token()[..16]),
             vehicle_id: vehicle.id.clone(),
             system_id: Some(vehicle.system_id),
@@ -354,6 +355,7 @@ impl Engine {
                 .map(|(file, offset)| uxduck_core::domain::flight::FlightTlog { file, offset }),
             tlog_end: None,
             other_links: Vec::new(),
+            telemetry_gaps: None,
             log: uxduck_core::domain::flight::FlightLog::None,
             sync_video: false,
             mission: None,
@@ -547,6 +549,8 @@ impl Engine {
         );
         // Two vehicles flying together are one operation (ADR-0039 R16).
         self.regroup_operations();
+        // Where its telemetry logs went silent, read off the engine (S460).
+        self.measure_telemetry_gaps([flight.id]);
     }
 
     /// `flight/list`: the newest flights a page at a time, or the ones
@@ -760,6 +764,13 @@ impl Engine {
             autopilot_logs: copied
                 .iter()
                 .filter(|log| self.log_covers(log, flight))
+                // An entry's own log is its replay already (S459).
+                .filter(|log| {
+                    flight
+                        .autopilot_log
+                        .as_ref()
+                        .is_none_or(|own| own.path != log.path)
+                })
                 .map(|log| uxduck_contracts::dto::flight::FlightAutopilotLog {
                     path: log.path.clone(),
                     name: log.name.clone(),
@@ -777,13 +788,16 @@ impl Engine {
         let Some(span) = log.span.as_ref().filter(|span| span.gps_time) else {
             return false;
         };
-        let Some(vehicle) = self.vehicle(&flight.vehicle_id) else {
+        // Its system id when it flew, else its vehicle's now: an entry from
+        // a log alone has a vehicle known only by its log (S459).
+        let Some(system_id) = flight
+            .system_id
+            .or_else(|| self.vehicle(&flight.vehicle_id).map(|v| v.system_id))
+        else {
             return false;
         };
         let ended = flight.ended_at_us.unwrap_or_else(|| self.clock.now_us());
-        vehicle.system_id == span.system_id
-            && span.from_us <= ended
-            && flight.armed_at_us <= span.to_us
+        system_id == span.system_id && span.from_us <= ended && flight.armed_at_us <= span.to_us
     }
 
     /// `logs/cards`: each copied log with the Logbook's flights it covers,
@@ -802,6 +816,10 @@ impl Engine {
                         .clone()
                         .unwrap_or_else(|| flight.vehicle_name.clone()),
                     armed_at_us: flight.armed_at_us,
+                    from_log: flight
+                        .autopilot_log
+                        .as_ref()
+                        .is_some_and(|own| own.path == log.path),
                 })
                 .collect();
         }
@@ -1192,7 +1210,9 @@ impl Engine {
             // Its moving time died with the process, so it has none.
             flight.moving_us = None;
             flight.version += 1;
+            let id = flight.id.clone();
             self.commit_as(flight_actor(), Change::FlightUpserted { flight });
+            self.measure_telemetry_gaps([id]);
         }
     }
 
@@ -1477,7 +1497,9 @@ impl Engine {
             flight.contact_lost_at_us = None;
             flight.moving_us = None;
             flight.version += 1;
+            let id = flight.id.clone();
             self.commit_as(flight_actor(), Change::FlightUpserted { flight });
+            self.measure_telemetry_gaps([id]);
         }
     }
 

@@ -393,6 +393,14 @@ impl Engine {
         self.send_text(waiting.connection, text, &traced);
     }
 
+    /// Lets go of an upload not sent with a message, and the file it kept:
+    /// a log once it is imported (S457).
+    pub(crate) fn forget_upload(&mut self, id: &str) {
+        if let Some(upload) = self.uploads.open.remove(id) {
+            let _ = self.system.attachment_finish(id, &upload.name, false);
+        }
+    }
+
     /// The whole of an attached file, for a replay.
     pub(crate) fn attached_bytes(
         &mut self,

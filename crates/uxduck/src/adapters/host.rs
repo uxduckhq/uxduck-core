@@ -586,7 +586,8 @@ impl System for Host {
 
     fn replay_available(&self, what: &uxduck_engine::runtime::ReplayRead) -> Option<bool> {
         match what {
-            uxduck_engine::runtime::ReplayRead::Packed { path, .. } => {
+            uxduck_engine::runtime::ReplayRead::Packed { path, .. }
+            | uxduck_engine::runtime::ReplayRead::File { path } => {
                 Some(std::path::Path::new(path).is_file())
             }
             _ => None,
@@ -771,6 +772,17 @@ impl System for Host {
         crate::card_logs::copied_with_spans(&self.data_dir, &self.card_spans)
     }
 
+    fn autopilot_logs(&self) -> Option<std::sync::Arc<dyn uxduck_engine::runtime::AutopilotLogs>> {
+        Some(std::sync::Arc::new(crate::card_logs::Logs::new(
+            &self.data_dir,
+            &self.card_spans,
+        )))
+    }
+    fn autopilot_log_reads(&self) -> Vec<uxduck_engine::runtime::AutopilotLogRead> {
+        let logs = crate::card_logs::copied_with_spans(&self.data_dir, &self.card_spans);
+        self.card_spans.reads(&logs)
+    }
+
     fn copy_card_logs(&mut self, card: &str) -> Result<(), String> {
         use uxduck_engine::runtime::Clock as _;
         let today = crate::analytics::utc_day(super::system::SystemClock.now_us());
@@ -790,6 +802,13 @@ impl System for Host {
             Ok(()) => None,
             Err(back) => Some(back.0.run()),
         }
+    }
+
+    fn log_reader(&self) -> Option<uxduck_engine::runtime::LogReader> {
+        let tlogs = self.data_dir.join("tlogs");
+        Some(std::sync::Arc::new(move |what, out| {
+            crate::replay::stream(&tlogs, what, out)
+        }))
     }
 
     fn tlog_position(&self, link_id: &str) -> Option<(String, u64)> {

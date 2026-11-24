@@ -30,7 +30,7 @@ use mavio::dialects::ardupilotmega::messages::{
     WindCov,
 };
 
-use crate::dataflash::{About, Column, Message, Value, int, parse_key};
+use crate::dataflash::{About, Board, Column, Message, Value, int, parse_key};
 use crate::sim::{frame, status_text_frame};
 
 const MAGIC: [u8; 7] = *b"ULog\x01\x12\x35";
@@ -506,6 +506,23 @@ fn text<'a>(log: &'a Log, key: &str) -> Option<&'a str> {
         .filter(|t| !t.is_empty())
 }
 
+/// The flight controller, from `sys_uuid`: PX4's hardware id, the bytes
+/// `AUTOPILOT_VERSION.uid2` sends, in hex. Named by `ver_hw`.
+fn board(log: &Log) -> Option<Board> {
+    let uuid = text(log, "sys_uuid")?.to_ascii_lowercase();
+    let mut uid2 = [0u8; 18];
+    if uuid.len() % 2 != 0 || uuid.len() > uid2.len() * 2 {
+        return None;
+    }
+    for (byte, hex) in uid2.iter_mut().zip(uuid.as_bytes().chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+    }
+    Some(Board {
+        name: text(log, "ver_hw").map(str::to_owned),
+        uid: crate::identity::uid_text(0, uid2)?,
+    })
+}
+
 /// Its firmware's line, such as "PX4 v1.15.0 (abcdef12)", from
 /// `ver_sw_release` and `ver_sw`.
 fn firmware(log: &Log) -> Option<String> {
@@ -743,6 +760,7 @@ pub fn to_tlog(bytes: &[u8]) -> Result<(Vec<u8>, About), String> {
         gps_time: offset.is_some(),
         mission: Vec::new(),
         defaults: log.defaults.clone(),
+        board: board(&log),
     };
     let offset = offset.unwrap_or(0);
     let start = log.start_us;
@@ -1465,6 +1483,7 @@ pub mod fixture {
         w.info_text("ver_sw", "0123456789abcdef0123456789abcdef01234567");
         w.info_u32("ver_sw_release", 0x010F_00FF);
         w.info_text("ver_hw", "PX4_FMU_V6X");
+        w.info_text("sys_uuid", "000600000000363333365107000000000000");
         w.format(
             "vehicle_status",
             "uint64_t timestamp;uint8_t arming_state;uint8_t nav_state;uint8_t vehicle_type;\
@@ -1820,6 +1839,13 @@ mod tests {
         assert_eq!(about.system_id, 7);
         assert!(about.gps_time && about.mission.is_empty());
         assert_eq!(about.firmware.as_deref(), Some("PX4 v1.15.0 (01234567)"));
+        assert_eq!(
+            about.board,
+            Some(Board {
+                name: Some("PX4_FMU_V6X".into()),
+                uid: "000600000000363333365107000000000000".into(),
+            })
+        );
         assert_eq!(about.defaults.get("MPC_XY_VEL_MAX"), Some(&10.0));
         let records = crate::tlog::read(&tlog);
         assert!(records.windows(2).all(|w| w[0].0 <= w[1].0), "in order");

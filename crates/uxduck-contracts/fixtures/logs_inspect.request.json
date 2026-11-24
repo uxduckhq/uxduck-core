@@ -1,0 +1,12 @@
+{
+  "method": "logs/inspect",
+  "params": {
+    "paths": ["/Users/ben/Downloads/00000046.BIN"],
+    "files": [
+      {
+        "name": "00000047.BIN",
+        "data": "o5WA"
+      }
+    ]
+  }
+}

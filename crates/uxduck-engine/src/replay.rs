@@ -234,6 +234,12 @@ struct Hint {
     state_before: Arc<Vec<u8>>,
     /// A `.bin`'s parameters' defaults, from its `PARM` records.
     param_defaults: BTreeMap<String, f32>,
+    /// The system id an autopilot log names (`SYSID_THISMAV`, PX4's
+    /// `MAV_SYS_ID`), for the flight it is the vehicle of (S458).
+    log_system: Option<u8>,
+    /// The flight controller an autopilot log was written on, which names
+    /// its vehicle as a log's entries are named (S459).
+    board: Option<uxduck_mavlink::dataflash::Board>,
 }
 
 /// A log's bytes, what it is, its range and who it names.
@@ -281,6 +287,133 @@ pub(crate) struct Prepared {
     found: Pass,
     params: BTreeMap<Key, Timeline>,
     missions: BTreeMap<Key, mission_log::Timeline>,
+    /// Autopilot logs played as another source's vehicle (S458).
+    joined: Vec<Joined>,
+}
+
+/// An autopilot log played as the vehicle of a flight or tlog beside it
+/// (S458): the log names the vehicle's system id and the two overlap on
+/// the replay's clock, so they are one replay vehicle, not R20's copies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Joined {
+    /// The log's source.
+    log: u16,
+    /// The flight's or tlog's source, whose vehicle it plays as.
+    into: u16,
+    system: u8,
+}
+
+/// `AUTOPILOT_VERSION`: who the vehicle is, which the telemetry log says
+/// in full (its board's UID) and an autopilot log does not.
+const AUTOPILOT_VERSION: u32 = 148;
+
+/// Joins each autopilot log to the flight or tlog whose vehicle it names
+/// (S458), in one place: its records play on that source's link, so the
+/// session hears one vehicle, and while the log covers the time the
+/// telemetry log's records of the vehicle of each kind the log carries are
+/// left out, so the log gives position, attitude, heights, speeds,
+/// battery, mode, armed state and messages, and the telemetry log only what
+/// the log lacks (links, radio, what UXDuck sent). Outside the log's span
+/// the telemetry log gives everything. A log whose system id is not the
+/// vehicle's, a flight without a system id, or a second log of the same
+/// vehicle and time stays a copy beside it (R20).
+fn join_logs(
+    inputs: &[Input],
+    sources: &[ReplaySource],
+    bytes: &[u8],
+    records: &mut Vec<Record>,
+) -> Vec<Joined> {
+    let mut joined: Vec<Joined> = Vec::new();
+    for (log, input) in inputs.iter().enumerate() {
+        let (Ok(log), Some(system)) = (u16::try_from(log), input.hint.log_system) else {
+            continue;
+        };
+        let Some((from, to)) = span(sources, log) else {
+            continue;
+        };
+        let names = |into: u16| -> bool {
+            let Some(other) = inputs.get(usize::from(into)) else {
+                return false;
+            };
+            if other.hint.log.is_some() {
+                return false;
+            }
+            if let Some((_, vehicle, _)) = &other.hint.vehicle {
+                return *vehicle == Some(system);
+            }
+            records.iter().any(|r| {
+                r.source == into && {
+                    let frame = &bytes[r.at..r.at + r.len];
+                    uxduck_mavlink::framing::header(frame)
+                        .filter(|h| h.message_id == 0 && h.system_id == system)
+                        .zip(uxduck_mavlink::framing::payload(frame))
+                        .is_some_and(|(h, payload)| {
+                            uxduck_mavlink::autopilot::flight_controller_raw(
+                                payload.get(4).copied().unwrap_or(0),
+                                payload.get(5).copied().unwrap_or(0),
+                                h.component_id,
+                            )
+                        })
+                }
+            })
+        };
+        let into = (0..u16::try_from(sources.len()).unwrap_or(u16::MAX))
+            .filter(|&into| into != log)
+            .filter(|&into| !joined.iter().any(|j| j.into == into && j.system == system))
+            .filter_map(|into| {
+                let (a, b) = span(sources, into)?;
+                (a < to && from < b).then(|| (into, b.min(to) - a.max(from)))
+            })
+            .filter(|&(into, _)| names(into))
+            .max_by_key(|&(into, overlap)| (overlap, std::cmp::Reverse(into)))
+            .map(|(into, _)| into);
+        if let Some(into) = into {
+            joined.push(Joined { log, into, system });
+        }
+    }
+    for join in &joined {
+        let Some((from, to)) = span(sources, join.log) else {
+            continue;
+        };
+        let message = |r: &Record| {
+            uxduck_mavlink::framing::header(&bytes[r.at..r.at + r.len])
+                .filter(|h| h.system_id == join.system)
+                .map(|h| h.message_id)
+        };
+        let carried: BTreeSet<u32> = records
+            .iter()
+            .filter(|r| r.source == join.log)
+            .filter_map(message)
+            .filter(|&id| id != AUTOPILOT_VERSION)
+            .collect();
+        records.retain(|r| {
+            r.source != join.into
+                || r.stamp < from
+                || r.stamp > to
+                || message(r).is_none_or(|id| !carried.contains(&id))
+        });
+        for record in records.iter_mut().filter(|r| r.source == join.log) {
+            record.source = join.into;
+        }
+    }
+    joined
+}
+
+/// Each source's span on the replay's clock, a source an autopilot log is
+/// joined to (S458) reaching as far as the log does, so its vehicle is
+/// there while either plays.
+fn reaches(sources: &[ReplaySource], joined: &[Joined]) -> Vec<ReplaySource> {
+    let mut reach = sources.to_vec();
+    for join in joined {
+        if let (Some((from, to)), Some(into)) = (
+            span(sources, join.log),
+            reach.get_mut(usize::from(join.into)),
+        ) {
+            into.start_us = into.start_us.min(from);
+            into.end_us = into.end_us.max(to);
+        }
+    }
+    reach
 }
 
 fn nothing_to_play() -> ApiError {
@@ -299,6 +432,10 @@ fn gave_way(why: &str) -> ApiError {
 /// union of their ranges, one pass over them all (R6), and the parameters
 /// and missions they hold. None when `cancelled` is set on the way: nobody
 /// waits for it.
+#[allow(
+    clippy::too_many_lines,
+    reason = "each source on one clock, and the logs joined to their flights"
+)]
 fn prepare(inputs: Vec<Input>, cancelled: &AtomicBool) -> Option<Result<Prepared, ApiError>> {
     let mut joined = Vec::new();
     let mut records: Vec<Record> = Vec::new();
@@ -370,8 +507,9 @@ fn prepare(inputs: Vec<Input>, cancelled: &AtomicBool) -> Option<Result<Prepared
             .get(usize::from(r.source))
             .is_some_and(|s| r.stamp >= s.start_us && r.stamp <= s.end_us)
     });
+    let joined = join_logs(&inputs, &sources, &bytes, &mut records);
     let found = pass(&bytes, &records, cancelled)?;
-    let (params, missions) = {
+    let (mut params, missions) = {
         let state: Vec<Vec<(u64, &[u8])>> = inputs
             .iter()
             .enumerate()
@@ -388,6 +526,13 @@ fn prepare(inputs: Vec<Input>, cancelled: &AtomicBool) -> Option<Result<Prepared
     if cancelled.load(Ordering::Relaxed) {
         return None;
     }
+    // A joined log's parameters are its vehicle's (S458): the autopilot's
+    // own record of them.
+    for join in &joined {
+        if let Some(timeline) = params.remove(&(join.log, join.system)) {
+            params.insert((join.into, join.system), timeline);
+        }
+    }
     Some(Ok(Prepared {
         inputs,
         sources,
@@ -398,6 +543,7 @@ fn prepare(inputs: Vec<Input>, cancelled: &AtomicBool) -> Option<Result<Prepared
         found,
         params,
         missions,
+        joined,
     }))
 }
 
@@ -434,6 +580,13 @@ pub(crate) enum Worked {
     Series {
         reply: Option<(ConnectionId, Value)>,
         result: Option<FlightSeriesResult>,
+    },
+    /// Autopilot logs read or imported (S457).
+    Logs(crate::autopilot_logs::Worked),
+    /// A flight's telemetry gaps (S460), or why its logs could not be read.
+    Gaps {
+        flight_id: String,
+        gaps: Result<uxduck_core::domain::flight::TelemetryGaps, String>,
     },
 }
 
@@ -612,6 +765,9 @@ struct Replay {
     /// As read, to build it again.
     inputs: Vec<Input>,
     gaps: Vec<ReplayGap>,
+    /// Where its flights' telemetry logs hold nothing from the vehicle
+    /// (S460), on its clock.
+    telemetry_gaps: Vec<ReplayGap>,
     clock: ReplayClock,
     /// Its log, shared with what reads it off the engine (`flight/series`).
     bytes: Arc<Vec<u8>>,
@@ -663,6 +819,8 @@ struct Replay {
     params_applied: BTreeMap<Key, usize>,
     missions: BTreeMap<Key, mission_log::Timeline>,
     missions_applied: BTreeMap<String, (Option<Key>, Option<usize>)>,
+    /// Autopilot logs played as another source's vehicle (S458).
+    joined: Vec<Joined>,
 }
 
 impl Replay {
@@ -681,11 +839,19 @@ impl Replay {
             sources: self.sources.clone(),
             vehicles: self
                 .vehicles
-                .values()
-                .map(|v| ReplayVehicle {
+                .iter()
+                .map(|(&(source, system), v)| ReplayVehicle {
                     id: v.replay_id.clone(),
                     original_id: v.original_id.clone(),
                     name: v.name.clone(),
+                    sources: std::iter::once(source)
+                        .chain(
+                            self.joined
+                                .iter()
+                                .filter(|j| j.into == source && j.system == system)
+                                .map(|j| j.log),
+                        )
+                        .collect(),
                 })
                 .collect(),
             focus_vehicle_id: self
@@ -695,6 +861,7 @@ impl Replay {
             marks: self.marks.clone(),
             recordings: self.recordings.clone(),
             gaps: self.gaps.clone(),
+            telemetry_gaps: self.telemetry_gaps.clone(),
             saved_flight_ids: self.saved.clone(),
             paths: with_paths.then(|| self.paths.clone()),
         }
@@ -787,6 +954,15 @@ impl Replay {
     fn system_of(&self, session_id: &str) -> Option<Key> {
         self.session_ids.get(session_id).copied()
     }
+
+    /// The autopilot log a vehicle's source plays with (S458), as the
+    /// log's own key: its fields, parameters and mission are the vehicle's.
+    fn joined_log(&self, key: Key) -> Option<Key> {
+        self.joined
+            .iter()
+            .find(|j| j.into == key.0 && j.system == key.1)
+            .map(|j| (j.log, key.1))
+    }
 }
 
 /// The replay open now, and who is told about it.
@@ -803,6 +979,8 @@ pub(crate) struct Replays {
     /// The replay being made off the engine, and how many were.
     building: Option<Building>,
     builds: u64,
+    /// Flights whose telemetry gaps are measured off the engine (S460).
+    pub(crate) gaps: crate::telemetry_gaps::Queue,
 }
 
 impl std::fmt::Debug for Replays {
@@ -843,6 +1021,8 @@ fn as_tlog(
     }
     hint.mission = about.mission;
     hint.param_defaults = about.defaults;
+    hint.log_system = Some(about.system_id);
+    hint.board = about.board;
     hint.log = Some(std::sync::Arc::new(bytes));
     Ok(tlog)
 }
@@ -1954,6 +2134,8 @@ impl Engine {
                 };
                 self.send(connection, &frame);
             }
+            Worked::Logs(worked) => self.logs_worked(worked),
+            Worked::Gaps { flight_id, gaps } => self.telemetry_gaps_measured(&flight_id, gaps),
         }
     }
 
@@ -2099,11 +2281,18 @@ impl Engine {
                 continue;
             };
             // A flight without a log here plays from its `.uxflight`
-            // (ADR-0062), on its own.
+            // (ADR-0062), on its own, and an entry from an autopilot log
+            // from the log (S459).
             let Some(link) = flight
                 .link_id
                 .clone()
                 .or_else(|| (!flight.copies.is_empty()).then(|| format!("file:{id}")))
+                .or_else(|| {
+                    flight
+                        .autopilot_log
+                        .as_ref()
+                        .map(|l| format!("log:{}", l.path))
+                })
             else {
                 continue;
             };
@@ -2129,7 +2318,10 @@ impl Engine {
                 .flight_bytes(&first, Some((from, to)), params.ground)
                 .map(|opened| {
                     let (bytes, source, range, mut hint) = opened;
-                    hint.state_before = Arc::new(state_before);
+                    // An autopilot log's comes with it (S459).
+                    if !state_before.is_empty() {
+                        hint.state_before = Arc::new(state_before);
+                    }
                     let (bytes, range) = match on_boot_time(&bytes) {
                         Some(rebased) => (rebased, None),
                         None => (bytes, range),
@@ -2162,7 +2354,11 @@ impl Engine {
     fn replay_input(&mut self, params: &ReplayOpenParams) -> Result<Input, ApiError> {
         let (bytes, source, range, mut hint) = self.replay_bytes(params)?;
         if let (Some(id), Some((from_us, _))) = (&source.flight_id, range) {
-            hint.state_before = Arc::new(self.state_before(id, from_us));
+            let before = self.state_before(id, from_us);
+            // An autopilot log's comes with it (S459).
+            if !before.is_empty() {
+                hint.state_before = Arc::new(before);
+            }
         }
         // Nonsense stamps: the vehicle's time since boot instead (R11).
         let (bytes, range) = match on_boot_time(&bytes) {
@@ -2197,6 +2393,7 @@ impl Engine {
             found,
             params,
             missions,
+            joined,
         } = prepared;
         let clock = if uxduck_mavlink::tlog::sane(start_us) {
             ReplayClock::Wall
@@ -2204,6 +2401,7 @@ impl Engine {
             ReplayClock::Boot
         };
         let gaps = gaps_between(&sources);
+        let telemetry_gaps = self.telemetry_gaps_of(&sources);
         let links = (0..=u16::try_from(inputs.len().saturating_sub(1)).unwrap_or(u16::MAX))
             .map(link_of)
             .collect();
@@ -2236,6 +2434,7 @@ impl Engine {
             sources,
             inputs: Vec::new(),
             gaps,
+            telemetry_gaps,
             clock,
             bytes,
             records,
@@ -2267,7 +2466,9 @@ impl Engine {
             params_applied: BTreeMap::new(),
             missions,
             missions_applied: BTreeMap::new(),
+            joined,
         };
+        let reach = reaches(&replay.sources, &replay.joined);
         for (&key, session_id) in &found.heard {
             let index = usize::from(key.0);
             let Some(input) = inputs.get(index) else {
@@ -2301,10 +2502,10 @@ impl Engine {
             {
                 self.remember_log_vehicle(seen, &identity.name);
             }
-            let identity = copy_if_shown_twice(identity, key, &replay.vehicles, &replay.sources);
+            let identity = copy_if_shown_twice(identity, key, &replay.vehicles, &reach);
             replay.vehicles.insert(key, identity);
         }
-        mark_copies(&mut replay.vehicles, &replay.sources);
+        mark_copies(&mut replay.vehicles, &reach);
         replay.focus = inputs
             .first()
             .and_then(|i| i.hint.vehicle.as_ref()?.1)
@@ -2591,6 +2792,12 @@ impl Engine {
             flight.armed_at_us.saturating_sub(LEAD_US),
             ended.saturating_add(LEAD_US),
         ));
+        // An entry from an autopilot log alone plays the log (S459).
+        if let Some(log) = &flight.autopilot_log {
+            return Some(ReplayRead::File {
+                path: log.path.clone(),
+            });
+        }
         // Without a log here, its `.uxflight` (ADR-0062).
         let Some(link_id) = flight.link_id.clone() else {
             return flight.copies.first().map(|copy| ReplayRead::Packed {
@@ -2607,6 +2814,52 @@ impl Engine {
             start: flight.tlog.as_ref().map(|t| (t.file.clone(), t.offset)),
         };
         Some(self.with_other_links(flight, own, (from_us, to_us)))
+    }
+
+    /// Where the flights among these sources have telemetry gaps (S460),
+    /// on the replay's clock: each flight's as measured, moved by its nudge.
+    fn telemetry_gaps_of(&self, sources: &[ReplaySource]) -> Vec<ReplayGap> {
+        let mut gaps: Vec<ReplayGap> = sources
+            .iter()
+            .filter_map(|source| {
+                let flight = self.state.flights.get(source.flight_id.as_ref()?)?;
+                Some((flight.telemetry_gaps.as_ref()?, source.offset_us))
+            })
+            .flat_map(|(measured, offset)| {
+                let shift = move |us: u64| {
+                    u64::try_from((i128::from(us) + i128::from(offset)).max(0)).unwrap_or(0)
+                };
+                measured.gaps.iter().map(move |g| ReplayGap {
+                    from_us: shift(g.from_us),
+                    to_us: shift(g.to_us),
+                })
+            })
+            .collect();
+        gaps.sort_by_key(|g| (g.from_us, g.to_us));
+        gaps
+    }
+
+    /// A flight's telemetry gaps were measured (S460): the open replay that
+    /// plays it marks them.
+    pub(crate) fn refresh_replay_telemetry_gaps(&mut self, flight_id: &str) {
+        let Some(sources) = self
+            .replays
+            .open
+            .as_ref()
+            .filter(|r| {
+                r.sources
+                    .iter()
+                    .any(|s| s.flight_id.as_deref() == Some(flight_id))
+            })
+            .map(|r| r.sources.clone())
+        else {
+            return;
+        };
+        let gaps = self.telemetry_gaps_of(&sources);
+        if let Some(replay) = self.replays.open.as_mut() {
+            replay.telemetry_gaps = gaps;
+        }
+        self.push_replay(false);
     }
 
     /// Every connection a flight's telemetry is read from (ADR-0039 R10,
@@ -2963,6 +3216,9 @@ impl Engine {
             .cloned()
             .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no flight {id}")))?;
         let (from_us, to_us) = range.unwrap_or_else(|| self.flight_span(&flight, ground));
+        if let Some(log) = &flight.autopilot_log {
+            return self.log_entry_bytes(&flight, &log.path, (from_us, to_us));
+        }
         let Some(link_id) = flight.link_id.clone() else {
             return self.packed_flight_bytes(&flight, (from_us, to_us));
         };
@@ -3021,6 +3277,65 @@ impl Engine {
             vehicle_id: Some(flight.vehicle_id.clone()),
             ..ReplaySource::default()
         };
+        Ok((bytes, source, Some((from_us, to_us)), hint))
+    }
+
+    /// An entry from an autopilot log alone (S459): the log, read as
+    /// `replay/open` reads it by its path, cut to the entry's part, with
+    /// the parameters and mission it logged before that as its state
+    /// before. Its source is the entry's, so a video added in its replay
+    /// goes with it (R8).
+    fn log_entry_bytes(
+        &mut self,
+        flight: &uxduck_core::domain::flight::Flight,
+        path: &str,
+        (from_us, to_us): (u64, u64),
+    ) -> Result<Opened, ApiError> {
+        let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        let whole = self
+            .system
+            .replay_read(&ReplayRead::File {
+                path: path.to_owned(),
+            })
+            .map_err(|why| {
+                ApiError::new(
+                    ErrorKind::NotFound,
+                    format!(
+                        "{name} is not at {path} any more, so this entry cannot be replayed. {why}"
+                    ),
+                )
+            })?;
+        let mut source = ReplaySource {
+            name: flight.vehicle_name.clone(),
+            flight_id: Some(flight.id.clone()),
+            vehicle_id: Some(flight.vehicle_id.clone()),
+            path: Some(path.to_owned()),
+            ..ReplaySource::default()
+        };
+        let mut hint = Hint {
+            vehicle: Some((
+                flight.vehicle_id.clone(),
+                flight.system_id,
+                flight.vehicle_name.clone(),
+            )),
+            ..Hint::default()
+        };
+        let tlog = as_tlog(whole, &mut source, &mut hint)?;
+        source.kind = ReplaySourceKind::Flight;
+        let (mut bytes, mut before) = (Vec::new(), Vec::new());
+        for (stamp, frame) in uxduck_mavlink::tlog::read(&tlog) {
+            if (from_us..=to_us).contains(&stamp) {
+                let _ = uxduck_mavlink::tlog::record(&mut bytes, stamp, frame);
+            } else if stamp < from_us
+                && uxduck_mavlink::framing::header(frame).is_some_and(|h| {
+                    PARAM_MESSAGES.contains(&h.message_id)
+                        || mission_log::MESSAGE_IDS.contains(&h.message_id)
+                })
+            {
+                let _ = uxduck_mavlink::tlog::record(&mut before, stamp, frame);
+            }
+        }
+        hint.state_before = Arc::new(before);
         Ok((bytes, source, Some((from_us, to_us)), hint))
     }
 
@@ -3126,7 +3441,8 @@ impl Engine {
     /// vehicle file came from), a vehicle
     /// known on its link, or a vehicle known by the id the log gave it,
     /// a UID, unless it is a simulator's, which every simulator of a build
-    /// shares (S238). None of these: the first free callsign, avoiding
+    /// shares (S238), or the vehicle of the flight controller an autopilot
+    /// log names, as its entries are (S459). None of these: the first free callsign, avoiding
     /// `taken`, the names this replay gave already.
     fn identify(
         &self,
@@ -3155,6 +3471,13 @@ impl Engine {
                 self.vehicle(session_id)
                     .filter(|v| !v.replay && !simulator)
                     .map(|v| (v.id.clone(), v.name.clone()))
+            })
+            .or_else(|| {
+                let board = hint.board.as_ref()?;
+                if !only && hint.log_system != Some(system) {
+                    return None;
+                }
+                self.board_vehicle(&board.uid)
             });
         let (original_id, name) = if let Some((id, name)) = known {
             // Its name now, if it still has one here.
@@ -3240,7 +3563,7 @@ impl Engine {
 
     /// The first name no vehicle here goes by or went by, nor one of
     /// `taken`: "Sim n" for a simulator, else a callsign.
-    fn replay_name(&self, simulator: bool, taken: &[String]) -> String {
+    pub(crate) fn replay_name(&self, simulator: bool, taken: &[String]) -> String {
         let names = self
             .state
             .vehicles
@@ -3248,6 +3571,7 @@ impl Engine {
             .filter(|v| !v.replay)
             .map(|v| v.name.as_str())
             .chain(self.state.retired_callsigns.keys().map(String::as_str))
+            .chain(self.log_vehicle_names())
             .chain(taken.iter().map(String::as_str));
         if simulator {
             uxduck_core::domain::vehicle::simulation_name(None, names)
@@ -3274,6 +3598,7 @@ impl Engine {
         self.replays.now_us = None;
         // A vehicle whose sources have all ended is gone, as one not yet
         // heard is absent (R17).
+        let reach = reaches(&replay.sources, &replay.joined);
         let ended: Vec<String> = replay
             .vehicles
             .values()
@@ -3283,12 +3608,7 @@ impl Engine {
                     .vehicles
                     .iter()
                     .filter(|(_, v)| v.replay_id == *id)
-                    .all(|(key, _)| {
-                        replay
-                            .sources
-                            .get(usize::from(key.0))
-                            .is_some_and(|s| t > s.end_us)
-                    })
+                    .all(|(key, _)| reach.get(usize::from(key.0)).is_some_and(|s| t > s.end_us))
             })
             .collect();
         self.replays.open = Some(replay);
@@ -3599,19 +3919,34 @@ impl Engine {
 
     fn apply_replay_missions(&mut self, replay: &mut Replay) {
         let mut owners: BTreeMap<&str, Option<Key>> = BTreeMap::new();
+        let reach = reaches(&replay.sources, &replay.joined);
         for (key, identity) in &replay.vehicles {
             if !self.state.vehicles.contains_key(&identity.replay_id) {
                 continue;
             }
             let owner = owners.entry(&identity.replay_id).or_default();
-            if let Some((start, end)) = span(&replay.sources, key.0)
+            if let Some((start, end)) = span(&reach, key.0)
                 && start <= replay.t_us
                 && replay.t_us <= end
                 && owner.is_none_or(|previous| {
-                    span(&replay.sources, previous.0).is_none_or(|(old, _)| start >= old)
+                    span(&reach, previous.0).is_none_or(|(old, _)| start >= old)
                 })
             {
                 *owner = Some(*key);
+            }
+        }
+        // While its autopilot log covers the time, the log's mission is
+        // the vehicle's (S458).
+        for owner in owners.values_mut() {
+            if let Some(log) = owner.and_then(|key| replay.joined_log(key))
+                && replay
+                    .inputs
+                    .get(usize::from(log.0))
+                    .is_some_and(|input| !input.hint.mission.is_empty())
+                && span(&replay.sources, log.0)
+                    .is_some_and(|(from, to)| from <= replay.t_us && replay.t_us <= to)
+            {
+                *owner = Some(log);
             }
         }
         for (id, owner) in owners {
@@ -3890,7 +4225,8 @@ impl Engine {
             .open
             .as_ref()
             .ok_or_else(|| ApiError::new(ErrorKind::NotFound, "No replay is open."))?;
-        let system = Self::replay_vehicle_key(replay, params.vehicle_id.as_ref())?;
+        let system = Self::replay_vehicle_key(replay, params.vehicle_id.as_ref())?
+            .map(|key| replay.joined_log(key).unwrap_or(key));
         let input = replay.inputs.get(usize::from(system.map_or(0, |s| s.0)));
         let Some((input, log)) = input.and_then(|i| i.hint.log.as_ref().map(|log| (i, log))) else {
             return Err(ApiError::new(
@@ -4007,8 +4343,13 @@ impl Engine {
                     )
                 })?;
                 let system = Self::replay_vehicle_key(replay, params.vehicle_id.as_ref())?;
-                // Its source's DataFlash log, for its own fields (R15).
-                let source = usize::from(system.map_or(0, |s| s.0));
+                // Its source's DataFlash log, for its own fields (R15), or
+                // the one joined to it (S458).
+                let source = usize::from(
+                    system
+                        .map(|key| replay.joined_log(key).unwrap_or(key))
+                        .map_or(0, |s| s.0),
+                );
                 let log = replay
                     .inputs
                     .get(source)
@@ -4151,6 +4492,7 @@ impl Engine {
             let id = format!("fl{}", &self.random.token()[..16]);
             let flight = uxduck_core::domain::flight::Flight {
                 copies: Vec::new(),
+                autopilot_log: None,
                 id: id.clone(),
                 vehicle_id: identity.original_id.clone(),
                 system_id: vehicle.map(|v| v.system_id),
@@ -4178,6 +4520,7 @@ impl Engine {
                 tlog: None,
                 tlog_end: None,
                 other_links: Vec::new(),
+                telemetry_gaps: None,
                 // Its log with it unless "What to sync" keeps summaries only
                 // (ADR-0046 B11).
                 log: if self.state.settings.sync_content
@@ -4534,8 +4877,13 @@ impl Engine {
         let Some(target) = begins(0) else {
             return Ok(false);
         };
+        // An autopilot log joined to its flight is already on its time
+        // (S458).
         let by: Vec<i64> = (0..count)
             .map(|i| {
+                if replay.joined.iter().any(|j| j.log == i) {
+                    return 0;
+                }
                 begins(i).map_or(0, |at| {
                     i64::try_from(target).unwrap_or(i64::MAX)
                         - i64::try_from(at).unwrap_or(i64::MAX)
