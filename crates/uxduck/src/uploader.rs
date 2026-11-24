@@ -73,6 +73,9 @@ struct Usage {
     plan: Option<StoragePlan>,
     video: Option<bool>,
     simulated: Option<bool>,
+    /// The free plan's video, counted apart from logs (ADR-0069 P2).
+    video_bytes: Option<u64>,
+    video_quota_bytes: Option<u64>,
 }
 
 /// A refusal (B5): why, the server's words, and what the account was then;
@@ -86,9 +89,20 @@ struct Refused {
 
 impl Refused {
     /// Whether the account changed enough to try again: anything for a
-    /// full account (a delete, a bigger quota), the plan for video.
+    /// full account (a delete, a bigger quota), the plan or the account's
+    /// video for video.
     fn lifted(&self, now: Option<&Usage>) -> bool {
-        let plan = |u: Option<&Usage>| u.map(|u| (u.plan, u.video, u.quota_bytes));
+        let plan = |u: Option<&Usage>| {
+            u.map(|u| {
+                (
+                    u.plan,
+                    u.video,
+                    u.quota_bytes,
+                    u.video_bytes,
+                    u.video_quota_bytes,
+                )
+            })
+        };
         match self.reason {
             SyncRefusal::StorageFull => self.then.as_ref() != now,
             SyncRefusal::Plan => plan(self.then.as_ref()) != plan(now),
@@ -351,6 +365,8 @@ fn upload_status(
         problem: problem.filter(|_| chunks > 0),
         stored_bytes: usage.and_then(|u| u.bytes),
         quota_bytes: usage.and_then(|u| u.quota_bytes),
+        video_bytes: usage.and_then(|u| u.video_bytes),
+        video_quota_bytes: usage.and_then(|u| u.video_quota_bytes),
         plan: usage.and_then(|u| u.plan),
         may_upload_video: if video_refused {
             Some(false)
@@ -388,7 +404,11 @@ async fn flight_logs_waiting(spool: &Shared, engine: &EngineHandle) -> Result<Ve
 /// Why nothing goes, in plain words (ADR-0046 B5).
 fn refusal_problem(refused: &Refused, usage: Option<&Usage>) -> String {
     match refused.reason {
-        SyncRefusal::Plan => "Video syncs on a paid plan.".into(),
+        // The server's words carry what the account keeps (ADR-0069 P11).
+        SyncRefusal::Plan => refused
+            .said
+            .clone()
+            .unwrap_or_else(|| "Video syncs on a paid plan.".into()),
         SyncRefusal::StorageFull => match usage.and_then(|u| u.bytes.zip(u.quota_bytes)) {
             Some((used, quota)) => format!(
                 "Your account is full: {} of {} used.",
@@ -568,6 +588,8 @@ fn read_usage(usage: &Value) -> Usage {
         plan: serde_json::from_value(usage["plan"].clone()).ok(),
         video: usage["video"].as_bool(),
         simulated: usage["simulated"].as_bool(),
+        video_bytes: usage["videoBytes"].as_u64(),
+        video_quota_bytes: usage["videoQuotaBytes"].as_u64(),
     }
 }
 
@@ -1035,6 +1057,8 @@ mod tests {
                 plan: Some(StoragePlan::Free),
                 video: Some(false),
                 simulated: Some(false),
+                video_bytes: None,
+                video_quota_bytes: None,
             }
         );
         assert_eq!(
@@ -1099,6 +1123,32 @@ mod tests {
             ..free_and_full()
         };
         assert!(video.lifted(Some(&paid)));
+
+        // ADR-0069 P2: the free plan's video allowance used, said in the
+        // server's words, and tried again once the account's video changes.
+        let free_video = |bytes: u64| Usage {
+            video: Some(true),
+            video_bytes: Some(bytes),
+            video_quota_bytes: Some(500_000_000),
+            ..free_and_full()
+        };
+        let Failure::Refused(reason, said) = grants_refused(&json!({
+            "error": "Your free 500 MB of video is used: 480 MB in your account. This video stays on your computer.",
+            "code": "plan",
+        })) else {
+            panic!("a refusal");
+        };
+        let used = Refused {
+            reason,
+            said,
+            then: Some(free_video(480_000_000)),
+        };
+        assert_eq!(
+            refusal_problem(&used, used.then.as_ref()),
+            "Your free 500 MB of video is used: 480 MB in your account. This video stays on your computer."
+        );
+        assert!(!used.lifted(Some(&free_video(480_000_000))));
+        assert!(used.lifted(Some(&free_video(100_000_000))));
 
         // Any other 403 is a problem like the rest.
         assert!(matches!(

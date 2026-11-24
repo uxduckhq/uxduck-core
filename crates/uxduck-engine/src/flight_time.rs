@@ -954,6 +954,22 @@ impl Engine {
         Ok(self.flight_dto(&flight))
     }
 
+    /// Why a flight's video does not sync now: the free plan's video
+    /// allowance used, with what the account keeps (ADR-0069 P2, P11), or
+    /// a plan that takes no video (B4).
+    fn video_refused(&self) -> String {
+        let status = self.upload_status.as_ref();
+        let mb = |bytes: u64| bytes.div_ceil(1_000_000);
+        match status.and_then(|s| s.video_quota_bytes.zip(s.video_bytes)) {
+            Some((quota, used)) => format!(
+                "Your free {} MB of video is used: {} MB in your account.",
+                mb(quota),
+                mb(used)
+            ),
+            None => VIDEO_ON_PAID.into(),
+        }
+    }
+
     /// What a flight synced now takes (ADR-0046 B11): "What to sync", or
     /// more when asked for this once, and no video on a plan without it.
     fn sync_content(&self, asked: Option<SyncContent>) -> SyncContent {
@@ -990,7 +1006,7 @@ impl Engine {
             return Err(ApiError::new(ErrorKind::InvalidValue, SIMULATED_ON_PAID));
         }
         if keep && content == Some(SyncContent::Video) && !self.may_upload_video() {
-            return Err(ApiError::new(ErrorKind::InvalidValue, VIDEO_ON_PAID));
+            return Err(ApiError::new(ErrorKind::InvalidValue, self.video_refused()));
         }
         let wanted = self.sync_content(content);
         let synced = DaemonEvent::FlightSynced {

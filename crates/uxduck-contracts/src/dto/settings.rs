@@ -453,6 +453,16 @@ pub struct UploadStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub quota_bytes: Option<u64>,
+    /// The account's camera and live recordings, in bytes, from all its
+    /// computers; unknown until asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub video_bytes: Option<u64>,
+    /// What the free plan keeps of video, apart from logs (ADR-0069 P2);
+    /// none on a paid plan, where video counts against the quota.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub video_quota_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<StoragePlan>,
     /// Whether camera recordings may go to the account (B4).

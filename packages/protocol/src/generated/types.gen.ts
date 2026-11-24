@@ -20315,6 +20315,16 @@ export type UploadStatus = {
      * from all their computers, in bytes (S83); unknown until asked.
      */
     storedBytes?: number | null;
+    /**
+     * The account's camera and live recordings, in bytes, from all its
+     * computers; unknown until asked.
+     */
+    videoBytes?: number | null;
+    /**
+     * What the free plan keeps of video, apart from logs (ADR-0069 P2);
+     * none on a paid plan, where video counts against the quota.
+     */
+    videoQuotaBytes?: number | null;
 };
 
 /**
