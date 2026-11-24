@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use uxduck_mavlink::computer::{self, COMPUTER_IDS};
-use uxduck_mavlink::computer_clock::{OUTSTANDING_US, UNIX_SCALE_NS};
+use uxduck_mavlink::computer_clock::{OUTSTANDING_US, UNIX_SCALE_NS, WINDOW_US};
 use uxduck_mavlink::decode::{Message, decode};
 
 use crate::adapters::computer_status::Sampler;
@@ -38,6 +38,12 @@ const REPLY_WAITS: Duration = Duration::from_micros(OUTSTANDING_US);
 /// one answer sets the clock, and one a minute finds the drift since, small
 /// enough to slew away before the next.
 const ASK_AGAIN_AFTER: Duration = Duration::from_secs(60);
+/// How long after a step it goes on asking once a second: a step is only as
+/// true as that one answer's round trip, which a busy computer or a slow
+/// link stretches, and each quicker answer after it brings the clock closer.
+/// The ground station measures this computer's clock by its quickest answer
+/// of the same length of time.
+const CHECKS_A_STEP_FOR: Duration = Duration::from_micros(WINDOW_US);
 
 /// A test seam, never set in use: milliseconds added to this computer's
 /// clock where it is told to the ground station, so a test can run a
@@ -85,6 +91,9 @@ pub struct Computer {
     asked: Vec<(i64, Instant)>,
     /// Not before then does it ask again.
     ask_after: Option<Instant>,
+    /// Until then a step is being checked: each answer is followed by
+    /// another request the next second.
+    checking_until: Option<Instant>,
     /// It said it could not set the clock.
     set_refused: bool,
 }
@@ -109,6 +118,7 @@ impl Computer {
             ground: None,
             asked: Vec::new(),
             ask_after: None,
+            checking_until: None,
             set_refused: false,
         }
     }
@@ -161,8 +171,8 @@ impl Computer {
     }
 
     /// The ground station to ask for its clock now (S373): while nothing
-    /// keeps this computer's, once a second until one answers, then once a
-    /// minute.
+    /// keeps this computer's, once a second until one answers and while a
+    /// step is checked, then once a minute.
     fn ground_to_ask(&mut self) -> Option<(u8, u8)> {
         let now = Instant::now();
         self.asked
@@ -182,7 +192,8 @@ impl Computer {
     /// station asked, to this computer. The ground station's clock less this
     /// one's is `tc1` less this computer's clock halfway through the round
     /// trip, true to within half the round trip. When nothing keeps this
-    /// computer's clock and they are further apart than that, it is set.
+    /// computer's clock and they are further apart than that, it is set. A
+    /// step is checked by the answers of the minute after it.
     fn ground_answered(&mut self, frame: &[u8]) {
         let Some(decoded) = decode(frame) else {
             return;
@@ -210,7 +221,10 @@ impl Computer {
         let round_trip_ns = i64::try_from(sent.elapsed().as_nanos()).unwrap_or(i64::MAX);
         let within_ns = round_trip_ns / 2;
         let by_ns = tc1.saturating_sub(ts1.saturating_add(within_ns));
-        self.ask_after = Some(Instant::now() + ASK_AGAIN_AFTER);
+        self.ask_after = match self.checking_until {
+            Some(until) if Instant::now() < until => None,
+            _ => Some(Instant::now() + ASK_AGAIN_AFTER),
+        };
         if by_ns.unsigned_abs() <= within_ns.unsigned_abs() || self.kept() {
             return;
         }
@@ -236,12 +250,16 @@ impl Computer {
                 }
                 return;
             }
-            Ok(Moved::Stepped) => tracing::info!(
-                moved_ms = by_ns / 1_000_000,
-                within_ms = within_ns / 1_000_000,
-                ground_system = from.0,
-                "set this computer's clock to the ground station's, because nothing else keeps it"
-            ),
+            Ok(Moved::Stepped) => {
+                tracing::info!(
+                    moved_ms = by_ns / 1_000_000,
+                    within_ms = within_ns / 1_000_000,
+                    ground_system = from.0,
+                    "set this computer's clock to the ground station's, because nothing else keeps it"
+                );
+                self.checking_until = Some(Instant::now() + CHECKS_A_STEP_FOR);
+                self.ask_after = None;
+            }
             Ok(Moved::Slewed) => tracing::debug!(
                 moving_us = by_ns / 1_000,
                 within_us = within_ns / 1_000,
@@ -325,6 +343,9 @@ impl Computer {
             ));
         }
         if let Some(ground) = self.ground_to_ask() {
+            // Timed from before the clock is read, so the round trip is
+            // never counted shorter than it was.
+            let sent = Instant::now();
             let ts1 = self.now_ns();
             for (system, component) in ids {
                 frames.push(uxduck_mavlink::sim::timesync_frame(
@@ -333,7 +354,7 @@ impl Computer {
                     ground,
                 ));
             }
-            self.asked.push((ts1, Instant::now()));
+            self.asked.push((ts1, sent));
         }
         frames
     }
@@ -539,9 +560,74 @@ mod tests {
             "set to the ground station's: {} ms off",
             (computer.now_ns() - wall_ns()) / 1_000_000
         );
+        assert_eq!(
+            asks(&computer.frames([1], 2)).len(),
+            1,
+            "a step is checked by the answers after it"
+        );
+    }
+
+    /// Full CI's macOS runner (2026-11-23) timed out waiting for this clock
+    /// to be in step. A ground station held up as it answers shows how: the
+    /// one answer steps the clock half that round trip off, and nothing
+    /// asked again for a minute.
+    #[test]
+    fn a_step_from_a_slow_answer_is_checked_by_the_answers_after_it() {
+        let wall_ns = || {
+            i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            )
+            .unwrap()
+        };
+        let ask = |computer: &mut Computer, second: u64| {
+            let frames = computer.frames([1], second);
+            match frames.last().and_then(|f| decode(f)).map(|d| d.message) {
+                Some(Message::Timesync { tc1: 0, ts1, .. }) => Some(ts1),
+                _ => None,
+            }
+        };
+        let ahead_ns = |computer: &Computer| {
+            let before = wall_ns();
+            let told = computer.now_ns();
+            (told - wall_ns(), told - before)
+        };
+        let mut computer = Computer::new(Onboard {
+            component_id: Some(191),
+        });
+        computer.told_wrong = true;
+        computer.told_unkept = true;
+        computer.offset_ns = -883_493_000_000_000;
+        let request = uxduck_mavlink::sim::timesync_frame((255, 190, 0), (0, 42), (1, 0));
+        computer.frames([1], 0);
+        computer.answer(&request);
+
+        let ts1 = ask(&mut computer, 1).expect("a request");
+        std::thread::sleep(Duration::from_millis(20));
+        let late = uxduck_mavlink::sim::timesync_frame((255, 190, 1), (wall_ns(), ts1), (1, 191));
+        computer.answer(&late);
+        let (least, most) = ahead_ns(&computer);
         assert!(
-            asks(&computer.frames([1], 2)).is_empty(),
-            "answered: asked again in a minute"
+            most >= 5_000_000 && least < 1_000_000_000,
+            "stepped to the ground station's, half the slow round trip ahead: {least} to {most} ns"
+        );
+
+        let ts1 = ask(&mut computer, 2).expect("a step is checked by the next answer");
+        std::thread::sleep(Duration::from_millis(20));
+        let late = uxduck_mavlink::sim::timesync_frame((255, 190, 2), (wall_ns(), ts1), (1, 191));
+        computer.answer(&late);
+
+        let asked = Instant::now();
+        let ts1 = ask(&mut computer, 3).expect("and by the one after, however slow that one was");
+        let prompt = uxduck_mavlink::sim::timesync_frame((255, 190, 3), (wall_ns(), ts1), (1, 191));
+        computer.answer(&prompt);
+        let round_trip_ns = i64::try_from(asked.elapsed().as_nanos()).unwrap();
+        let (least, most) = ahead_ns(&computer);
+        assert!(
+            least <= round_trip_ns + 1_000_000 && most >= -round_trip_ns - 1_000_000,
+            "in step to a prompt round trip of {round_trip_ns} ns: {least} to {most} ns ahead"
         );
     }
 
@@ -568,6 +654,13 @@ mod tests {
         assert_eq!(
             computer.offset_ns, 0,
             "the same clock, within half the round trip"
+        );
+        assert!(
+            computer.frames([1], 2).iter().all(|f| !matches!(
+                decode(f).map(|d| d.message),
+                Some(Message::Timesync { tc1: 0, .. })
+            )),
+            "left alone: asked again in a minute"
         );
     }
 
