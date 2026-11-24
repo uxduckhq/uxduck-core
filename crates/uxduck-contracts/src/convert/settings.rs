@@ -42,6 +42,26 @@ impl From<dto::SyncContent> for s::SyncContent {
     }
 }
 
+impl From<s::SyncChosen> for dto::SyncChosen {
+    fn from(v: s::SyncChosen) -> Self {
+        match v {
+            s::SyncChosen::Automatic => Self::Automatic,
+            s::SyncChosen::Each => Self::Each,
+            s::SyncChosen::Local => Self::Local,
+        }
+    }
+}
+
+impl From<dto::SyncChosen> for s::SyncChosen {
+    fn from(v: dto::SyncChosen) -> Self {
+        match v {
+            dto::SyncChosen::Automatic => Self::Automatic,
+            dto::SyncChosen::Each => Self::Each,
+            dto::SyncChosen::Local => Self::Local,
+        }
+    }
+}
+
 impl From<s::AgentCameras> for dto::AgentCameras {
     fn from(v: s::AgentCameras) -> Self {
         match v {
@@ -208,6 +228,8 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         upload_video_while_flying: settings.upload_video_while_flying,
         sync_content: settings.sync_content.into(),
         wait_for_unmetered: settings.wait_for_unmetered,
+        sync_chosen: settings.sync_chosen.map(Into::into),
+        sync_simulated: settings.sync_simulated,
         start_at_login: settings.start_at_login,
         login_item: None,
         message_notify_severity: settings.message_notify_severity,

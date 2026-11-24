@@ -174,6 +174,13 @@ pub struct Settings {
     /// while the connection is metered.
     #[serde(default = "on")]
     pub wait_for_unmetered: bool,
+    /// The answer to the Logbook's "Keep your flights in your account?"
+    /// (B16), once on this computer; absent until answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_chosen: Option<SyncChosen>,
+    /// "Sync simulated flights" (B17), on a plan that takes them (B6).
+    #[serde(default)]
+    pub sync_simulated: bool,
     /// UXDuck opens at login (S108): as the system says when it was asked,
     /// else as last set here.
     #[serde(default)]
@@ -336,6 +343,14 @@ pub struct SettingsUpdateParams {
     pub sync_content: Option<SyncContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_for_unmetered: Option<bool>,
+    /// The Logbook's question answered (ADR-0046 B16), by onboarding, an
+    /// agent or MCP too: `automatic` turns on "Sync real flights
+    /// automatically" (B8), `each` and `local` turn it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_chosen: Option<SyncChosen>,
+    /// "Sync simulated flights" (B17).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_simulated: Option<bool>,
     /// Registers UXDuck to start at login, or removes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_at_login: Option<bool>,
@@ -496,6 +511,18 @@ pub enum SyncContent {
     Logs,
     /// Its camera video too, on a plan that takes video.
     Video,
+}
+
+/// How this computer keeps its flights in the account (ADR-0046 B16).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyncChosen {
+    /// "Sync automatically": each real flight as it ends.
+    Automatic,
+    /// "Choose each flight".
+    Each,
+    /// "Keep them on this computer".
+    Local,
 }
 
 /// The account's storage plan (ADR-0046 B3).

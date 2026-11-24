@@ -325,6 +325,23 @@ fn flights_and_supervision(
     if let Some(on) = params.save_flights {
         settings.save_flights = on;
     }
+    // The Logbook's question (ADR-0046 B16) and B8's switch are one
+    // choice: either answers it, and the answer sets the switch.
+    {
+        use uxduck_core::domain::settings::SyncChosen;
+        if let Some(chosen) = params.sync_chosen {
+            let chosen = SyncChosen::from(chosen);
+            let on = chosen == SyncChosen::Automatic;
+            settings.sync_chosen = Some(chosen);
+            settings.store_flights = on;
+            settings.save_flights = on;
+        } else if params.store_flights.is_some() || params.save_flights.is_some() {
+            settings.sync_automatically(settings.store_flights || settings.save_flights);
+        }
+    }
+    if let Some(on) = params.sync_simulated {
+        settings.sync_simulated = on;
+    }
     if let Some(on) = params.upload_while_armed {
         settings.upload_while_armed = on;
     }
@@ -996,6 +1013,25 @@ impl Engine {
             self.commit_as(daemon(), Change::SettingsChanged { settings });
         }
         self.sync_on_unless_turned_off(daemon());
+        // A finished flight raises no notification now (ADR-0046 B16):
+        // those raised before, asking to sync it, go once.
+        let asked: Vec<_> = self
+            .state
+            .notifications
+            .values()
+            .filter(|n| {
+                n.state != uxduck_core::domain::notification::NotificationState::Resolved
+                    && n.condition
+                        .as_deref()
+                        .is_some_and(|c| c.starts_with("flight-keep:"))
+            })
+            .cloned()
+            .collect();
+        for mut notification in asked {
+            notification.state = uxduck_core::domain::notification::NotificationState::Resolved;
+            notification.version += 1;
+            self.commit_as(daemon(), Change::NotificationUpserted { notification });
+        }
         let now = self.clock.now_us();
         let waiting: Vec<_> = self
             .state

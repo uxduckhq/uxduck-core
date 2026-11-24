@@ -16495,9 +16495,18 @@ export type Settings = {
      */
     supervisionGraceS?: number;
     /**
+     * The answer to the Logbook's "Keep your flights in your account?"
+     * (B16), once on this computer; absent until answered.
+     */
+    syncChosen?: SyncChosen | null;
+    /**
      * "What to sync" (ADR-0046 B11): what goes with each synced flight.
      */
     syncContent?: SyncContent;
+    /**
+     * "Sync simulated flights" (B17), on a plan that takes them (B6).
+     */
+    syncSimulated?: boolean;
     /**
      * Areas whose terrain is kept offline (S120), changed with
      * `terrain/keepArea` and `terrain/removeArea`.
@@ -16639,7 +16648,17 @@ export type SettingsUpdateParams = {
      * 5 to 120.
      */
     supervisionGraceS?: number | null;
+    /**
+     * The Logbook's question answered (ADR-0046 B16), by onboarding, an
+     * agent or MCP too: `automatic` turns on "Sync real flights
+     * automatically" (B8), `each` and `local` turn it off.
+     */
+    syncChosen?: SyncChosen | null;
     syncContent?: SyncContent | null;
+    /**
+     * "Sync simulated flights" (B17).
+     */
+    syncSimulated?: boolean | null;
     terrainDataset?: TerrainDataset | null;
     /**
      * 100 m to 20 km (S174).
@@ -18261,6 +18280,11 @@ export type SyncActivation = 'pick' | 'mirror-all';
  * leave something out. Flights go only when someone saves them.
  */
 export type SyncCategory = 'chats' | 'places' | 'plans' | 'settings' | 'vehicles';
+
+/**
+ * How this computer keeps its flights in the account (ADR-0046 B16).
+ */
+export type SyncChosen = 'automatic' | 'each' | 'local';
 
 /**
  * What a synced flight takes to the account (ADR-0046 B11), each level

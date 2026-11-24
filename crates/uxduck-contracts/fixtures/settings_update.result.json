@@ -26,6 +26,7 @@
   "uploadWhileArmed": true,
   "uploadVideoWhileFlying": false,
   "syncContent": "logs",
+  "syncSimulated": false,
   "waitForUnmetered": true,
   "startAtLogin": false,
   "messageNotifySeverity": 4,

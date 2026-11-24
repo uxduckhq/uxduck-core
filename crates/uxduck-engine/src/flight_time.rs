@@ -262,20 +262,6 @@ fn flight_words(flight: &Flight) -> String {
     text
 }
 
-/// One logbook entry in the vehicle's own word, and more than one: a
-/// rover's drive, a boat's trip, a sub's dive, any other vehicle's flight.
-fn entry_noun(vehicle_type: &str) -> (&'static str, &'static str) {
-    match VehicleClass::of(vehicle_type) {
-        VehicleClass::Rover => ("drive", "drives"),
-        VehicleClass::Boat => ("trip", "trips"),
-        VehicleClass::Sub => ("dive", "dives"),
-        VehicleClass::Plane
-        | VehicleClass::Copter
-        | VehicleClass::Airship
-        | VehicleClass::Other => ("flight", "flights"),
-    }
-}
-
 /// What a synced flight asks for besides its summary (ADR-0046 B1, B11):
 /// its log, at logs or video, when it was recorded here and has ended; its
 /// video, at video. Never takes back what it asked before. Whether that
@@ -295,11 +281,6 @@ fn ask_content(flight: &mut Flight, content: SyncContent) -> bool {
         flight.sync_video = true;
     }
     log || video
-}
-
-/// The condition a flight's "Save to account" notice goes with.
-fn keep_condition(flight_id: &str) -> String {
-    format!("flight-keep:{flight_id}")
 }
 
 fn higher(was: Option<f64>, now: Option<f64>) -> Option<f64> {
@@ -525,10 +506,17 @@ impl Engine {
         flight.operators = self.flight_operators(vehicle_id, flight.armed_at_us);
         flight.mission = flown.then(|| self.flight_mission(&flight, complete));
         // "Sync real flights automatically" (ADR-0046 B8): a real flight is
-        // kept as it ends, with what "What to sync" says (B11), not suggested.
+        // kept as it ends, with what "What to sync" says (B11). "Sync
+        // simulated flights" (B17) does the same for a simulated one, on a
+        // plan that takes them (B6). Otherwise it waits for its row's cloud,
+        // and nothing asks (B16).
         let settings = &self.state.settings;
-        let automatic =
-            (settings.save_flights || settings.store_flights) && !flight.simulated && !flight.keep;
+        let automatic = !flight.keep
+            && if flight.simulated {
+                settings.sync_simulated && self.may_sync_simulated()
+            } else {
+                settings.save_flights || settings.store_flights
+            };
         if automatic {
             flight.keep = true;
             ask_content(&mut flight, self.sync_content(None));
@@ -542,7 +530,7 @@ impl Engine {
         );
         if automatic {
             self.track(DaemonEvent::FlightSynced {
-                simulated: false,
+                simulated: flight.simulated,
                 automatic: true,
             });
         }
@@ -557,7 +545,6 @@ impl Engine {
                 text,
             },
         );
-        self.suggest_keeping(&flight);
         // Two vehicles flying together are one operation (ADR-0039 R16).
         self.regroup_operations();
     }
@@ -884,7 +871,6 @@ impl Engine {
             self.commit(connection, Change::FlightRemoved { id: id.to_owned() });
         }
         self.commit(connection, Change::FlightForgotten { id: id.to_owned() });
-        self.resolve(&keep_condition(id));
         self.regroup_operations();
         Ok(())
     }
@@ -1035,7 +1021,6 @@ impl Engine {
                 },
             );
             self.track(synced);
-            self.resolve(&keep_condition(id));
             return Ok(self.flight_dto(&again));
         }
         // Synced now, or synced before and now with more: its log, or its
@@ -1091,14 +1076,12 @@ impl Engine {
             && (self.state.settings.save_flights != keep
                 || self.state.settings.store_flights != keep)
         {
-            // One setting (B8): "Sync real flights automatically".
+            // One setting (B8), which answers the Logbook's question (B16).
             let mut settings = self.state.settings.clone();
-            settings.save_flights = keep;
-            settings.store_flights = keep;
+            settings.sync_automatically(keep);
             settings.version += 1;
             self.commit(connection, Change::SettingsChanged { settings });
         }
-        self.resolve(&keep_condition(id));
         // Its operation goes to the account with it (R16).
         self.regroup_operations();
         // Gone from here too when it only came from the account.
@@ -1107,84 +1090,6 @@ impl Engine {
             ..flight
         });
         Ok(self.flight_dto(&after))
-    }
-
-    /// A real flight just finished: suggested for the account, never sent
-    /// unasked (maintainer, 2026-10-23: flight data off by default).
-    fn suggest_keeping(&mut self, flight: &Flight) {
-        if flight.simulated || flight.keep || flight.end != FlightEnd::Disarmed {
-            return;
-        }
-        let span = |us: u64| match us / 60_000_000 {
-            0 => format!("{} s", us / 1_000_000),
-            m => format!("{m} min"),
-        };
-        // A mission is asked about once it is finished, for all its flights;
-        // landing mid-mission (a battery swap) asks nothing (C8, 2026-10-24).
-        // A rover, boat or submarine is never in the air: how long it was
-        // armed says what it did instead.
-        let keeps_down = VehicleClass::of(&flight.vehicle_type).never_flies();
-        let (one, many) = entry_noun(&flight.vehicle_type);
-        let (title, air) = match &flight.mission {
-            Some(mission) if !mission.completed => return,
-            Some(mission) => {
-                let run = self.run_flights(&mission.run_id);
-                let air: u64 = run.iter().map(|f| f.air_us).sum();
-                let time = if keeps_down {
-                    let armed: u64 = run.iter().map(|f| armed_for_us(f)).sum();
-                    format!("armed {}", span(armed))
-                } else {
-                    format!("{} in the air", span(air))
-                };
-                let what = mission
-                    .plan_name
-                    .as_deref()
-                    .map_or_else(String::new, |n| format!("{n} · "));
-                let flights = match run.len() {
-                    1 => String::new(),
-                    n => format!("{n} {many}, "),
-                };
-                (
-                    format!("{} finished its mission", flight.vehicle_name),
-                    format!("{what}{flights}{time}. "),
-                )
-            }
-            None if !keeps_down => (
-                format!("{} finished a {one}", flight.vehicle_name),
-                format!("{} in the air. ", span(flight.air_us)),
-            ),
-            None => (
-                format!("{} finished a {one}", flight.vehicle_name),
-                format!("Armed {}. ", span(armed_for_us(flight))),
-            ),
-        };
-        self.raise(crate::commands::Raise {
-            severity: uxduck_core::domain::notification::Severity::Info,
-            kind: uxduck_core::domain::notification::NotificationKind::Persistent,
-            subject: uxduck_core::domain::notification::Subject::Vehicle {
-                id: flight.vehicle_id.clone(),
-            },
-            title,
-            body: Some(format!("{air}Sync it to open it on your other computers.")),
-            actions: vec![
-                uxduck_core::domain::notification::NotificationAction {
-                    label: "Sync".into(),
-                    action: uxduck_core::domain::notification::Action::KeepFlight {
-                        flight_id: flight.id.clone(),
-                        always: false,
-                    },
-                },
-                uxduck_core::domain::notification::NotificationAction {
-                    label: "Always sync".into(),
-                    action: uxduck_core::domain::notification::Action::KeepFlight {
-                        flight_id: flight.id.clone(),
-                        always: true,
-                    },
-                },
-            ],
-            condition: Some(keep_condition(&flight.id)),
-            report: None,
-        });
     }
 
     /// The mission a flight just flew: the one UXDuck last knew on the

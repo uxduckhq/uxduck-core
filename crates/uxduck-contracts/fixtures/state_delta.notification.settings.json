@@ -23,6 +23,7 @@
           "uploadWhileArmed": true,
           "uploadVideoWhileFlying": false,
           "syncContent": "logs",
+          "syncSimulated": false,
           "waitForUnmetered": true,
           "usageAnalytics": true,
           "shareConversations": true,

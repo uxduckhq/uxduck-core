@@ -270,6 +270,16 @@ pub struct Settings {
     /// while this computer's connection is metered. On until switched off.
     #[serde(default = "on")]
     pub wait_for_unmetered: bool,
+    /// The answer to the Logbook's "Keep your flights in your account?"
+    /// (ADR-0046 B16), asked once on this computer: unset until someone
+    /// answers it there, in onboarding or by turning B8's switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_chosen: Option<SyncChosen>,
+    /// "Sync simulated flights" (B17): each simulated flight is synced as
+    /// it ends, on a plan that takes them (B6). Off until switched on, and
+    /// never set by B16's answer.
+    #[serde(default)]
+    pub sync_simulated: bool,
     /// The two old switches were made one (ADR-0046 B8), once. A new
     /// computer starts merged; settings saved before read as not yet.
     #[serde(default, alias = "backupsMerged")]
@@ -502,6 +512,8 @@ impl Default for Settings {
             upload_video_while_flying: false,
             sync_content: SyncContent::default(),
             wait_for_unmetered: true,
+            sync_chosen: None,
+            sync_simulated: false,
             sync_merged: true,
             pilot_input_methods: BTreeMap::new(),
             recreate_simulations: false,
@@ -537,6 +549,18 @@ pub enum SyncContent {
     Video,
 }
 
+/// How this computer keeps its flights in the account (ADR-0046 B16).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyncChosen {
+    /// "Sync automatically": each real flight is synced as it ends (B8).
+    Automatic,
+    /// "Choose each flight": synced from its row, one by one.
+    Each,
+    /// "Keep them on this computer".
+    Local,
+}
+
 impl Settings {
     /// The simulator log size limit in force: the default until the operator
     /// chooses storage limits. Zero keeps every log.
@@ -564,6 +588,20 @@ impl Settings {
         let on = self.save_flights || self.store_flights;
         self.save_flights = on;
         self.store_flights = on;
+    }
+
+    /// "Sync real flights automatically" (ADR-0046 B8) turned on or off,
+    /// which answers the Logbook's question (B16). Off keeps "Keep them
+    /// on this computer" when that was the answer, else reads as "Choose
+    /// each flight".
+    pub fn sync_automatically(&mut self, on: bool) {
+        self.save_flights = on;
+        self.store_flights = on;
+        self.sync_chosen = Some(match self.sync_chosen {
+            _ if on => SyncChosen::Automatic,
+            Some(SyncChosen::Local) => SyncChosen::Local,
+            _ => SyncChosen::Each,
+        });
     }
 
     /// "Live sharing from this computer" replaces "Connect this computer to
