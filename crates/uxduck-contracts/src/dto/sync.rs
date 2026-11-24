@@ -186,6 +186,10 @@ pub struct LibraryCamera {
     /// Its RTSP or WHEP addresses, preferred first, without a login.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
+    /// The names typed for its addresses there (S430), by place as `urls`,
+    /// empty where none was typed. Using it here keeps them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub address_names: Vec<String>,
     /// For a camera that sends to UXDuck, the UDP port it listens on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_port: Option<u16>,

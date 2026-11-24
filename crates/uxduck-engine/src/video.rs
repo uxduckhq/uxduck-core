@@ -492,6 +492,19 @@ fn same_machine(a: &str, b: &str) -> bool {
 
 /// Whether a camera address is on a vehicle connection's remote host: the
 /// hosts as written, never resolved (ADR-0057 D10).
+/// A camera's address names as kept (S430): trimmed, by place, with nothing
+/// after the last one typed.
+fn typed_names<S: AsRef<str>>(names: impl IntoIterator<Item = S>) -> Vec<String> {
+    let mut kept: Vec<String> = names
+        .into_iter()
+        .map(|name| name.as_ref().trim().to_owned())
+        .collect();
+    while kept.last().is_some_and(String::is_empty) {
+        kept.pop();
+    }
+    kept
+}
+
 fn on_route(url: &str, route: &VehicleRoute) -> bool {
     url_host(url).eq_ignore_ascii_case(sender_host(&route.peer))
 }
@@ -1390,29 +1403,22 @@ impl Engine {
             }
             urls.push(url);
         }
-        let mut names: Vec<String> = match &params.names {
+        let names: Vec<String> = match &params.names {
             Some(given) if given.len() != urls.len() => {
                 return Err(ApiError::new(
                     ErrorKind::InvalidValue,
                     "Give one name for each address, empty for an address without one.",
                 ));
             }
-            Some(given) => given.iter().map(|name| name.trim().to_owned()).collect(),
-            None => urls
-                .iter()
-                .map(|url| {
-                    previous
-                        .iter()
-                        .position(|before| *before == url)
-                        .and_then(|at| source.address_names.get(at))
-                        .cloned()
-                        .unwrap_or_default()
-                })
-                .collect(),
+            Some(given) => typed_names(given),
+            None => typed_names(urls.iter().map(|url| {
+                previous
+                    .iter()
+                    .position(|before| *before == url)
+                    .and_then(|at| source.address_names.get(at))
+                    .map_or("", String::as_str)
+            })),
         };
-        while names.last().is_some_and(String::is_empty) {
-            names.pop();
-        }
         if previous.iter().copied().eq(urls.iter()) {
             if names == source.address_names {
                 return Ok(source);
@@ -2827,6 +2833,7 @@ impl Engine {
                 port,
             );
             source.fallback_urls = fallbacks.to_vec();
+            source.address_names = typed_names(camera.address_names.iter().take(urls.len()));
             source
         };
         source.added_by_hand = true;

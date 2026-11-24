@@ -10241,6 +10241,11 @@ export type LibraryCamera = {
      */
     active: boolean;
     /**
+     * The names typed for its addresses there (S430), by place as `urls`,
+     * empty where none was typed. Using it here keeps them.
+     */
+    addressNames?: Array<string>;
+    /**
      * The computer that published it, by name.
      */
     device: string;

@@ -401,6 +401,8 @@ pub enum KeptHere {
     LongName(usize),
     /// One of its addresses, without its login, has this many.
     LongAddress(usize),
+    /// The name typed for one of its addresses has this many (S430).
+    LongAddressName(usize),
     /// It has this many addresses, more than [`CAMERA_ADDRESSES`].
     ManyAddresses(usize),
 }
@@ -449,6 +451,14 @@ pub fn shared_camera(source: &VideoSource) -> Option<Result<SharedCamera, KeptHe
     if chars(&name) > CAMERA_TEXT {
         return Some(Err(KeptHere::LongName(chars(&name))));
     }
+    if let Some(long) = source
+        .address_names
+        .iter()
+        .map(|name| chars(name))
+        .find(|&n| n > CAMERA_TEXT)
+    {
+        return Some(Err(KeptHere::LongAddressName(long)));
+    }
     Some(Ok(SharedCamera {
         id,
         name,
@@ -459,6 +469,7 @@ pub fn shared_camera(source: &VideoSource) -> Option<Result<SharedCamera, KeptHe
             .filter(|_| source.assigned_by_hand),
         urls,
         logins,
+        address_names: source.address_names.clone(),
         udp_port,
         record_alone: source.record_alone,
         vehicle_camera: source
@@ -479,6 +490,9 @@ fn kept_here_words(name: &str, why: KeptHere) -> (String, String) {
         ),
         KeptHere::LongAddress(n) => format!(
             "One of its addresses is {n} characters long, longer than the {CAMERA_TEXT} {holds}. Shorten that address or remove it from the camera, and the camera syncs."
+        ),
+        KeptHere::LongAddressName(n) => format!(
+            "The name of one of its addresses is {n} characters long, longer than the {CAMERA_TEXT} {holds}. A shorter name syncs."
         ),
         KeptHere::ManyAddresses(n) => format!(
             "It has {n} addresses, more than the {CAMERA_ADDRESSES} {holds}. Remove addresses until it has {CAMERA_ADDRESSES} or fewer, and it syncs."
@@ -2060,6 +2074,7 @@ impl Engine {
                     name: c.camera.name.clone(),
                     vehicle_id: c.camera.vehicle_id.clone(),
                     urls: c.camera.urls.clone(),
+                    address_names: c.camera.address_names.clone(),
                     udp_port: c.camera.udp_port,
                     needs_login: c.camera.needs_login(),
                     needs_address: c.camera.needs_its_address(),

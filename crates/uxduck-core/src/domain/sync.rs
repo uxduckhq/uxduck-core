@@ -274,6 +274,10 @@ pub struct SharedCamera {
     /// asks for it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logins: Vec<usize>,
+    /// The names typed for its addresses (S430), by place as `urls`,
+    /// empty where none was typed. Absent from a copy an older UXDuck sent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub address_names: Vec<String>,
     /// For a camera that sends to UXDuck, the UDP port it listens on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_port: Option<u16>,
