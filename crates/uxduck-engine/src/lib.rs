@@ -271,6 +271,12 @@ impl Admitted {
     fn is_operator(&self) -> bool {
         self.operator
     }
+
+    /// Whether it may answer approvals: it holds `approve`, as an operator
+    /// always does. One that may not is shown none (`hides_approval`).
+    fn answers_approvals(&self) -> bool {
+        self.granted.contains(&Capability::Approve) || self.extra.contains(&Capability::Approve)
+    }
 }
 
 /// An agent outside UXDuck while it is connected: a client of kind `agent`

@@ -998,14 +998,20 @@ impl Engine {
         self.state.markers.get(id).map_or(id, |m| m.name.as_str())
     }
 
-    /// Whether a connection must not be shown an approval: its own, for a
-    /// terminal (ADR-0065 T7). The client asking for a shell on a vehicle
-    /// never sees its request, and so cannot be led to answer it. And one
-    /// that carries a command an agent asks to run (T14) is shown only to
-    /// those who answer it, the operators on the computer UXDuck runs on:
-    /// the command is no other client's to read. Of those, only a client
-    /// that says it shows the command gets it: a page or a command from
-    /// before S425 would offer the answers without what they allow.
+    /// Whether a connection must not be shown an approval. A client that
+    /// holds no `approve` is shown none, its own request among them:
+    /// `approval/list` and `approval/resolve` refuse it, so the state it
+    /// follows holds neither a request nor the notice whose buttons answer
+    /// one. A paired phone or tablet is such a client (2026-11-21).
+    ///
+    /// And for a terminal (ADR-0065 T7), its own, whatever it holds: the
+    /// client asking for a shell on a vehicle never sees its request, and
+    /// so cannot be led to answer it. One that carries a command an agent
+    /// asks to run (T14) is shown only to those who answer it, the
+    /// operators on the computer UXDuck runs on: the command is no other
+    /// client's to read. Of those, only a client that says it shows the
+    /// command gets it: a page or a command from before S425 would offer
+    /// the answers without what they allow.
     pub(crate) fn hides_approval(
         &self,
         connection: ConnectionId,
@@ -1013,15 +1019,15 @@ impl Engine {
         capability: Capability,
         command: bool,
     ) -> bool {
-        capability == Capability::Terminal
-            && self
-                .connections
-                .get(&connection)
-                .and_then(|c| c.admitted.as_ref())
-                .is_some_and(|a| {
-                    (command && !a.reads.shell_commands)
-                        || (!a.operator && (command || a.record == client_id))
-                })
+        self.connections
+            .get(&connection)
+            .and_then(|c| c.admitted.as_ref())
+            .is_some_and(|a| {
+                !a.answers_approvals()
+                    || (capability == Capability::Terminal
+                        && ((command && !a.reads.shell_commands)
+                            || (!a.operator && (command || a.record == client_id))))
+            })
     }
 
     /// The same for the notice of a pending approval, by its condition.
@@ -1244,16 +1250,24 @@ impl Engine {
             },
         ));
         for connection in live {
+            let mut sees_other_requests = false;
             if let Some(admitted) = self
                 .connections
                 .get_mut(&connection)
                 .and_then(|c| c.admitted.as_mut())
             {
+                let answered = admitted.answers_approvals();
                 admitted.granted.clone_from(&capabilities);
                 // An edit replaces what was allowed for the connection too.
                 admitted.extra.clear();
+                sees_other_requests = answered != admitted.answers_approvals();
             }
             self.send(connection, &frame);
+            // Given or losing `approve`, which requests it is shown changed:
+            // it asks for the state again, as when its operator changes.
+            if sees_other_requests {
+                self.operator_changed(connection);
+            }
         }
     }
 
