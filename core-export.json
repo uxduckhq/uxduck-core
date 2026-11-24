@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "9893474d1f25ad990e70dbc22c0abcef042a054f",
+  "sourceCommit": "0f6e6661e49b4d825fecb71d48f85e8b5fde7262",
   "licenseReady": true,
   "files": [
     {
@@ -9546,7 +9546,7 @@
     },
     {
       "path": "crates/uxduck/src/video/whep.rs",
-      "sha256": "679c1a14aa8ec885ca612848375b61ccc663f3e1a179c4b02de642ae53edde14",
+      "sha256": "9ce6545a227a130288381aa0a9bca29e0e2bf5e5fc6eb88fb0014a4a4f022a53",
       "executable": false
     },
     {

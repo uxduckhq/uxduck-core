@@ -924,6 +924,10 @@ pub(super) async fn warm(url: &str) -> Result<Warm, String> {
             tokio::select! {
                 received = opened.link.socket.recv_from(&mut buf) => {
                     let (n, from) = received.map_err(|e| format!("WebRTC's socket failed: {e}"))?;
+                    // As in `play`, only the address's host is heard (W5).
+                    if !opened.link.hosts.contains(&from.ip()) {
+                        continue;
+                    }
                     let Ok(contents) = buf[..n].try_into() else {
                         continue;
                     };
@@ -1507,6 +1511,12 @@ pub(super) async fn play(
             }
             received = link.socket.recv_from(&mut buf) => {
                 let (n, from) = received.map_err(|e| format!("WebRTC's socket failed: {e}"))?;
+                // Only the address's host is heard. A check from the camera's
+                // other connection would be answered and become a pair ICE can
+                // choose, and the video would take that connection (W5).
+                if !link.hosts.contains(&from.ip()) {
+                    continue;
+                }
                 last_heard = tokio::time::Instant::now();
                 heard_bytes += n as u64;
                 // RTP and RTCP start with 128 to 191 (RFC 7983), STUN and
