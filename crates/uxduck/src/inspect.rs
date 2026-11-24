@@ -2,8 +2,9 @@
 //! process, which the data plane records every frame in with [`record`] and
 //! `mavlink/inspect` reads with [`snapshot`]. The table itself is the
 //! engine's [`Inspector`]. `mavlink/history` pages through what UXDuck
-//! sent from the table ([`history`]) and what vehicles sent from their
-//! links' tlogs ([`crate::tlog_index`]), so the table keeps only the first.
+//! sent and relayed from the table ([`history`]) and what vehicles sent from
+//! their links' tlogs ([`crate::tlog_index`]), so the table keeps only the
+//! first.
 
 use std::path::Path;
 use std::sync::{LazyLock, Mutex, PoisonError};
@@ -33,7 +34,7 @@ pub fn record(
 }
 
 /// What the inspector shows for a vehicle known by these ids, at `now_us`:
-/// received first, then sent, each by name.
+/// received first, then sent, then relayed, each by name.
 pub fn snapshot(vehicle_ids: &[String], now_us: u64) -> MavlinkInspectResult {
     // Copied out under the lock; decoded after it.
     let seen = TABLE
@@ -53,8 +54,8 @@ pub fn heartbeat_us(vehicle_ids: &[String]) -> Option<u64> {
 }
 
 /// Earlier messages of one type for `mavlink/history`, newest first: what
-/// the vehicle sent from its link's tlogs in `tlogs`, what UXDuck sent from
-/// the table.
+/// the vehicle sent from its link's tlogs in `tlogs`, what UXDuck sent or
+/// relayed from the table.
 ///
 /// # Errors
 /// When `params.before` is not a cursor of the kind the direction pages.
@@ -69,7 +70,7 @@ pub fn history(
     let limit = mavlink_inspect::page_size(params.limit);
     let before = params.before.as_deref();
     match params.direction {
-        InspectDirection::Sent => {
+        InspectDirection::Sent | InspectDirection::Relayed => {
             let earlier = TABLE
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)

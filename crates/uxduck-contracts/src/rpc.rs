@@ -1137,9 +1137,10 @@ pub enum ClientRequest {
     /// `InterfaceStatus`.
     #[serde(rename = "interface/check")]
     InterfaceCheck(Empty),
-    /// The latest message of each MAVLink type heard from a vehicle and
-    /// sent to it, with its rate and fields, for the inspector. Changes
-    /// nothing. Needs `read`. Result: `MavlinkInspectResult`.
+    /// The latest message of each MAVLink type heard from a vehicle, sent
+    /// to it and relayed to it from another ground station on a forward,
+    /// with its rate and fields, for the inspector. Changes nothing. Needs
+    /// `read`. Result: `MavlinkInspectResult`.
     #[serde(rename = "mavlink/inspect")]
     MavlinkInspect(MavlinkInspectParams),
     /// Read-only recorded packet evidence. Use linkId (including a forward),

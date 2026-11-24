@@ -9874,7 +9874,7 @@ export type InputPath = 'either' | 'rc' | 'link';
 /**
  * Which way a message went.
  */
-export type InspectDirection = 'received' | 'sent';
+export type InspectDirection = 'received' | 'sent' | 'relayed';
 
 /**
  * The latest message of one type, one way.

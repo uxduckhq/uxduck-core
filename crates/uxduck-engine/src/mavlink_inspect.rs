@@ -228,9 +228,9 @@ fn parse_cursor(text: &str) -> Result<u64, BadCursor> {
 }
 
 impl Inspector {
-    /// Which ways earlier messages are kept; both by default. The installed
-    /// daemon reads what vehicles sent from its tlogs, so keeps only what it
-    /// sent.
+    /// Which ways earlier messages are kept; both by default. `sent` covers
+    /// what UXDuck relayed too. The installed daemon reads what vehicles sent
+    /// from its tlogs, so keeps only what it sent and relayed.
     #[must_use]
     pub const fn keep_history(mut self, received: bool, sent: bool) -> Self {
         self.keep = (received, sent);
@@ -274,7 +274,7 @@ impl Inspector {
         }
         let keep = match direction {
             InspectDirection::Received => self.keep.0,
-            InspectDirection::Sent => self.keep.1,
+            InspectDirection::Sent | InspectDirection::Relayed => self.keep.1,
         };
         if keep {
             self.seq += 1;
@@ -486,7 +486,8 @@ pub struct Seen {
 }
 
 impl Seen {
-    /// What the inspector shows: received first, then sent, each by name,
+    /// What the inspector shows: received first, then sent, then relayed,
+    /// each by name,
     /// decoded with the vehicle's own dialects, else ArduPilot's, else with
     /// `fallback`.
     #[must_use]
@@ -689,6 +690,30 @@ mod tests {
         assert_eq!(read[1].0, InspectDirection::Sent);
         assert_eq!((read[1].2.count, read[1].2.system_id), (2, 255));
         assert_eq!(read[1].2.payload, [3]);
+    }
+
+    #[test]
+    fn relayed_is_kept_apart_from_sent_and_kept_with_it() {
+        let mut table = Inspector::default().keep_history(false, true);
+        let mut ground = header(33);
+        ground.system_id = 255;
+        ground.component_id = 190;
+        let mut other = header(33);
+        other.system_id = 254;
+        other.component_id = 1;
+        table.record("v", InspectDirection::Sent, ground, &[1], S);
+        table.record("v", InspectDirection::Relayed, other, &[2], 2 * S);
+        let read = table.read(&ids("v"), 2 * S).decode(None).messages;
+        let ways: Vec<_> = read.iter().map(|m| (m.direction, m.system_id)).collect();
+        assert_eq!(
+            ways,
+            [
+                (InspectDirection::Sent, 255),
+                (InspectDirection::Relayed, 254)
+            ]
+        );
+        assert_eq!(page(&table, InspectDirection::Relayed, None, 10).0, [2]);
+        assert_eq!(page(&table, InspectDirection::Sent, None, 10).0, [1]);
     }
 
     #[test]

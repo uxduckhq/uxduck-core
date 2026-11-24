@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "a8232ed99a7dba2a8f2508b8d8d34a2f0160d493",
+  "sourceCommit": "683859cb75910cb9cc7532b82f353f7f3b47055f",
   "licenseReady": true,
   "files": [
     {
@@ -6236,7 +6236,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/inspect.rs",
-      "sha256": "9d903286153637bbd50f201d430f13fd11dec973c60dd7eaac89f9d299f90a04",
+      "sha256": "6a4b1531a3c004919ba8412393f0f31a375f8fd964e00b93b33981cfcc8a4b8e",
       "executable": false
     },
     {
@@ -6466,7 +6466,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/rpc.rs",
-      "sha256": "9d9c35d1c5426602e28255b98fc7b281cfc0ddb1638202ddf8c8f3944b7e7330",
+      "sha256": "656ab6e33a5eba1fc4874c19cb8baaa2cb273fe4793e381c1ff255b47660984a",
       "executable": false
     },
     {
@@ -7071,7 +7071,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/mavlink_inspect.rs",
-      "sha256": "7da3dce21b1b4392f27c6f2d643d2075b9d1b3bc9af70b40658bf76a4980078d",
+      "sha256": "41f2e38f31d769d0a287ea0a634db2ebdc3079bfad1b132abb8e787344587b2c",
       "executable": false
     },
     {
@@ -7391,7 +7391,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/restart.rs",
-      "sha256": "7f30d979b90edcf47e3a26e14cf3761bad1f57ec4abb102f2c107f1ca89f98da",
+      "sha256": "f0bbfdd4e0562920d1ff106dc80a20be3a799a7793c8bab2cbe7c1d8aeaad233",
       "executable": false
     },
     {
@@ -8876,7 +8876,7 @@
     },
     {
       "path": "crates/uxduck/src/daemon/data_plane.rs",
-      "sha256": "d56f4e20c37f269f2410607b7105144ba6d3ccb633da49a3fac561428ad16e3c",
+      "sha256": "71ccdc8a09bcba064a091cd47ec5910718539b99f8aa7bf2991acf14be3488d2",
       "executable": false
     },
     {
@@ -9011,7 +9011,7 @@
     },
     {
       "path": "crates/uxduck/src/inspect.rs",
-      "sha256": "18038a36eba7c357333fe8c532ffecea8d82385d1d16422d14eee4b60a20f692",
+      "sha256": "ea19f30becc7c0bf654a5761ee96769fa0d1ba61aa2a58b9a17a3fa93a7f0512",
       "executable": false
     },
     {
@@ -9736,7 +9736,7 @@
     },
     {
       "path": "packages/protocol/src/generated/types.gen.ts",
-      "sha256": "df39f8bf907a69bac0c9992c6c7efda30b322fc1cb1c103ffe5d222b1d916813",
+      "sha256": "1935da17160af69bc03002f8e14d36c6c3d0017b2c4612a29b903aba4fe47967",
       "executable": false
     },
     {

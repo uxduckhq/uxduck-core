@@ -1724,7 +1724,35 @@ impl Plane {
             at_us,
         );
         crate::diagnostics::record_routing(link_id, peer, frame, header, &routed, at_us);
+        if forward {
+            self.inspect_relayed(&routed, frame);
+        }
         self.send(routed).await;
+    }
+
+    /// Another ground station's frame from a forward, for the inspector of
+    /// each vehicle it is about to reach: recorded only where `send` hands it
+    /// to the vehicle's link.
+    fn inspect_relayed(&self, routed: &Routed, frame: &[u8]) {
+        for send in &routed.sends {
+            if let Some(to_peer) = &send.peer
+                && self.open.get(&send.link_id).is_some_and(|open| {
+                    (open.forward || open.writable)
+                        && !self.session.is_paused(&send.link_id)
+                        && open.handle.diagnostics.as_ref().is_none_or(|d| {
+                            let d = d.borrow();
+                            d.socket_open && d.generation == open.socket_generation
+                        })
+                })
+            {
+                inspect_to(
+                    &self.session,
+                    (&send.link_id, to_peer),
+                    InspectDirection::Relayed,
+                    frame,
+                );
+            }
+        }
     }
 
     /// The ground station asking this onboard computer's clock through the
@@ -2120,7 +2148,12 @@ impl Plane {
                             })
                     }) {
                         let at_us = SystemClock.now_us();
-                        inspect_sent(&self.session, &link_id, &peer, &bytes);
+                        inspect_to(
+                            &self.session,
+                            (&link_id, &peer),
+                            InspectDirection::Sent,
+                            &bytes,
+                        );
                         crate::diagnostics::record(
                             &link_id,
                             Some(&peer),
@@ -2157,17 +2190,22 @@ impl Plane {
     }
 }
 
-/// A frame UXDuck sends, for the inspector: recorded for the vehicle at
-/// its address, or for each of them when several share it, since which
-/// one it is for would need the frame decoded.
-fn inspect_sent(session: &Session, link_id: &str, peer: &str, bytes: &[u8]) {
+/// A frame UXDuck sends or relays to a vehicle, for the inspector: recorded
+/// for the vehicle at its address, or for each of them when several share
+/// it, since which one it is for would need the frame decoded.
+fn inspect_to(
+    session: &Session,
+    (link_id, peer): (&str, &str),
+    direction: InspectDirection,
+    bytes: &[u8],
+) {
     let (Some(header), Some(payload)) = (header(bytes), uxduck_mavlink::framing::payload(bytes))
     else {
         return;
     };
     let at_us = SystemClock.now_us();
     for (_, vehicle_id) in session.vehicles_at_peer(link_id, peer) {
-        crate::inspect::record(vehicle_id, InspectDirection::Sent, header, payload, at_us);
+        crate::inspect::record(vehicle_id, direction, header, payload, at_us);
     }
 }
 

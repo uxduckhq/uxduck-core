@@ -1,5 +1,6 @@
-//! The MAVLink inspector: the latest message of each type a vehicle sent and
-//! UXDuck sent to it, with its rate and fields, polled while the tab is open.
+//! The MAVLink inspector: the latest message of each type a vehicle sent,
+//! UXDuck sent to it and UXDuck relayed to it from another ground station,
+//! with its rate and fields, polled while the tab is open.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,9 @@ pub enum InspectDirection {
     Received,
     /// From UXDuck to the vehicle.
     Sent,
+    /// From another ground station on a forward, relayed by UXDuck to the
+    /// vehicle.
+    Relayed,
 }
 
 /// The latest message of one type, one way.

@@ -9,7 +9,9 @@
 
 use serde_json::{Value, json};
 use uxduck_contracts::convert::settings::settings_dto;
-use uxduck_contracts::dto::inspect::{MavlinkHistoryParams, MavlinkInspectParams};
+use uxduck_contracts::dto::inspect::{
+    InspectDirection, MavlinkHistoryParams, MavlinkInspectParams,
+};
 use uxduck_contracts::dto::settings::{
     AutoDelete, CategoryUsage, DaemonAbout, DaemonRestartParams, LoginItem, LoginItemState,
     Settings as SettingsDto, SettingsUpdateParams, StorageUsage, TaskWakeups, Wakeups,
@@ -191,6 +193,11 @@ fn inspector(engine: &Engine, request: &ClientRequest) -> Result<Value, ApiError
         && params.detailed()
     {
         crate::diagnostics::page_size(params.limit)?;
+        if params.direction == InspectDirection::Relayed {
+            return Err(crate::diagnostics::invalid(
+                "Relayed messages are kept per vehicle. For what arrived on a forward, query its connection with direction received.",
+            ));
+        }
         // A diagnostic cursor freezes the end time; the host validates it.
         if params.before.is_none() || params.to_us.is_some() {
             crate::diagnostics::window(params.from_us, params.to_us, engine.clock.now_us())?;
