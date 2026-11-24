@@ -1,0 +1,70 @@
+UXDuck: PX4 1.17.0 recomputes a mission's altitude setpoints from the current
+item each time its home altitude changes, and a command item has no altitude.
+A home change while a command is the current item, such as the two commands a
+Point gimbal step uploads or a Delay, sets the setpoints to 0 m above sea level.
+The next leg then starts from that height and the vehicle descends to the
+ground in Mission mode. PX4 fixed it on its main branch after 1.17.0 in
+3e396f65e5 (PX4-Autopilot pull request 26662). What follows is that commit
+unchanged, as GitHub gives it:
+
+  https://github.com/PX4/PX4-Autopilot/commit/3e396f65e5e1c343ec6ad09fd761e27a80b72751.patch
+
+Drop this patch when UXDuck builds a PX4 release that has it. The 1.18.0
+pre-releases do.
+
+From 3e396f65e5e1c343ec6ad09fd761e27a80b72751 Mon Sep 17 00:00:00 2001
+From: Marco Hauswirth <58551738+haumarco@users.noreply.github.com>
+Date: Mon, 9 Mar 2026 15:39:21 +0100
+Subject: [PATCH] fix(navigator): fix alt setpoint after home-alt reset
+ (#26662)
+
+fix(navigator): skip mission alt update for non-position items
+---
+ src/modules/navigator/mission_base.cpp | 29 +++++++++++++-------------
+ 1 file changed, 15 insertions(+), 14 deletions(-)
+
+diff --git a/src/modules/navigator/mission_base.cpp b/src/modules/navigator/mission_base.cpp
+index c1262d42b293..8753f3751c2f 100644
+--- a/src/modules/navigator/mission_base.cpp
++++ b/src/modules/navigator/mission_base.cpp
+@@ -1460,25 +1460,26 @@ bool MissionBase::canRunMissionFeasibility()
+ void MissionBase::updateMissionAltAfterHomeChanged()
+ {
+ 	if (_navigator->get_home_position()->update_count > _home_update_counter) {
+-		float new_alt = get_absolute_altitude_for_item(_mission_item);
+-		float altitude_diff = new_alt - _navigator->get_position_setpoint_triplet()->current.alt;
+ 
+-		if (_navigator->get_position_setpoint_triplet()->previous.valid
+-		    && PX4_ISFINITE(_navigator->get_position_setpoint_triplet()->previous.alt)) {
+-			_navigator->get_position_setpoint_triplet()->previous.alt = _navigator->get_position_setpoint_triplet()->previous.alt +
+-					altitude_diff;
+-		}
++		if (item_contains_position(_mission_item)) {
++			const float new_alt = get_absolute_altitude_for_item(_mission_item);
++			const float altitude_diff = new_alt - _navigator->get_position_setpoint_triplet()->current.alt;
++
++			if (_navigator->get_position_setpoint_triplet()->previous.valid
++			    && PX4_ISFINITE(_navigator->get_position_setpoint_triplet()->previous.alt)) {
++				_navigator->get_position_setpoint_triplet()->previous.alt += altitude_diff;
++			}
+ 
+-		_navigator->get_position_setpoint_triplet()->current.alt = _navigator->get_position_setpoint_triplet()->current.alt +
+-				altitude_diff;
++			_navigator->get_position_setpoint_triplet()->current.alt += altitude_diff;
+ 
+-		if (_navigator->get_position_setpoint_triplet()->next.valid
+-		    && PX4_ISFINITE(_navigator->get_position_setpoint_triplet()->next.alt)) {
+-			_navigator->get_position_setpoint_triplet()->next.alt = _navigator->get_position_setpoint_triplet()->next.alt +
+-					altitude_diff;
++			if (_navigator->get_position_setpoint_triplet()->next.valid
++			    && PX4_ISFINITE(_navigator->get_position_setpoint_triplet()->next.alt)) {
++				_navigator->get_position_setpoint_triplet()->next.alt += altitude_diff;
++			}
++
++			_navigator->set_position_setpoint_triplet_updated();
+ 		}
+ 
+-		_navigator->set_position_setpoint_triplet_updated();
+ 		_home_update_counter = _navigator->get_home_position()->update_count;
+ 	}
+ }

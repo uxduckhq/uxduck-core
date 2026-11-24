@@ -6,8 +6,10 @@
 # multicopters, planes, VTOLs and rovers inside PX4.
 #
 # UXDuck's patches (scripts/px4-patches/) are applied first, so a simulation's
-# MAVLink answers this computer only, as UXDuck's ArduPilot builds do, and
-# its timer queue cannot tear and freeze it (a fix PX4 made after 1.17.0).
+# MAVLink answers this computer only, as UXDuck's ArduPilot builds do, its
+# timer queue cannot tear and freeze it, and a home altitude change while a
+# mission's command item is current leaves the mission's altitude setpoints
+# alone (two fixes PX4 made after 1.17.0).
 #
 # On macOS, PX4_ARCH=arm64 or x86_64 builds for that architecture instead,
 # into .cache/simulators/native-<arch>/px4/, which is how the catalogue gets

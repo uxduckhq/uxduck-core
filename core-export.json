@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "c30624c9eaff23669c5acaf7d73647c740dd07d6",
+  "sourceCommit": "e709744a4231141fdd80792aaf0bad401f0889e1",
   "licenseReady": true,
   "files": [
     {
@@ -9950,8 +9950,13 @@
       "executable": false
     },
     {
+      "path": "scripts/px4-patches/mission-altitude-after-home-change.patch",
+      "sha256": "183abe9fd7a7fe9bacabcaa30a293edfb871b224da465c90bf3eab85bef3cdd6",
+      "executable": false
+    },
+    {
       "path": "scripts/px4-sitl.sh",
-      "sha256": "cf7038b530ee8d62620bb48119a9de8dd904e81fff92b84207a81429442a49a0",
+      "sha256": "6e6724645b03ffe35f00654cad700895f8e8e26561765f5eeb067e44090ccb82",
       "executable": true
     },
     {
