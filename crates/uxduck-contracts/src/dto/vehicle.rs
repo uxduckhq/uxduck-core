@@ -426,6 +426,11 @@ pub struct ConnectionSample {
     /// Connections list says: absent while it was up.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub down: bool,
+    /// UXDuck heard the vehicle on it then but the vehicle did not answer
+    /// on it, as its Connections list says "Receiving only": absent
+    /// otherwise, and while it was down.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub receiving_only: bool,
     /// MAVLink's round trip on it, the median of the last 5 s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round_trip_ms: Option<f64>,

@@ -5699,6 +5699,12 @@ export type ConnectionSample = {
      */
     receivedBps?: number | null;
     /**
+     * UXDuck heard the vehicle on it then but the vehicle did not answer
+     * on it, as its Connections list says "Receiving only": absent
+     * otherwise, and while it was down.
+     */
+    receivingOnly?: boolean;
+    /**
      * The noise the radio on the other end hears, the same way.
      */
     remoteNoisePercent?: number | null;

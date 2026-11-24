@@ -55,14 +55,17 @@ impl Engine {
             else {
                 continue;
             };
+            let mut routes = vehicle
+                .connections
+                .iter()
+                .flat_map(|c| &c.routes)
+                .filter(|r| r.link_id == reading.link_id);
+            let up = routes.clone().any(|r| r.reachable);
             let sample = ConnectionSample {
                 time_us: now_us,
                 in_use: route_in_use(vehicle).is_some_and(|r| r.link_id == reading.link_id),
-                down: !vehicle
-                    .connections
-                    .iter()
-                    .flat_map(|c| &c.routes)
-                    .any(|r| r.link_id == reading.link_id && r.reachable),
+                down: !up,
+                receiving_only: up && !routes.any(|r| r.reachable && r.writable),
                 round_trip_ms: reading.health.round_trip_ms,
                 loss_percent: reading.health.loss_percent,
                 age_ms: reading.health.age_ms,
