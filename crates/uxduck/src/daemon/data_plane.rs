@@ -957,6 +957,9 @@ impl Plane {
     /// ([`not_pinged`]). Its `ts1` is this plane's monotonic clock. The
     /// vehicle's onboard computers answer the same request with their clocks
     /// (S356), and one that sends from an address of its own is asked there.
+    /// The link health tracker is told of a pause apart from why a vehicle
+    /// is not pinged, so a paused simulator nobody supervises keeps its loss
+    /// (UXD-349).
     fn time_syncs(&mut self) -> Vec<Effect> {
         let gcs = self.gcs.load(Ordering::Relaxed);
         let now_us = self.now_mono_us();
@@ -972,11 +975,9 @@ impl Plane {
         let mut effects = Vec::new();
         for (address, vehicle_id) in addresses {
             let link = self.open.get(&address.0).map(|o| (o.writable, o.forward));
-            let why = not_pinged(
-                link,
-                self.withheld.contains(&vehicle_id),
-                self.session.is_paused(&address.0),
-            );
+            let paused = self.session.is_paused(&address.0);
+            self.health.paused(&address, paused, now_us);
+            let why = not_pinged(link, self.withheld.contains(&vehicle_id), paused);
             if let Some(why) = why {
                 self.health.not_asked(&address, why);
                 continue;
@@ -2597,6 +2598,84 @@ mod tests {
             round_trip < 20.0,
             "timed from its arrival, not 60 ms later: {round_trip} ms"
         );
+    }
+
+    /// UXD-349: a paused simulator nobody supervises is not pinged because
+    /// nobody supervises it, and its pause still is not lost. It climbed to
+    /// 100 % while paused and read that until it resumed.
+    #[tokio::test]
+    async fn a_paused_simulator_nobody_supervises_keeps_its_loss() {
+        use crate::adapters::system::SystemClock;
+        use std::time::Duration;
+        use uxduck_engine::runtime::Clock;
+        use uxduck_mavlink::sim::heartbeat_frame;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut plane, _commands) = plane(dir.path());
+        let (events, _received) = mpsc::channel(8);
+        plane.open(listening_at("127.0.0.1"), &events).await;
+        let peer = "127.0.0.1:14550";
+        let address = ("li1".to_owned(), peer.to_owned(), 1);
+        let later = |plane: &mut Plane, s: u64| plane.started -= Duration::from_secs(s);
+        later(&mut plane, 20);
+        // Ten seconds heard at 10 Hz, every tenth frame lost.
+        let start = plane.now_mono_us() - 10_000_000;
+        let mut sequence = 0u8;
+        for i in 0..100 {
+            let frame = heartbeat_frame(1, 1, sequence);
+            plane.health.heard(&address, &frame, 1, start + i * 100_000);
+            sequence = sequence.wrapping_add(if sequence % 9 == 8 { 2 } else { 1 });
+        }
+        let frame = heartbeat_frame(1, 1, sequence);
+        plane
+            .frame("li1", peer, &frame, false, SystemClock.now_us())
+            .await;
+        sequence = sequence.wrapping_add(1);
+        let vehicle = plane
+            .session
+            .vehicle_at("li1", peer, 1)
+            .map(str::to_owned)
+            .expect("a vehicle");
+        let before = plane
+            .health
+            .report(&address, plane.now_mono_us())
+            .loss_percent
+            .unwrap();
+        assert!((5.0..15.0).contains(&before), "about a tenth, {before}");
+
+        plane.withheld.insert(vehicle);
+        plane.session.pause("li1", true, SystemClock.now_us());
+        assert!(plane.time_syncs().is_empty(), "no ping while unsupervised");
+        later(&mut plane, 30);
+        assert!(plane.time_syncs().is_empty());
+        let paused = plane.health.report(&address, plane.now_mono_us());
+        assert_eq!(
+            paused.round_trip_missing,
+            Some(RoundTripMissing::Unsupervised),
+            "the note still says nobody supervises it"
+        );
+        assert_eq!(
+            paused.loss_percent,
+            Some(before),
+            "30 s paused and unsupervised keeps what it was"
+        );
+
+        plane.session.pause("li1", false, SystemClock.now_us());
+        assert!(plane.time_syncs().is_empty(), "still unsupervised");
+        let resumed = plane.now_mono_us();
+        for i in 0..10 {
+            let frame = heartbeat_frame(1, 1, sequence);
+            plane
+                .health
+                .heard(&address, &frame, 1, resumed + i * 100_000);
+            sequence = sequence.wrapping_add(1);
+        }
+        let back = plane
+            .health
+            .report(&address, resumed + 1_000_000)
+            .loss_percent
+            .unwrap();
+        assert!(back < 1.0, "the pause is not lost once it resumes, {back}");
     }
 
     fn connection(id: &str, kind: &str, port: u16) -> Link {

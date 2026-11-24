@@ -131,6 +131,9 @@ struct Health {
     last_reply_us: Option<u64>,
     /// Why it is not asked now.
     not_asked: Option<RoundTripMissing>,
+    /// Whether its simulator is paused, whatever the reason it is not
+    /// asked: one nobody supervises is paused all the same (UXD-349).
+    paused: bool,
     /// While nothing is heard from it past the silence: how many frames
     /// each second of it counts as lost, and up to when they are counted.
     silent: Option<Silent>,
@@ -218,10 +221,6 @@ impl Tracker {
         }
         let health = self.addresses.entry(address.clone()).or_default();
         let was = health.not_asked.take();
-        if was == Some(RoundTripMissing::Paused) {
-            health.resumed_us = Some(now_us);
-            health.silent = None;
-        }
         if was.is_some() || health.asked_since_us.is_none() {
             health.asked_since_us = Some(now_us);
         }
@@ -243,13 +242,27 @@ impl Tracker {
         health.round_trips.clear();
     }
 
+    /// Whether `address`'s simulator is paused now, told apart from why it
+    /// is not asked, since a paused simulator nobody supervises is not asked
+    /// because nobody supervises it (UXD-349). While it is paused its loss
+    /// stays what it was when it was last heard. Resuming counts as heard,
+    /// so its pause is never a silence.
+    pub fn paused(&mut self, address: &Address, paused: bool, now_us: u64) {
+        let health = self.addresses.entry(address.clone()).or_default();
+        if health.paused && !paused {
+            health.resumed_us = Some(now_us);
+            health.silent = None;
+        }
+        health.paused = paused;
+    }
+
     /// How the link to `address` is doing now.
     pub fn report(&mut self, address: &Address, now_us: u64) -> LinkHealth {
         let Some(health) = self.addresses.get_mut(address) else {
             return LinkHealth::default();
         };
         // Paused, its loss is what it was when it was last heard.
-        let at_us = if health.not_asked == Some(RoundTripMissing::Paused) {
+        let at_us = if health.paused {
             health.last_heard_us.unwrap_or(now_us).min(now_us)
         } else {
             now_us
@@ -378,9 +391,7 @@ impl Health {
             return;
         };
         let since_us = heard_us.max(self.resumed_us.unwrap_or(0));
-        if self.not_asked == Some(RoundTripMissing::Paused)
-            || now_us.saturating_sub(since_us) < silence_us
-        {
+        if self.paused || now_us.saturating_sub(since_us) < silence_us {
             return;
         }
         let silent = self.silent.get_or_insert_with(|| {
@@ -945,11 +956,13 @@ mod tests {
             "about a tenth lost, {before}"
         );
         tracker.not_asked(&a, RoundTripMissing::Paused);
+        tracker.paused(&a, true, 10_000_000);
         assert_eq!(
             tracker.report(&a, 40_000_000).loss_percent,
             Some(before),
             "30 s paused keeps what it was"
         );
+        tracker.paused(&a, false, 40_000_000);
         tracker.asked(&a, 40_000_000);
         assert_eq!(
             tracker.report(&a, 40_500_000).loss_percent,
@@ -968,6 +981,8 @@ mod tests {
             "heard again after the pause"
         );
         tracker.not_asked(&a, RoundTripMissing::Paused);
+        tracker.paused(&a, true, 41_500_000);
+        tracker.paused(&a, false, 60_000_000);
         tracker.asked(&a, 60_000_000);
         assert_eq!(
             tracker.report(&a, 62_500_000).loss_percent,
@@ -976,6 +991,43 @@ mod tests {
         );
         let silent = tracker.report(&a, 64_000_000).loss_percent.unwrap();
         assert!(silent > 0.0, "silent after it resumed, {silent}");
+    }
+
+    /// UXD-349: a paused simulator nobody supervises is not asked because
+    /// nobody supervises it, and is paused all the same. It climbed to
+    /// 100 % while paused and read that until it resumed.
+    #[test]
+    fn a_paused_simulator_nobody_supervises_keeps_its_loss() {
+        let mut tracker = Tracker::default();
+        let a = address();
+        let mut sequence = 0u8;
+        let mut at = 0;
+        while at < 10_000_000 {
+            tracker.heard(&a, &heartbeat_frame(1, 1, sequence), GCS, at);
+            sequence = sequence.wrapping_add(if sequence % 9 == 8 { 2 } else { 1 });
+            at += 100_000;
+        }
+        let before = tracker.report(&a, 10_000_000).loss_percent.unwrap();
+        tracker.not_asked(&a, RoundTripMissing::Unsupervised);
+        tracker.paused(&a, true, 10_000_000);
+        assert_eq!(
+            tracker.report(&a, 40_000_000).loss_percent,
+            Some(before),
+            "30 s paused and unsupervised keeps what it was"
+        );
+        tracker.paused(&a, false, 40_000_000);
+        tracker.not_asked(&a, RoundTripMissing::Unsupervised);
+        let mut at = 40_000_000;
+        while at < 41_000_000 {
+            tracker.heard(&a, &heartbeat_frame(1, 1, sequence), GCS, at);
+            sequence = sequence.wrapping_add(1);
+            at += 100_000;
+        }
+        assert_eq!(
+            tracker.report(&a, 41_000_000).loss_percent,
+            Some(0.0),
+            "resumed, still unsupervised, and the pause not lost"
+        );
     }
 
     /// The session's time to not responding has a floor: a link heard only
