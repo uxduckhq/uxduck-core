@@ -20,6 +20,13 @@ pub enum AccountAction {
     Get,
     /// Recorded flight-log summaries; a read-only `AccountFlights`.
     Flights,
+    /// The account's video (ADR-0069 P14); a read-only `AccountRecordings`.
+    Recordings,
+    /// One recording deleted from the account (ADR-0069 P14).
+    DeleteRecording {
+        device_id: String,
+        id: String,
+    },
     /// A flight log in the account joined on this computer for a replay
     /// (ADR-0039 R12): answered with `{"path": …}`.
     ReplayLog {
@@ -178,6 +185,11 @@ fn action_of(engine: &Engine, request: ClientRequest) -> Result<AccountAction, A
     Ok(match request {
         ClientRequest::AccountGet(_) => AccountAction::Get,
         ClientRequest::AccountFlights(_) => AccountAction::Flights,
+        ClientRequest::AccountRecordings(_) => AccountAction::Recordings,
+        ClientRequest::AccountDeleteRecording(p) => AccountAction::DeleteRecording {
+            device_id: p.device_id,
+            id: p.id,
+        },
         ClientRequest::AccountVersions(p) => AccountAction::Versions {
             entity: p.entity,
             id: p.id,
@@ -254,6 +266,7 @@ pub(crate) fn handle(
         action,
         AccountAction::Get
             | AccountAction::Flights
+            | AccountAction::Recordings
             | AccountAction::Versions { .. }
             | AccountAction::Environment
             | AccountAction::Shared

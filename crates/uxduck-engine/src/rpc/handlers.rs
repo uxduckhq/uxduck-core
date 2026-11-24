@@ -405,6 +405,8 @@ pub(crate) fn handle(
         )),
         request @ (ClientRequest::AccountGet(_)
         | ClientRequest::AccountFlights(_)
+        | ClientRequest::AccountRecordings(_)
+        | ClientRequest::AccountDeleteRecording(_)
         | ClientRequest::AccountVersions(_)
         | ClientRequest::AccountEnvironment(_)
         | ClientRequest::AccountSetEnvironment(_)

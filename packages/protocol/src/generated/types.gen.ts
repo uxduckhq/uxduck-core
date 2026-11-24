@@ -95,6 +95,47 @@ export type AccountNameParams = {
     name: string;
 };
 
+/**
+ * One recording in the account, by the computer that stored it.
+ */
+export type AccountRecording = {
+    bytes: number;
+    computer?: string | null;
+    deviceId: string;
+    firstUs: number | null;
+    id: string;
+    lastUs: number | null;
+    /**
+     * Kept while its camera was shared from away, until the camera's own
+     * recording replaces it.
+     */
+    live?: boolean;
+};
+
+/**
+ * What deleting a recording freed in the account.
+ */
+export type AccountRecordingDeleted = {
+    bytes: number;
+};
+
+/**
+ * `account/deleteRecording`: one of the account's recordings.
+ */
+export type AccountRecordingParams = {
+    deviceId: string;
+    id: string;
+};
+
+/**
+ * The account's video (ADR-0069 P14): the camera recordings its computers
+ * stored, and the live recordings kept while a camera is shared from away,
+ * newest first.
+ */
+export type AccountRecordings = {
+    recordings: Array<AccountRecording>;
+};
+
 export type AccountSession = {
     /**
      * The computer's name, given by UXDuck Desktop; none for a browser.
@@ -4062,6 +4103,12 @@ export type ClientRequest = {
 } | {
     method: 'account/flights';
     params: Empty;
+} | {
+    method: 'account/recordings';
+    params: Empty;
+} | {
+    method: 'account/deleteRecording';
+    params: AccountRecordingParams;
 } | {
     method: 'account/versions';
     params: AccountVersionsParams;

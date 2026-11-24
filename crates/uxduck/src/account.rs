@@ -10,7 +10,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use uxduck_contracts::dto::account::{AccountFlights, AccountState};
+use uxduck_contracts::dto::account::{
+    AccountFlights, AccountRecordingDeleted, AccountRecordings, AccountState,
+};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_engine::account::{AccountAction, AccountOrder, AccountPort};
 use uxduck_engine::runtime::Credentials as _;
@@ -496,6 +498,59 @@ impl Account {
                     ));
                 }
                 to_json(&listed)
+            }
+            AccountAction::Recordings => {
+                let token = session.signed_in()?;
+                let answer = client
+                    .get(format!("{api}/v1/recordings"))
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .map_err(|_| unreachable())?;
+                let listed = refused_or(answer)
+                    .await?
+                    .json::<AccountRecordings>()
+                    .await
+                    .map_err(|_| {
+                        ApiError::new(
+                            ErrorKind::Internal,
+                            "UXDuck couldn't read the account's video. Try again, or update UXDuck.",
+                        )
+                    })?;
+                if self.token().as_deref() != Some(token.as_str()) {
+                    return Err(ApiError::new(
+                        ErrorKind::InvalidValue,
+                        "The signed-in account changed. Open the list again.",
+                    ));
+                }
+                to_json(&listed)
+            }
+            AccountAction::DeleteRecording { device_id, id } => {
+                let token = session.signed_in()?;
+                let mut url = reqwest::Url::parse(&format!("{api}/v1/recordings/"))
+                    .map_err(|e| ApiError::new(ErrorKind::Internal, e.to_string()))?;
+                url.path_segments_mut()
+                    .map_err(|()| ApiError::new(ErrorKind::Internal, "the server's address"))?
+                    .pop_if_empty()
+                    .push(&device_id)
+                    .push(&id);
+                let answer = client
+                    .delete(url)
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .map_err(|_| unreachable())?;
+                let deleted = refused_or(answer)
+                    .await?
+                    .json::<AccountRecordingDeleted>()
+                    .await
+                    .map_err(|_| {
+                        ApiError::new(
+                            ErrorKind::Internal,
+                            "The video was deleted, but UXDuck couldn't read the answer. Open the list again.",
+                        )
+                    })?;
+                to_json(&deleted)
             }
             action @ (AccountAction::Sessions
             | AccountAction::SignOutSession { .. }

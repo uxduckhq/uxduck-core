@@ -804,6 +804,12 @@ fn check(name: &str) {
         ("result", "account_flights") => {
             round_trip::<uxduck_contracts::dto::account::AccountFlights>(name, &json);
         }
+        ("result", "account_recordings") => {
+            round_trip::<uxduck_contracts::dto::account::AccountRecordings>(name, &json);
+        }
+        ("result", "account_deleteRecording") => {
+            round_trip::<uxduck_contracts::dto::account::AccountRecordingDeleted>(name, &json);
+        }
         ("result", "account_versions") => {
             round_trip::<uxduck_contracts::dto::sync::AccountVersions>(name, &json);
         }

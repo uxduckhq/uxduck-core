@@ -1493,6 +1493,15 @@ pub enum ClientRequest {
     /// Result: `AccountFlights`. Tokens stay with the daemon.
     #[serde(rename = "account/flights")]
     AccountFlights(Empty),
+    /// The account's video, camera and live recordings (ADR-0069 P14).
+    /// Needs `read`. Result: `AccountRecordings`.
+    #[serde(rename = "account/recordings")]
+    AccountRecordings(Empty),
+    /// Deletes one recording from the account (ADR-0069 P14): its bytes
+    /// leave the allowance at once, and the computer keeps its own copy.
+    /// Needs `config`. Result: `AccountRecordingDeleted`.
+    #[serde(rename = "account/deleteRecording")]
+    AccountDeleteRecording(crate::dto::account::AccountRecordingParams),
     /// Every copy of one synced entity the account was sent (C5), newest
     /// first, the ones that lost too. Needs `read`. Result: `AccountVersions`.
     #[serde(rename = "account/versions")]
@@ -2468,7 +2477,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 428] = [
+    pub const METHODS: [&'static str; 430] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2705,6 +2714,8 @@ impl ClientRequest {
         "sim/faults",
         "account/get",
         "account/flights",
+        "account/recordings",
+        "account/deleteRecording",
         "account/versions",
         "account/environment",
         "account/setEnvironment",

@@ -1,0 +1,21 @@
+{
+  "recordings": [
+    {
+      "deviceId": "dv0000000000000001",
+      "computer": "Field laptop",
+      "id": "vr1",
+      "firstUs": 1792252800000000,
+      "lastUs": 1792253400000000,
+      "bytes": 300000000,
+      "live": false
+    },
+    {
+      "deviceId": "dv0000000000000001",
+      "id": "lv1",
+      "firstUs": 1792253400000000,
+      "lastUs": 1792253460000000,
+      "bytes": 40000000,
+      "live": true
+    }
+  ]
+}

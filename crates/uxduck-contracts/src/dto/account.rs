@@ -104,6 +104,51 @@ pub struct AccountFlight {
     pub bytes: u64,
 }
 
+/// The account's video (ADR-0069 P14): the camera recordings its computers
+/// stored, and the live recordings kept while a camera is shared from away,
+/// newest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRecordings {
+    pub recordings: Vec<AccountRecording>,
+}
+
+/// One recording in the account, by the computer that stored it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRecording {
+    pub device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
+    pub id: String,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub first_us: Option<u64>,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_us: Option<u64>,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    /// Kept while its camera was shared from away, until the camera's own
+    /// recording replaces it.
+    #[serde(default)]
+    pub live: bool,
+}
+
+/// `account/deleteRecording`: one of the account's recordings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRecordingParams {
+    pub device_id: String,
+    pub id: String,
+}
+
+/// What deleting a recording freed in the account.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRecordingDeleted {
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+}
+
 /// Emails a one-time code to sign in with; an account is made on the first
 /// sign-in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

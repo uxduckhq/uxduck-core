@@ -446,6 +446,9 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "journal/import",
     "account/get",
     "account/flights",
+    // The account's video, which the person keeps or deletes (ADR-0069 P14).
+    "account/recordings",
+    "account/deleteRecording",
     "account/versions",
     "account/environment",
     "account/setEnvironment",

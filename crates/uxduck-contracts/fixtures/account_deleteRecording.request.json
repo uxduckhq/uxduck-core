@@ -1,0 +1,1 @@
+{ "method": "account/deleteRecording", "params": { "deviceId": "dv0000000000000001", "id": "vr1" } }
