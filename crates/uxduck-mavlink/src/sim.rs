@@ -3122,6 +3122,44 @@ impl FakeVehicle {
             && (!self.radio.listed || crate::fake_radio::FakeRadio::calibrated(&self.parameters))
     }
 
+    /// What it says as it refuses to arm for a failed check, before its
+    /// acknowledgement. `ArduPilot` says each failed check again at once,
+    /// as `Arm: …` where its 30 s repeat says `PreArm: …`, and PX4's
+    /// commander says `Arming denied: …`, both as critical (seen on
+    /// `ArduPlane` SITL and PX4 1.17 SIH, 2026-11-22). Its 30 s repeat goes
+    /// on as it was. An `ArduPilot` fake names only the checks its repeat
+    /// names, so it says nothing while a calibration runs or before
+    /// `prearm_from_s`, and neither kind says anything when it refuses
+    /// with every check passing (`refuses_arm`).
+    fn says_why_it_refuses_to_arm(&mut self) -> Vec<Vec<u8>> {
+        if self.ready() {
+            return Vec::new();
+        }
+        let said: Vec<(String, (u16, u8))> = if self.px4.is_some() {
+            // Longer than one `STATUSTEXT` holds: two parts that come back
+            // as one.
+            let denied = "Arming denied: Resolve system health failures first";
+            vec![(denied[..50].into(), (8, 0)), (denied[50..].into(), (8, 1))]
+        } else {
+            [
+                self.compasses.as_ref().and_then(FakeCompasses::prearm),
+                (self.radio.listed && !crate::fake_radio::FakeRadio::calibrated(&self.parameters))
+                    .then_some("RC not calibrated"),
+                self.accel.prearm(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|reason| (format!("Arm: {reason}"), (0, 0)))
+            .collect()
+        };
+        said.iter()
+            .map(|(text, part)| {
+                let sequence = self.next();
+                status_text_frame(self.system_id, sequence, 2, text, *part)
+            })
+            .collect()
+    }
+
     /// The frame to send once a second.
     pub fn heartbeat(&mut self) -> Vec<u8> {
         let sequence = self.next();
@@ -3465,6 +3503,9 @@ impl FakeVehicle {
                 && !self.ignores_commands
                 && let Some(result) = self.obey(command, param1, param2, param7)
             {
+                if command == 400 && param1 > 0.5 && result != 0 {
+                    replies.extend(self.says_why_it_refuses_to_arm());
+                }
                 let sequence = self.next();
                 replies.push(command_ack_frame(
                     self.system_id,
@@ -4062,6 +4103,112 @@ mod esc_tests {
             vehicle.booted_at_s
         );
         assert!(value(&vehicle).abs() < f32::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod refused_arm_tests {
+    #![allow(clippy::unwrap_used, reason = "test")]
+
+    use super::*;
+
+    const ARM: [f32; 7] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    const FORCED: [f32; 7] = [1.0, 21_196.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+
+    /// What it answers an arm with: what it says, each with its severity,
+    /// and then its acknowledgement's result.
+    fn asked_to_arm(vehicle: &mut FakeVehicle, params: [f32; 7]) -> (Vec<(u8, String)>, u8) {
+        let replies = vehicle.answer(&command_long_frame(255, 1, 1, 0, 400, params, 0));
+        let mut said = Vec::new();
+        let mut result = None;
+        for reply in &replies {
+            match decode(reply).unwrap().message {
+                Decoded::StatusText { severity, text, .. } => {
+                    assert!(result.is_none(), "it says why before it acknowledges");
+                    said.push((severity, text));
+                }
+                Decoded::CommandAck {
+                    command: 400,
+                    result: answered,
+                    ..
+                } => result = Some(answered),
+                _ => {}
+            }
+        }
+        (said, result.unwrap())
+    }
+
+    fn texts(frames: &[Vec<u8>]) -> Vec<String> {
+        frames
+            .iter()
+            .filter_map(|frame| match decode(frame).unwrap().message {
+                Decoded::StatusText { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Refused for failed checks, it says each one at once as `Arm: …`, as
+    /// `ArduPilot` does, however lately its 30 s repeat said them. Silent
+    /// then, an arm asked just after a repeat got no "cannot arm" notice
+    /// for 30 s or at all (`setup.spec.ts` in Full CI, 2026-11-22).
+    #[test]
+    fn refused_for_a_failed_check_it_says_which_at_once() {
+        let mut vehicle = FakeVehicle::new(1, 1);
+        vehicle.add_compasses(2, false);
+        vehicle.add_radio(false);
+        vehicle.add_accel(false);
+        let _ = vehicle.telemetry(2.0);
+        assert_eq!(
+            texts(&vehicle.status_texts(2.0)),
+            [
+                "PreArm: Compass not calibrated",
+                "PreArm: RC not calibrated",
+                "PreArm: 3D Accel calibration needed",
+            ]
+        );
+        let (said, result) = asked_to_arm(&mut vehicle, ARM);
+        assert_eq!(
+            said,
+            [
+                (2, "Arm: Compass not calibrated".to_owned()),
+                (2, "Arm: RC not calibrated".to_owned()),
+                (2, "Arm: 3D Accel calibration needed".to_owned()),
+            ]
+        );
+        assert_eq!(result, 2);
+        // Its repeat keeps its own 30 s.
+        assert!(vehicle.status_texts(2.2).is_empty());
+        assert_eq!(texts(&vehicle.status_texts(32.0)).len(), 3);
+    }
+
+    /// A PX4 refuses in its commander's words, which take two parts.
+    #[test]
+    fn a_px4_refusing_to_arm_says_arming_denied() {
+        let mut vehicle = FakeVehicle::new(1, 1);
+        vehicle.add_accel(false);
+        vehicle.make_px4(false, false);
+        let (said, result) = asked_to_arm(&mut vehicle, ARM);
+        assert!(said.iter().all(|(severity, _)| *severity == 2), "{said:?}");
+        let whole: String = said.iter().map(|(_, part)| part.as_str()).collect();
+        assert_eq!(whole, "Arming denied: Resolve system health failures first");
+        assert_eq!(result, 2);
+    }
+
+    /// It says nothing when it arms, forced or with its checks passing, and
+    /// nothing when it refuses with no check failing.
+    #[test]
+    fn with_no_failed_check_to_name_it_only_acknowledges() {
+        let mut ready = FakeVehicle::new(1, 1);
+        assert_eq!(asked_to_arm(&mut ready, ARM), (Vec::new(), 0));
+
+        let mut forced = FakeVehicle::new(1, 1);
+        forced.add_compasses(2, false);
+        assert_eq!(asked_to_arm(&mut forced, FORCED), (Vec::new(), 0));
+
+        let mut refusing = FakeVehicle::new(1, 1);
+        refusing.refuses_arm = true;
+        assert_eq!(asked_to_arm(&mut refusing, ARM), (Vec::new(), 2));
     }
 }
 

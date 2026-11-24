@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "0f6e6661e49b4d825fecb71d48f85e8b5fde7262",
+  "sourceCommit": "199b2ffd6b8eb9a7f96168047ebed676292bce81",
   "licenseReady": true,
   "files": [
     {
@@ -8201,7 +8201,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/sim.rs",
-      "sha256": "a07a7a2ff9f3067ea61254d7157f24be0a1eaeb37aeda888de54ef70c7a44ff3",
+      "sha256": "8001a4148a2c1d7d3c40f503e0ad400db7f86cedade36fe2cbc33c165509bdb8",
       "executable": false
     },
     {
