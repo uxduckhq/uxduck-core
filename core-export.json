@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "199b2ffd6b8eb9a7f96168047ebed676292bce81",
+  "sourceCommit": "8b04e158122b83c56647d3ce5b3bf83f49f23ff4",
   "licenseReady": true,
   "files": [
     {
@@ -8791,7 +8791,7 @@
     },
     {
       "path": "crates/uxduck/src/companions.rs",
-      "sha256": "b2a20e3a0bb0c21e40d53e31f26cae845d4b4a6311afd3011380eed2cd235bb0",
+      "sha256": "53eec1320cc077251d3b7c08dd0beb1ad1c4eab1bd70ede1704ee32b0f063f68",
       "executable": false
     },
     {

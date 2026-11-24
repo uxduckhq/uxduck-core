@@ -2428,14 +2428,40 @@ mod tests {
         }
     }
 
-    /// Serves the sshd configuration in `dir` on `port`, or on a port the
-    /// system picks, and checks that the server answering there sends the
-    /// host key at `host_key`.
+    /// A listener on a port of its own: a distinct port in 20000 to 29999,
+    /// outside the platforms' default ephemeral ranges, as the daemon tests'
+    /// `free_port` gives. A port the system picks goes back to the system
+    /// when its listener closes, and the next listener that asks for any
+    /// port can be given it. Tests here stop a server and then expect its
+    /// port to refuse, or start another server on it, and another test's
+    /// server that was given the port answers in its place. Each test
+    /// process starts at its own place in the range.
+    fn own_listener() -> std::net::TcpListener {
+        static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        let start = u16::try_from(std::process::id() % 40).unwrap() * 250;
+        loop {
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert!(n < 10_000, "the test sshd port range is exhausted");
+            let port = 20_000 + (start + n) % 10_000;
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => return listener,
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+                Err(error) => panic!("could not listen on test sshd port {port}: {error}"),
+            }
+        }
+    }
+
+    /// Serves the sshd configuration in `dir` on `port`, or on a port of its
+    /// own, and checks that the server answering there sends the host key at
+    /// `host_key`.
     fn serve(dir: tempfile::TempDir, port: Option<u16>, host_key: &Path) -> Server {
         use std::os::fd::OwnedFd;
         use std::sync::atomic::{AtomicBool, Ordering};
-        let listener = std::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
-            .expect("the test's sshd port is free");
+        let listener = match port {
+            Some(port) => std::net::TcpListener::bind(("127.0.0.1", port))
+                .expect("the test's sshd port is free"),
+            None => own_listener(),
+        };
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
         let config = dir.path().join("sshd_config");
@@ -3205,11 +3231,7 @@ mod tests {
     /// password cannot help.
     #[tokio::test]
     async fn a_closed_port_reads_as_unreachable() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = own_listener().local_addr().unwrap().port();
         let keys = tempfile::tempdir().unwrap();
         let config = quiet_config(keys.path());
         let computer = CompanionComputer {
