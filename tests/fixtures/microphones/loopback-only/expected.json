@@ -1,0 +1,12 @@
+{
+  "microphones": [
+    {
+      "id": "card:Loopback",
+      "name": "Loopback PCM",
+      "card": "Loopback",
+      "usb": false,
+      "alsa": "hw:CARD=Loopback,DEV=0"
+    }
+  ],
+  "automatic": "card:Loopback"
+}

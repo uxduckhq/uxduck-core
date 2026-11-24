@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "0956ab551a02ed7b32a5008f6904224808e8679d",
+  "sourceCommit": "ab8d405b66834d62f40fbb6b00c6ac95f65c115a",
   "licenseReady": true,
   "files": [
     {
@@ -9356,7 +9356,7 @@
     },
     {
       "path": "crates/uxduck/src/video/companion.rs",
-      "sha256": "91cd4440be5781b6b9c59bc771bf7b8689e0bc3c7a51463d4004b80e51ad001a",
+      "sha256": "839a3790d688a129f2e536a134285881d62a920dcb11be64ccff001dc7f94491",
       "executable": false
     },
     {
@@ -9366,7 +9366,7 @@
     },
     {
       "path": "crates/uxduck/src/video/companion/microphones/tests.rs",
-      "sha256": "140e3c8c5adbabf31faf05d5febb0994e938a29b01a7a5d0ff0a8a0a1de52366",
+      "sha256": "8c255e7c93285f90031fa5395def3178ec2c4a6d90c706f7a35d2e1be8029458",
       "executable": false
     },
     {
@@ -9376,7 +9376,7 @@
     },
     {
       "path": "crates/uxduck/src/video/companion/sound/tests.rs",
-      "sha256": "05ff3d3d85d2bf3d3c7208ee17928bb70af9799bc62d230e82a63a976d7b60a7",
+      "sha256": "2ded0c7ff134d7b6198f22a203e06195bce45ff22f6f0ed60d8f5299487f59c7",
       "executable": false
     },
     {
@@ -9436,7 +9436,7 @@
     },
     {
       "path": "crates/uxduck/src/video/onboard_recording/tests.rs",
-      "sha256": "300cf77efd4522e9b8a0dd8bbd77e426ce9581f7620cba1f3ed9f01ad8c6fd57",
+      "sha256": "42d871390ec7f6a87ae24be95011f700d507ea54b958d611cced7f29efa6620b",
       "executable": false
     },
     {
@@ -9466,7 +9466,7 @@
     },
     {
       "path": "crates/uxduck/src/video/sender.rs",
-      "sha256": "1161f841a0b5ef8d8338f0708b07e1acf40655a9c8a951b4d07b10f9f891ffad",
+      "sha256": "7d448a8bfec5ebb332ef2f3579f16e208599c83767d40bb9fe34b8ef88df4a13",
       "executable": false
     },
     {
@@ -9486,7 +9486,7 @@
     },
     {
       "path": "crates/uxduck/src/video/sender/mediamtx/tests.rs",
-      "sha256": "083bc2e3300959863a44394df3096f314ec16d7df1a6a144ba53148daa25dc7b",
+      "sha256": "fe68271a27e7dc8f99656697437ab097f2b8ca06072bfea8edb9de1942baf6d6",
       "executable": false
     },
     {
@@ -9526,7 +9526,7 @@
     },
     {
       "path": "crates/uxduck/src/video/sender/tests.rs",
-      "sha256": "8ee503be12bff5b3905409a0e81a7e5104b618661dda63759e333eb4610f0c16",
+      "sha256": "5f12ea10508fb1689ddf458a28ed425755e3e136278298139a6bd2a3b4dbe1b9",
       "executable": false
     },
     {
@@ -9972,6 +9972,151 @@
     {
       "path": "scripts/sitl-patches/older/local-only-network-4.5.patch",
       "sha256": "897337d47a06abb1b80568fd881aa4f35da2a19c6357af95e23ffea6dbbbca43",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/README.md",
+      "sha256": "08a4089483863e2748fccd7240a08032968440d02481c331b86dc6f93d0eb689",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/loopback-only/devices.json",
+      "sha256": "bb0acc6fe32e5d09f0fca75404eaac1dc1f368eea3850b2f2a828ce4b6f78182",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/loopback-only/expected.json",
+      "sha256": "cec051455a324dfb711e38e4f84a7b897faa0d1940e6f9e9b603a28782806d0f",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/loopback-only/proc/asound/card0/id",
+      "sha256": "c21136ad2cb9a18b87700e27b27892909c32add9b2a23363e01bdcfcad262f5c",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/loopback-only/proc/asound/card0/pcm0c/info",
+      "sha256": "2fd175618a1b1764d4427881d86c9a7f310d4b6569ba985220468cd405f5731d",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/loopback-only/proc/asound/cards",
+      "sha256": "f81baac72c0c189ab12d858e73be7c09e1b29a24b5f5b617eedbdbc8fdbbc567",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/none/devices.json",
+      "sha256": "04be1ead52c5c264f19fda90f334e94db30f2d41cd9e6ae81f9ce33c238946ef",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/none/expected.json",
+      "sha256": "de6f107f7076b20756fbb52a6a2e4b2bee6a2179127bcf89a4e5f2269b62a8eb",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/none/proc/asound/card0/id",
+      "sha256": "4a66b4af37e83413121679992a98f5a86ecc4e045ae36ddee7304b7dbd9c4168",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/none/proc/asound/card1/id",
+      "sha256": "f350281ca02703f5d217a2d2c031ee4994d12ae083f1fb432bf74367ae39ca88",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/none/proc/asound/cards",
+      "sha256": "73e9ce906f4bb352408ae1d2d64a5c25ce35f0d40b286705324b13b2246c3573",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/one-usb/devices.json",
+      "sha256": "887da5e81397421a4f1f3f2aa73c342b22a1b6dcf3cf55b1ee83bca3b3730625",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/one-usb/expected.json",
+      "sha256": "41067c2081862718ac565ef437fdab7cb076e73ad524499a5a4b171126db62ef",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/one-usb/proc/asound/card0/id",
+      "sha256": "4a66b4af37e83413121679992a98f5a86ecc4e045ae36ddee7304b7dbd9c4168",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/one-usb/proc/asound/card1/id",
+      "sha256": "f350281ca02703f5d217a2d2c031ee4994d12ae083f1fb432bf74367ae39ca88",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/one-usb/proc/asound/card2/id",
+      "sha256": "19ffcdf689fb9ad93779e9c02db74710aee7032f64f49e91a0969782047a5cc5",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/one-usb/proc/asound/card2/pcm0c/info",
+      "sha256": "0e2018abbd0239678980418c1bef751bd8eac6efd4953b0cca3c212ec8d0c6ee",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/one-usb/proc/asound/cards",
+      "sha256": "ee64b838a7d620e1dfbef0fb1f36af367a2e56de9bc5bd9b69600a225eb67050",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/several/devices.json",
+      "sha256": "616bd6aa980e471248a89150ec1e1c5d5c7ce5df09f3353c5ad45c7ac9bfa399",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/several/expected.json",
+      "sha256": "aca57ffd54d660d1b1b133bfcfa17290517985a796aacfc07f8fe5c22782c425",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/several/proc/asound/card0/id",
+      "sha256": "4a66b4af37e83413121679992a98f5a86ecc4e045ae36ddee7304b7dbd9c4168",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/several/proc/asound/card1/id",
+      "sha256": "f350281ca02703f5d217a2d2c031ee4994d12ae083f1fb432bf74367ae39ca88",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/several/proc/asound/card2/id",
+      "sha256": "19ffcdf689fb9ad93779e9c02db74710aee7032f64f49e91a0969782047a5cc5",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/several/proc/asound/card2/pcm0c/info",
+      "sha256": "0e2018abbd0239678980418c1bef751bd8eac6efd4953b0cca3c212ec8d0c6ee",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/several/proc/asound/card3/id",
+      "sha256": "c21136ad2cb9a18b87700e27b27892909c32add9b2a23363e01bdcfcad262f5c",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/several/proc/asound/card3/pcm0c/info",
+      "sha256": "893cef753248d0ca17b05000eba1ad4597e289fdc55b33d5d2fef56e4ea07349",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/several/proc/asound/card4/id",
+      "sha256": "ed2d727fb970769cea4d67f3cd827cd34cdc46b44cf18a3950f7cb2e67a41bb9",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/several/proc/asound/card4/pcm0c/info",
+      "sha256": "4cbab9d494f0ed0f51026aee96a34693cb0ad162cf1725cd04282eed4774b4fe",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/microphones/several/proc/asound/cards",
+      "sha256": "644504775e959360e68493210ccd5ff7178650f7cb1387280a0f5088f5ea2b5c",
       "executable": false
     },
     {

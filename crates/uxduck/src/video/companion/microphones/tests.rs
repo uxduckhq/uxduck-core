@@ -2,12 +2,15 @@
 //! `camera.py` reads too, a microphone plugged in and pulled out, and what
 //! each choice gives.
 
+#[cfg(unix)]
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 
 use super::*;
 
-pub(crate) fn fixtures() -> PathBuf {
+#[cfg(unix)]
+fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/microphones")
 }
 

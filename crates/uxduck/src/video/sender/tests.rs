@@ -5,6 +5,12 @@
 //! viewer leaves. The pictures are a recorded test pattern, fed as the
 //! RTSP reader would. With `MediaMTX` and `FFmpeg` (ignored by default, as
 //! the WHEP client's tests are), the sender reads a real `MediaMTX` path.
+//!
+//! These tests run on Linux alone, where `uxduck companion` is installed
+//! (ADR-0061 B5): they give the sender 127.0.0.2 and 127.0.0.3, and macOS
+//! answers on 127.0.0.1 only.
+
+#![cfg(target_os = "linux")]
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;

@@ -180,6 +180,10 @@ impl Fake {
     }
 
     /// Someone publishes to `path` now, or stopped.
+    #[cfg_attr(
+        not(unix),
+        expect(dead_code, reason = "the one test that calls it is for Unix alone")
+    )]
     pub fn publish(&self, path: &str, on: bool) {
         let mut s = self.state.lock().unwrap();
         if on {
@@ -190,11 +194,19 @@ impl Fake {
     }
 
     /// The paths added through the API, in order.
+    #[cfg_attr(
+        not(unix),
+        expect(dead_code, reason = "the one test that calls it is for Unix alone")
+    )]
     pub fn added(&self) -> Vec<String> {
         self.state.lock().unwrap().added.clone()
     }
 
     /// Whether `MediaMTX` has the path now.
+    #[cfg_attr(
+        not(unix),
+        expect(dead_code, reason = "the one test that calls it is for Unix alone")
+    )]
     pub fn has(&self, path: &str) -> bool {
         self.state.lock().unwrap().paths.contains_key(path)
     }

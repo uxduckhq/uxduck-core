@@ -1,0 +1,4 @@
+card: 3
+device: 0
+stream: CAPTURE
+id: Loopback PCM

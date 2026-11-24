@@ -184,6 +184,10 @@ impl File {
 
     /// Whether `newer` changes more than the recording modes and the
     /// microphones, which a reload applies. The rest needs a restart.
+    #[cfg_attr(
+        not(any(unix, test)),
+        expect(dead_code, reason = "a reload is a SIGHUP, which only Unix has")
+    )]
     #[must_use]
     pub fn beyond_modes(&self, newer: &Self) -> bool {
         let without_modes = |file: &Self| {

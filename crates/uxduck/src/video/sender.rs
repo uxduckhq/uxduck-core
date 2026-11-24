@@ -195,7 +195,10 @@ impl Config {
 #[derive(Clone, Debug)]
 pub enum Hosts {
     Interfaces(Vec<String>),
-    #[cfg_attr(not(test), expect(dead_code, reason = "tests give addresses straight"))]
+    #[cfg_attr(
+        not(all(test, target_os = "linux")),
+        expect(dead_code, reason = "tests give addresses straight")
+    )]
     Addresses(Vec<IpAddr>),
 }
 
@@ -216,7 +219,10 @@ pub struct Options {
 /// The sender, running.
 pub struct Running {
     /// Where WHEP is answered.
-    #[cfg_attr(not(test), expect(dead_code, reason = "tests ask it"))]
+    #[cfg_attr(
+        not(all(test, target_os = "linux")),
+        expect(dead_code, reason = "tests ask it")
+    )]
     pub http: SocketAddr,
     pub task: tokio::task::JoinHandle<Result<(), String>>,
     /// The paths someone watches, to read, and where their pictures go.

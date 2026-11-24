@@ -3,10 +3,14 @@
 //! its process started, one plugged in and pulled out, a choice changed, a
 //! device that refuses, `GStreamer` missing, and two cameras on one device.
 //! The real pipeline's words are checked here and run in the cloud check.
+//!
+//! The fake is a script, so the tests that start it are for Unix alone, and
+//! so are the helpers that only those tests call.
 
 use std::time::Duration;
 
 use super::*;
+#[cfg(unix)]
 use crate::video::companion::microphones::tests::case;
 
 /// A fake `gst-launch-1.0` in `dir`: it writes its words to `args.log`
@@ -64,6 +68,7 @@ while True:
 
 /// What the fake in `dir` sends in each packet: an Opus TOC byte and two
 /// more, then the name of `dir`.
+#[cfg(unix)]
 pub(in crate::video) fn payload_of(dir: &Path) -> Vec<u8> {
     let mut payload = vec![0xFC, 0x01, 0x02];
     payload.extend_from_slice(dir.file_name().unwrap().as_encoded_bytes());
@@ -72,6 +77,7 @@ pub(in crate::video) fn payload_of(dir: &Path) -> Vec<u8> {
 
 /// The words of the first `count` runs of the fake, waiting up to 3 s for
 /// them to start.
+#[cfg(unix)]
 pub(in crate::video) async fn runs_until(dir: &Path, count: usize) -> Vec<String> {
     let until = tokio::time::Instant::now() + Duration::from_secs(3);
     while runs(dir).len() < count && tokio::time::Instant::now() < until {
@@ -81,6 +87,7 @@ pub(in crate::video) async fn runs_until(dir: &Path, count: usize) -> Vec<String
 }
 
 /// The words of each run of the fake so far.
+#[cfg(unix)]
 pub(in crate::video) fn runs(dir: &Path) -> Vec<String> {
     std::fs::read_to_string(dir.join("args.log"))
         .unwrap_or_default()
@@ -89,6 +96,7 @@ pub(in crate::video) fn runs(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+#[cfg(unix)]
 fn environment(root: &Path, gst: PathBuf) -> Environment {
     Environment {
         root: root.to_owned(),
@@ -97,6 +105,7 @@ fn environment(root: &Path, gst: PathBuf) -> Environment {
     }
 }
 
+#[cfg(unix)]
 fn choices(cameras: &[(&str, Choice)]) -> watch::Sender<BTreeMap<String, Choice>> {
     watch::channel(
         cameras
@@ -108,6 +117,7 @@ fn choices(cameras: &[(&str, Choice)]) -> watch::Sender<BTreeMap<String, Choice>
 }
 
 /// Waits up to `within` for the status to pass `test`.
+#[cfg(unix)]
 pub(in crate::video) async fn until(
     status: &mut watch::Receiver<Status>,
     within: Duration,
@@ -121,11 +131,13 @@ pub(in crate::video) async fn until(
     now
 }
 
+#[cfg(unix)]
 fn state(status: &Status, path: &str) -> State {
     status.cameras[path].state
 }
 
 /// The packets that came in `over`, by step.
+#[cfg(unix)]
 async fn packets(feed: &mut Feed, over: Duration) -> Vec<Packet> {
     let mut got = Vec::new();
     let until = tokio::time::Instant::now() + over;

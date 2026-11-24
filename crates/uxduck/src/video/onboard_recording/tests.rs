@@ -9,7 +9,9 @@ use std::time::SystemTime;
 use uxduck_mavlink::decode::{Message, decode};
 use uxduck_mavlink::sim::{armed_heartbeat_frame, command_long_frame};
 
-use super::disk::{Store, go_duration, size};
+use super::disk::Store;
+#[cfg(unix)]
+use super::disk::{go_duration, size};
 use super::*;
 use crate::video::sender::mediamtx::tests::Fake;
 
@@ -425,6 +427,10 @@ fn record_conf(dir: &Path, bitrate: u64, segment: &str) -> serde_json::Value {
     })
 }
 
+/// On Unix alone: `recordPath` is a folder on the camera computer, whose disk
+/// the recorder reads on Unix only (`disk::space`), and Windows does not take
+/// these paths as absolute.
+#[cfg(unix)]
 #[test]
 fn the_store_is_the_paths_own_folder_and_room_for_one_segment() {
     let store = Store::of(
@@ -796,6 +802,7 @@ fn sound_status(
 }
 
 /// Waits up to 5 s for the record changes to end with `last`.
+#[cfg(unix)]
 async fn records_end_with(fake: &Fake, last: &[(&str, bool)]) -> Vec<(String, bool)> {
     let last: Vec<(String, bool)> = last.iter().map(|(p, on)| ((*p).to_owned(), *on)).collect();
     let until = tokio::time::Instant::now() + Duration::from_secs(5);

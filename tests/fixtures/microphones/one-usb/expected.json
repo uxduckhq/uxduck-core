@@ -1,0 +1,12 @@
+{
+  "microphones": [
+    {
+      "id": "usb:3-1.2",
+      "name": "USB PnP Sound Device",
+      "card": "Device",
+      "usb": true,
+      "alsa": "hw:CARD=Device,DEV=0"
+    }
+  ],
+  "automatic": "usb:3-1.2"
+}
