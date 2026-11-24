@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "ab8d405b66834d62f40fbb6b00c6ac95f65c115a",
+  "sourceCommit": "a8232ed99a7dba2a8f2508b8d8d34a2f0160d493",
   "licenseReady": true,
   "files": [
     {
@@ -9341,7 +9341,7 @@
     },
     {
       "path": "crates/uxduck/src/vehicle_recordings.rs",
-      "sha256": "85f4e653bf863ee1f21600704fba58fe8d508990c5895dbebe40219567e36214",
+      "sha256": "f0ea39b26bfeef87b2c94181446c2a2d90eba38e35839a43418b0db6343b74d5",
       "executable": false
     },
     {

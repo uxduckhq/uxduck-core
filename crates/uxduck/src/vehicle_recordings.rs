@@ -840,7 +840,7 @@ impl Download {
     /// size it was listed at.
     async fn their_hash(&mut self, ctx: &Ctx, segment: &RemoteSegment) -> Result<String, Ended> {
         let path = quoted(&segment.path);
-        let remote = format!("stat -c %s -- {path} && sha256sum -- {path}");
+        let remote = format!("wc -c < {path} && sha256sum -- {path}");
         let mut out = Vec::new();
         let finished = over_ssh(
             ctx,
