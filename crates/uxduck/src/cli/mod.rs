@@ -2603,7 +2603,56 @@ fn status(data_dir: &std::path::Path, json: bool) {
     }
 }
 
-/// Starts UXDuck in the background for `open` and waits until it answers.
+/// The daemon that started since `before`, once it answers. It listens on its
+/// socket before it writes `daemon.json`, which `uxduck status` and the
+/// desktop app read, so a connection alone is too early to say it started.
+async fn started_since(
+    data_dir: &std::path::Path,
+    before: Option<u64>,
+) -> Option<(crate::paths::DaemonInfo, LocalClient)> {
+    let info = crate::paths::read_info(data_dir).filter(|info| Some(info.started_us) != before)?;
+    let client = LocalClient::connect(data_dir).await.ok()?;
+    Some((info, client))
+}
+
+#[cfg(all(test, unix))]
+mod started_since_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_daemon_that_listens_has_not_started_until_status_can_read_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = crate::paths::socket_path(dir.path());
+        let _listening = tokio::net::UnixListener::bind(&socket).unwrap();
+        let written = |started_us| {
+            crate::paths::write_info(
+                dir.path(),
+                &crate::paths::DaemonInfo {
+                    pid: std::process::id(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    port: 0,
+                    socket: socket.display().to_string(),
+                    ui_url: String::new(),
+                    dev: false,
+                    started_us,
+                },
+            )
+            .unwrap();
+        };
+        // The daemon listens first: `uxduck status` would still say none runs.
+        assert!(LocalClient::connect(dir.path()).await.is_ok());
+        assert!(started_since(dir.path(), None).await.is_none());
+        // What a daemon that was killed left behind is not the one listening now.
+        written(1);
+        assert!(started_since(dir.path(), Some(1)).await.is_none());
+        written(2);
+        let (info, _) = started_since(dir.path(), Some(1)).await.unwrap();
+        assert_eq!(info.started_us, 2);
+        let _ = std::fs::remove_file(&socket);
+    }
+}
+
+/// Starts UXDuck in the background for `open` and waits until it has started.
 /// It outlives this command, in its own process group, with no terminal.
 pub(crate) async fn start_daemon(
     data_dir: &std::path::Path,
@@ -2663,12 +2712,14 @@ pub(crate) async fn start_daemon(
         // simulator, netstat, ffmpeg) share instead of each opening one.
         command.creation_flags(0x0800_0000 | 0x0000_0200);
     }
+    // What a daemon that was killed left behind is not this one's.
+    let before = crate::paths::read_info(data_dir).map(|info| info.started_us);
     let mut child = command
         .spawn()
         .map_err(|e| CliError::Usage(format!("could not start UXDuck: {e}")))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        if let Ok(client) = LocalClient::connect(data_dir).await {
+        if let Some((_, client)) = started_since(data_dir, before).await {
             return Ok(client);
         }
         if let Ok(Some(status)) = child.try_wait() {
@@ -3192,9 +3243,7 @@ async fn restart_daemon(data_dir: &std::path::Path, yes: bool) -> Result<(), Cli
     // It goes, then comes back: wait for the new one's `daemon.json`, then
     // for a connection that works.
     loop {
-        let info = crate::paths::read_info(data_dir);
-        if let Some(info) = info.filter(|info| Some(info.started_us) != started)
-            && let Ok(mut client) = LocalClient::connect(data_dir).await
+        if let Some((info, mut client)) = started_since(data_dir, started).await
             && client.initialize().await.is_ok()
         {
             println!("Restarted on port {}.", info.port);
