@@ -1110,6 +1110,11 @@ pub enum DevCommand {
         /// Lose the GPS fix, and with it the position, this many seconds in.
         #[arg(long)]
         lose_gps_at: Option<f64>,
+        /// With `--no-gps` or `--lose-gps-at`, report the position DCM
+        /// reckons while it has no fix, drifting from where it last had one
+        /// or from 0, 0, as `ArduPlane` and Rover do.
+        #[arg(long)]
+        dead_reckon: bool,
         /// List this many compasses (1 to 3), not calibrated: its pre-arm
         /// checks fail with "Compass not calibrated" until they are, and it
         /// answers a compass calibration as ArduPilot does.
@@ -1598,6 +1603,7 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
             battery,
             no_gps,
             lose_gps_at,
+            dead_reckon,
             traffic,
             compasses,
             compasses_calibrated,
@@ -1663,6 +1669,7 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
                 terrain_shift,
                 battery,
                 gps_lost_from_s: if no_gps { Some(0.0) } else { lose_gps_at },
+                dead_reckon,
                 traffic,
                 compasses: (compasses > 0).then_some((
                     compasses,
@@ -3616,6 +3623,7 @@ struct FakeOptions {
     terrain_shift: i16,
     battery: f64,
     gps_lost_from_s: Option<f64>,
+    dead_reckon: bool,
     traffic: u8,
     /// How many compasses, calibrated or not, and a failure to report.
     compasses: Option<(u8, bool, Option<u8>)>,
@@ -3760,6 +3768,7 @@ async fn fake_vehicle(
         terrain_shift,
         battery,
         gps_lost_from_s,
+        dead_reckon,
         traffic,
         compasses,
         accel: (accel_uncalibrated, accel_fails),
@@ -3841,6 +3850,7 @@ async fn fake_vehicle(
     }
     vehicle.battery_from_pct = battery.clamp(0.0, 100.0);
     vehicle.gps_lost_from_s = gps_lost_from_s;
+    vehicle.dead_reckon = dead_reckon;
     vehicle.traffic = traffic;
     fake_sensors(
         &mut vehicle,

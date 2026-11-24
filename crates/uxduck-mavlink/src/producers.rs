@@ -1190,6 +1190,8 @@ fn ekf(
     from: (&str, u8, u64),
     out: &mut Produced,
 ) {
+    const POS_HORIZ_ABS: u16 = 16;
+    const CONST_POS_MODE: u16 = 128;
     let names = [
         ("ekf.velocity_variance", "EKF velocity variance"),
         ("ekf.position_variance", "EKF position variance"),
@@ -1211,6 +1213,20 @@ fn ekf(
         .fold(0.0_f32, f32::max);
     out.item("ekf.variance", "EKF", Unit::None, f64::from(worst), from);
     out.text("ekf.status", "EKF state", ekf_text(flags), from);
+    // Where it is on the Earth, by its own reckoning: 1 when it has an
+    // absolute horizontal position and is not holding a constant one
+    // (FB-313). ArduPilot's and PX4's flags agree on both bits.
+    out.item(
+        "ekf.position_abs",
+        "EKF absolute position",
+        Unit::None,
+        if flags & (POS_HORIZ_ABS | CONST_POS_MODE) == POS_HORIZ_ABS {
+            1.0
+        } else {
+            0.0
+        },
+        from,
+    );
 }
 
 fn vibration(axes: [f32; 3], clipping: [u32; 3], from: (&str, u8, u64), out: &mut Produced) {

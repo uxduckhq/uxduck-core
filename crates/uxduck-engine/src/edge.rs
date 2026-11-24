@@ -215,6 +215,12 @@ impl Engine {
                             .take(1)
                             .collect();
                     }
+                    // One that is not where it is stays here (FB-313): a
+                    // watcher sees the last that was, with its height now,
+                    // marked so it is shown as not current.
+                    if crate::position_fix::telemetry_position_usable(live) == Some(false) {
+                        dto.positions = self.placed_for_watchers(live).into_iter().collect();
+                    }
                     if detail {
                         dto.items.retain(|i| DETAIL_ITEMS.contains(&i.key.as_str()));
                     } else {

@@ -36,6 +36,10 @@ impl Engine {
             let calculated = self.calculated_items(&update);
             update.items.extend(calculated);
         }
+        // Whether its position is where it is (FB-313), beside the positions.
+        if let Some(verdict) = self.position_usable_item(&update) {
+            update.items.push(verdict);
+        }
         // A replay vehicle's telemetry is shown and nothing more (ADR-0039 R3).
         let replay = self
             .state
@@ -44,7 +48,9 @@ impl Engine {
             .is_some_and(|v| v.replay);
         let source_observation = !replay
             && (!update.positions.is_empty() || update.items.iter().any(|i| i.source != "flight"));
-        self.telemetry_history.observe(self.clock.now_us(), &update);
+        let lacks = self.update_lacks(&update);
+        self.telemetry_history
+            .observe(self.clock.now_us(), &update, lacks);
         let vehicle_id = update.vehicle_id.clone();
         // The radio's channels, for its calibration (S187).
         let radio = update.items.iter().any(|i| i.key.starts_with("rc."));
@@ -66,9 +72,11 @@ impl Engine {
         match self.telemetry.get_mut(&update.vehicle_id) {
             Some(latest) => latest.merge(&update),
             None => {
-                self.telemetry.insert(update.vehicle_id.clone(), update);
+                self.telemetry
+                    .insert(update.vehicle_id.clone(), update.clone());
             }
         }
+        self.keep_placed_position(&update);
         let subscribers: Vec<ConnectionId> = self.telemetry_subscribers.iter().copied().collect();
         if source_observation {
             self.observe_flight_usage(&vehicle_id);

@@ -57,6 +57,14 @@ pub struct PositionEstimate {
     /// When the daemon received it.
     #[schemars(schema_with = "crate::safe::integer")]
     pub time_us: u64,
+    /// False when it is not where the vehicle is (FB-313): sent with no
+    /// usable GPS fix or EKF position, as `ArduPlane` sends DCM's reckoning
+    /// from 0, 0, or the last one that was, to a watcher. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usable: Option<bool>,
+    /// Why it is not usable, in a short sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

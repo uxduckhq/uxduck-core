@@ -1131,12 +1131,15 @@ impl Scan {
                         *exact = false;
                         continue;
                     };
-                    if !update.positions.is_empty() {
-                        out.first_placed.entry(system).or_insert(at);
-                    }
                     let track = tracks.entry(system).or_default();
                     track.last = at;
                     track.telemetry.merge(&update);
+                    // Placed only where it was (FB-313).
+                    let usable = crate::position_fix::telemetry_position_usable(&track.telemetry)
+                        != Some(false);
+                    if usable && !update.positions.is_empty() {
+                        out.first_placed.entry(system).or_insert(at);
+                    }
                     // Each mission step reached (S343), once, though a log
                     // may hold it from more than one channel. PX4 counts
                     // its items from 0, ArduPilot from home.
@@ -1186,7 +1189,7 @@ impl Scan {
                         .iter()
                         .find(|p| p.source == "fused")
                         .or_else(|| track.telemetry.positions.first());
-                    if let Some(position) = shown {
+                    if let Some(position) = shown.filter(|_| usable) {
                         let samples = out.motion.entry(system).or_default();
                         if samples
                             .last()
@@ -1201,6 +1204,7 @@ impl Scan {
                         out.marks.push((system, air_mark(from_us, until_us)));
                     }
                     if let Some(fused) = update.positions.iter().find(|p| p.source == "fused")
+                        && usable
                         && at.saturating_sub(track.last_point) >= PATH_EVERY_US
                     {
                         track.last_point = at;
@@ -3376,6 +3380,7 @@ impl Engine {
             update.vehicle_id.clone_from(&identity.replay_id);
             if held {
                 self.telemetry.remove(&identity.replay_id);
+                self.placed_positions.remove(&identity.replay_id);
             }
             self.telemetry_observed(update);
         }
@@ -3669,6 +3674,7 @@ impl Engine {
         for id in ids {
             self.clear_replay_parameters(id);
             self.telemetry.remove(id);
+            self.placed_positions.remove(id);
             self.messages.forget_vehicle(id);
             if self.state.vehicles.contains_key(id) {
                 self.commit_as(actor(), Change::VehicleRemoved { id: id.clone() });

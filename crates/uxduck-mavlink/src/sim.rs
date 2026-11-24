@@ -1402,6 +1402,13 @@ pub struct FakeVehicle {
     /// from then on, as ArduPilot sends none without one. From 0, it never
     /// has one.
     pub gps_lost_from_s: Option<f64>,
+    /// While it has no fix, it reports the position DCM reckons, as
+    /// `ArduPlane` and Rover do (FB-313): from where it last had a fix, or
+    /// from 0, 0 when it never had one, drifting about a metre a second,
+    /// with an EKF that has no position of its own.
+    pub dead_reckon: bool,
+    /// Where it last had a fix, which DCM reckons from.
+    fixed_at: (f64, f64),
     /// How many aircraft its ADS-B receiver hears (S168): each circles home
     /// at its own radius and height, reported once a second as
     /// `ADSB_VEHICLE`, as ArduPilot forwards what its receiver hears.
@@ -1734,6 +1741,8 @@ impl FakeVehicle {
             requested: std::collections::BTreeSet::new(),
             battery_from_pct: 100.0,
             gps_lost_from_s: None,
+            dead_reckon: false,
+            fixed_at: (0.0, 0.0),
             traffic: 0,
             traffic_at_s: f64::NEG_INFINITY,
             said_leak_s: None,
@@ -3710,13 +3719,27 @@ impl FakeVehicle {
             });
             payload.vehicle(attitude, place);
         }
+        let (reckoned_lat, reckoned_lon) = if fix {
+            self.fixed_at = (lat, lon);
+            (e7(lat), e7(lon))
+        } else if self.dead_reckon {
+            let drift_m = 0.7 * (t_s - self.gps_lost_from_s.unwrap_or(0.0));
+            let (from_lat, from_lon) = self.fixed_at;
+            let degrees = |deg: f64| (deg * 1e7).round() as i32;
+            (
+                degrees(from_lat - drift_m / 111_320.0),
+                degrees(from_lon + drift_m / 111_320.0),
+            )
+        } else {
+            (0, 0)
+        };
         let mut frames = Vec::new();
         frames.extend(self.stream(
             id,
             &GlobalPositionInt {
                 time_boot_ms,
-                lat: e7(lat),
-                lon: e7(lon),
+                lat: reckoned_lat,
+                lon: reckoned_lon,
                 alt: mm(HOME.2 + height),
                 relative_alt: mm(height),
                 vx: (north * 100.0) as i16,
@@ -3815,6 +3838,7 @@ impl FakeVehicle {
     )]
     fn health(&mut self, t_s: f64, height: f64) -> Vec<Vec<u8>> {
         let s = self.system_id;
+        let fix = self.gps_lost_from_s.is_none_or(|from| t_s < from);
         let shake = if self.vibration_high && t_s > 10.0 {
             (12.0 + (t_s - 10.0) * 2.0).min(75.0)
         } else {
@@ -3844,7 +3868,13 @@ impl FakeVehicle {
         frames.extend(self.stream(
             1,
             &EkfStatusReport {
-                flags: EkfStatusFlags::from_bits_truncate(0b1_0111_1111),
+                // Without a fix, DCM's reckoning: attitude and height, and
+                // a constant position rather than one of its own (FB-313).
+                flags: EkfStatusFlags::from_bits_truncate(if self.dead_reckon && !fix {
+                    0b1010_0101
+                } else {
+                    0b1_0111_1111
+                }),
                 velocity_variance: 0.12,
                 pos_horiz_variance: 0.18,
                 pos_vert_variance: 0.1,

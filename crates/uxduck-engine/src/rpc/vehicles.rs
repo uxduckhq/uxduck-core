@@ -218,10 +218,13 @@ fn telemetry_of(engine: &Engine, id: &str) -> Result<Value, ApiError> {
             ..Default::default()
         }
     });
-    to_value(&uxduck_contracts::dto::telemetry::VehicleTelemetry {
+    let mut dto = uxduck_contracts::dto::telemetry::VehicleTelemetry {
         link_health: engine.link_health_of(&vehicle.id),
         ..uxduck_contracts::dto::telemetry::VehicleTelemetry::from(&telemetry)
-    })
+    };
+    // Each says so when it is not where the vehicle is (FB-313).
+    crate::position_fix::mark_positions(&telemetry, &mut dto.positions);
+    to_value(&dto)
 }
 
 fn found<'e>(

@@ -14572,6 +14572,10 @@ export type PositionEstimate = {
     latitudeDeg: number;
     longitudeDeg: number;
     /**
+     * Why it is not usable, in a short sentence.
+     */
+    reason?: string | null;
+    /**
      * The producer: `fused` (the autopilot's estimate), `gps`, or a plugin's id.
      */
     source: string;
@@ -14579,6 +14583,12 @@ export type PositionEstimate = {
      * When the daemon received it.
      */
     timeUs: number;
+    /**
+     * False when it is not where the vehicle is (FB-313): sent with no
+     * usable GPS fix or EKF position, as `ArduPlane` sends DCM's reckoning
+     * from 0, 0, or the last one that was, to a watcher. Absent otherwise.
+     */
+    usable?: boolean | null;
     verticalAccuracyM?: number | null;
 };
 

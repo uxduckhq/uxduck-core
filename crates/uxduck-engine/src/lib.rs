@@ -82,6 +82,7 @@ mod plans;
 mod plugin_checks;
 pub mod plugin_sync;
 pub mod plugins;
+mod position_fix;
 pub mod practice;
 mod preflight;
 mod recordings;
@@ -567,6 +568,9 @@ pub struct Engine {
     tracers: BTreeSet<ConnectionId>,
     /// Live telemetry by vehicle id; not journaled.
     telemetry: BTreeMap<String, uxduck_core::domain::telemetry::VehicleTelemetry>,
+    /// Each vehicle's latest position sent while it was usable (FB-313),
+    /// the fused one first: where watchers see it while it has no fix.
+    placed_positions: BTreeMap<String, uxduck_core::domain::telemetry::PositionEstimate>,
     /// How each vehicle's link is doing, by vehicle id, and when the data
     /// plane said so (S261); not journaled.
     link_health: BTreeMap<String, (uxduck_core::domain::telemetry::LinkHealth, u64)>,
@@ -753,6 +757,7 @@ impl Engine {
             display: display::DisplayRelay::default(),
             tracers: BTreeSet::new(),
             telemetry: BTreeMap::new(),
+            placed_positions: BTreeMap::new(),
             link_health: BTreeMap::new(),
             connection_history: connection_history::Histories::default(),
             batteries: battery_alerts::Batteries::default(),

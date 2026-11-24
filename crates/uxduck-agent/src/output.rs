@@ -190,6 +190,15 @@ fn entries<'a>(
         .filter_map(Value::as_object_mut)
 }
 
+/// A position sent with no usable fix is not where the vehicle is (FB-313):
+/// its height and why stay, its place goes.
+fn unplace(position: &mut Map<String, Value>) {
+    if position.get("usable") == Some(&json!(false)) {
+        position.remove("latitudeDeg");
+        position.remove("longitudeDeg");
+    }
+}
+
 /// Leaves out what the model has no use for in the results it reads most,
 /// or has already: the call named the vehicle.
 fn trim(method: &str, result: &mut Value) {
@@ -200,6 +209,19 @@ fn trim(method: &str, result: &mut Value) {
             for item in entries(result, "items") {
                 item.remove("componentId");
                 item.remove("source");
+            }
+            for position in entries(result, "positions") {
+                unplace(position);
+            }
+        }
+        "telemetry/window" => {
+            let series = result
+                .get_mut("positions")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten();
+            for sample in series.flat_map(|s| entries(s, "samples")) {
+                unplace(sample);
             }
         }
         "vehicle/messages" => {
@@ -436,6 +458,51 @@ mod tests {
                     "value": 12.6, "timeUs": 1_794_639_263_091_431_u64 }],
                 "positions": [{ "source": "gps", "componentId": 1, "latitudeDeg": -35.3632616 }],
             })
+        );
+
+        let unfixed = for_model(
+            "telemetry/get",
+            json!({
+                "vehicleId": "v1",
+                "items": [],
+                "positions": [{ "source": "fused", "componentId": 1, "latitudeDeg": -0.002_094,
+                    "longitudeDeg": 0.002_239, "altitudes": [{ "meters": 0.8, "frame": "above-home" }],
+                    "usable": false, "reason": "No GPS fix and no EKF position, so this is not where the vehicle is" }],
+            }),
+        );
+        assert_eq!(
+            unfixed["positions"],
+            json!([{ "source": "fused", "componentId": 1,
+                "altitudes": [{ "meters": 0.8, "frame": "above-home" }], "usable": false,
+                "reason": "No GPS fix and no EKF position, so this is not where the vehicle is" }]),
+            "a position with no fix never reads as where the vehicle is (FB-313)"
+        );
+        let history = for_model(
+            "telemetry/window",
+            json!({
+                "vehicleId": "v1",
+                "positions": [{ "source": "fused", "componentId": 1, "samples": [
+                    { "source": "fused", "componentId": 1, "latitudeDeg": -35.36, "longitudeDeg": 149.16,
+                        "altitudes": [], "timeUs": 1 },
+                    { "source": "fused", "componentId": 1, "latitudeDeg": -0.002_094, "longitudeDeg": 0.002_239,
+                        "altitudes": [], "timeUs": 2, "usable": false, "reason": "No GPS fix and no EKF position, so this is not where the vehicle is" },
+                ] }],
+            }),
+        );
+        let samples = &history["positions"][0]["samples"];
+        assert_eq!(
+            samples[0]["latitudeDeg"],
+            json!(-35.36),
+            "a fix keeps its place"
+        );
+        assert_eq!(
+            (
+                samples[1].get("latitudeDeg"),
+                samples[1].get("longitudeDeg"),
+                &samples[1]["usable"]
+            ),
+            (None, None, &json!(false)),
+            "nor from history (FB-313)"
         );
 
         let messages = for_model(

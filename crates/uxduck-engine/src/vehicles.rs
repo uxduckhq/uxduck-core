@@ -562,6 +562,7 @@ impl Engine {
             .collect();
         for old in duplicates {
             self.telemetry.remove(&old);
+            self.placed_positions.remove(&old);
             self.link_health.remove(&old);
             self.computer_clocks
                 .retain(|(vehicle_id, _), _| *vehicle_id != old);

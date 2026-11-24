@@ -12,6 +12,7 @@ use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_core::domain::telemetry::{PositionEstimate, TelemetryItem, VehicleTelemetry};
 
 use crate::Engine;
+use crate::position_fix::mark_unusable;
 
 const RETENTION_US: u64 = 300_000_000;
 const MAX_OBSERVATIONS: usize = 100_000;
@@ -27,6 +28,9 @@ struct Batch {
     received_us: u64,
     bytes: usize,
     telemetry: VehicleTelemetry,
+    /// What the vehicle lacked when it sent these positions, when they were
+    /// not where it was (FB-313).
+    lacks: Option<&'static str>,
 }
 
 #[derive(Debug, Default)]
@@ -39,7 +43,12 @@ pub(crate) struct Window {
 }
 
 impl Window {
-    pub(crate) fn observe(&mut self, received_us: u64, telemetry: &VehicleTelemetry) {
+    pub(crate) fn observe(
+        &mut self,
+        received_us: u64,
+        telemetry: &VehicleTelemetry,
+        lacks: Option<&'static str>,
+    ) {
         self.prune(received_us);
         let observations = telemetry.items.len() + telemetry.positions.len();
         if observations == 0 {
@@ -61,6 +70,7 @@ impl Window {
             received_us,
             bytes,
             telemetry: telemetry.clone(),
+            lacks,
         });
     }
 
@@ -98,7 +108,7 @@ impl Window {
         self.prune(now_us);
         let retained_from = self.retained_from(now_us, started_us);
         let mut items = BTreeMap::<(String, String, u8, u8), Vec<&TelemetryItem>>::new();
-        let mut positions = BTreeMap::<(String, u8), Vec<&PositionEstimate>>::new();
+        let mut positions = BTreeMap::<(String, u8), Vec<(&PositionEstimate, Option<&str>)>>::new();
         for batch in &self.batches {
             if !ids.contains(&batch.telemetry.vehicle_id) {
                 continue;
@@ -123,7 +133,7 @@ impl Window {
                     positions
                         .entry((position.source.clone(), position.component_id))
                         .or_default()
-                        .push(position);
+                        .push((position, batch.lacks));
                 }
             }
         }
@@ -170,7 +180,7 @@ impl Window {
                 .into_values()
                 .take(position_limit)
                 .map(|mut samples| {
-                    samples.sort_by_key(|s| s.time_us);
+                    samples.sort_by_key(|(s, _)| s.time_us);
                     position_series(&samples, limit)
                 })
                 .collect(),
@@ -435,13 +445,23 @@ fn item_series(samples: &[&TelemetryItem], limit: usize) -> TelemetryWindowSerie
     }
 }
 
-fn position_series(samples: &[&PositionEstimate], limit: usize) -> PositionWindowSeries {
+fn position_series(
+    samples: &[(&PositionEstimate, Option<&str>)],
+    limit: usize,
+) -> PositionWindowSeries {
     PositionWindowSeries {
-        source: samples[0].source.clone(),
-        component_id: samples[0].component_id,
-        coverage: coverage(samples.iter().map(|s| s.time_us), limit),
+        source: samples[0].0.source.clone(),
+        component_id: samples[0].0.component_id,
+        coverage: coverage(samples.iter().map(|(s, _)| s.time_us), limit),
         samples: indices(samples.len(), limit)
-            .map(|index| samples[index].into())
+            .map(|index| {
+                let (sample, lacks) = samples[index];
+                let mut dto = sample.into();
+                if let Some(lacks) = lacks {
+                    mark_unusable(lacks, [&mut dto]);
+                }
+                dto
+            })
             .collect(),
     }
 }
@@ -526,7 +546,7 @@ mod tests {
             (1_200_000, None),
             (2_000_000, Some(2.0)),
         ] {
-            window.observe(time, &update(time, value));
+            window.observe(time, &update(time, value), None);
         }
         let mut p = params();
         p.keys.push("gps.unknown".into());
@@ -549,7 +569,7 @@ mod tests {
     fn time_bounds_are_inclusive_and_no_latest_value_is_carried_forward() {
         let mut window = Window::default();
         for time in [999_999, 1_000_000, 1_000_001, 2_000_000, 2_000_001] {
-            window.observe(time, &update(time, Some(3.0)));
+            window.observe(time, &update(time, Some(3.0)), None);
         }
         let result = query(&mut window, &params(), 2_000_001);
         assert_eq!(result.items[0].coverage.count, 3);
@@ -566,8 +586,8 @@ mod tests {
     #[test]
     fn expiry_and_daemon_startup_are_reported_as_partial_history() {
         let mut window = Window::default();
-        window.observe(1_000_000, &update(1_000_000, Some(1.0)));
-        window.observe(301_000_001, &update(301_000_001, Some(2.0)));
+        window.observe(1_000_000, &update(1_000_000, Some(1.0)), None);
+        window.observe(301_000_001, &update(301_000_001, Some(2.0)), None);
         assert_eq!(window.observations, 1);
         let mut p = params();
         p.start_time_us = None;
@@ -595,7 +615,7 @@ mod tests {
         large.items = vec![large.items[0].clone(); 1000];
         let fitting = MAX_BYTES / batch_bytes(&large);
         for index in 0..=fitting {
-            window.observe(1_000_000 + u64::try_from(index).unwrap(), &large);
+            window.observe(1_000_000 + u64::try_from(index).unwrap(), &large, None);
         }
         assert!(window.bytes <= MAX_BYTES);
         assert_eq!(window.batches.len(), fitting);
@@ -604,9 +624,9 @@ mod tests {
         let mut window = Window::default();
         let mut many = update(1_000_000, Some(1.0));
         many.items = vec![many.items[0].clone(); MAX_OBSERVATIONS];
-        window.observe(1_000_000, &many);
+        window.observe(1_000_000, &many, None);
         assert_eq!(window.observations, MAX_OBSERVATIONS);
-        window.observe(1_100_000, &update(1_100_000, Some(2.0)));
+        window.observe(1_100_000, &update(1_100_000, Some(2.0)), None);
         assert_eq!(window.observations, 1);
         assert!(window.bytes <= MAX_BYTES);
     }
@@ -616,7 +636,7 @@ mod tests {
         let mut window = Window::default();
         let mut batch = update(1_000_000, Some(42.0));
         batch.items[0].text = Some("x".repeat(1025));
-        window.observe(1_000_000, &batch);
+        window.observe(1_000_000, &batch, None);
         let result = query(&mut window, &params(), 2_000_000);
         assert_eq!(window.bytes, 0);
         assert!(result.history_truncated);
@@ -632,7 +652,7 @@ mod tests {
                 let mut batch = update(1_000_000 + u64::from(index) * 1000, Some(f64::from(index)));
                 batch.items[0].component_id = component_id;
                 batch.items[0].text = Some("\0".repeat(1024));
-                window.observe(batch.items[0].time_us, &batch);
+                window.observe(batch.items[0].time_us, &batch, None);
             }
         }
         let mut p = params();
@@ -676,10 +696,10 @@ mod tests {
     fn aliases_components_positions_and_out_of_order_times_are_kept_distinct() {
         let mut window = Window::default();
         let mut batch = update(1_500_000, Some(3.0));
-        window.observe(1_500_000, &batch);
+        window.observe(1_500_000, &batch, None);
         batch.vehicle_id = "old-v".into();
         batch.items[0].time_us = 1_100_000;
-        window.observe(1_600_000, &batch);
+        window.observe(1_600_000, &batch, None);
         batch.items[0].component_id = 2;
         batch.positions.push(PositionEstimate {
             source: "fused".into(),
@@ -695,7 +715,7 @@ mod tests {
             vertical_accuracy_m: None,
             time_us: 1_600_000,
         });
-        window.observe(1_600_000, &batch);
+        window.observe(1_600_000, &batch, None);
         let mut p = params();
         p.position_sources = vec!["fused".into(), "gps".into()];
         let result = window
@@ -719,13 +739,13 @@ mod tests {
     fn changing_units_and_sources_do_not_produce_misleading_extrema() {
         let mut window = Window::default();
         let mut batch = update(1_100_000, Some(5.0));
-        window.observe(1_100_000, &batch);
+        window.observe(1_100_000, &batch, None);
         batch.items[0].time_us = 1_200_000;
         batch.items[0].unit = Unit::None;
         batch.items[0].value = Some(99.0);
-        window.observe(1_200_000, &batch);
+        window.observe(1_200_000, &batch, None);
         batch.items[0].source = "plugin".into();
-        window.observe(1_300_000, &batch);
+        window.observe(1_300_000, &batch, None);
         let result = query(&mut window, &params(), 2_000_000);
         assert_eq!(result.items.len(), 3);
         assert!(result.items.iter().all(|series| series.coverage.count == 1));
@@ -745,7 +765,7 @@ mod tests {
         for component_id in 0..65 {
             let mut batch = update(1_000_000, Some(1.0));
             batch.items[0].component_id = component_id;
-            window.observe(1_000_000, &batch);
+            window.observe(1_000_000, &batch, None);
         }
         let result = query(&mut window, &params(), 2_000_000);
         assert_eq!(result.items.len(), 64);
@@ -759,7 +779,7 @@ mod tests {
         for (time_us, text) in [(1_000_000, "Good"), (1_100_000, "Bad"), (1_200_000, "Good")] {
             let mut batch = update(time_us, None);
             batch.items[0].text = Some(text.into());
-            window.observe(time_us, &batch);
+            window.observe(time_us, &batch, None);
         }
         for limit in [1, 2] {
             let mut p = params();
@@ -805,7 +825,7 @@ mod tests {
             // Ninth distinct state is omitted; a later repeat of the first
             // state must still contribute to its complete count and last time.
             batch.items[0].text = Some(format!("state{}", index % 9));
-            window.observe(time_us, &batch);
+            window.observe(time_us, &batch, None);
         }
         let result = query(&mut window, &params(), 2_000_000);
         let series = &result.items[0];
@@ -829,7 +849,7 @@ mod tests {
                 let mut batch = update(time_us, Some(1.0));
                 batch.items[0].component_id = component_id;
                 batch.items[0].text = Some(format!("{}{}", "\0".repeat(1000), index));
-                window.observe(time_us, &batch);
+                window.observe(time_us, &batch, None);
             }
         }
         let mut p = params();

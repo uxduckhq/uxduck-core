@@ -88,6 +88,8 @@ impl From<&core::PositionEstimate> for dto::PositionEstimate {
             horizontal_accuracy_m: p.horizontal_accuracy_m,
             vertical_accuracy_m: p.vertical_accuracy_m,
             time_us: p.time_us,
+            usable: None,
+            reason: None,
         }
     }
 }
