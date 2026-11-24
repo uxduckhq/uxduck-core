@@ -25,7 +25,7 @@ use uxduck_media::audio::AudioConfig;
 use uxduck_media::tsrecord::TsRecorder;
 
 use super::tests::test_engine;
-use super::{address, sender_answers};
+use super::{address, remember, sender_answers};
 use crate::video::hub::{Hub, Item};
 use crate::video::rtsp;
 
@@ -110,10 +110,12 @@ impl Sender {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, app).await });
         tokio::spawn(drive(fake.clone(), socket));
-        Self {
-            fake,
-            url: format!("http://127.0.0.1:{port}/cam/whep"),
-        }
+        let url = format!("http://127.0.0.1:{port}/cam/whep");
+        // What a sender said of its sound is remembered by address for as
+        // long as these tests' process runs, and another test's sender may
+        // have had this port.
+        remember(&address(&url).unwrap(), None);
+        Self { fake, url }
     }
 
     fn requests(&self) -> Vec<String> {
