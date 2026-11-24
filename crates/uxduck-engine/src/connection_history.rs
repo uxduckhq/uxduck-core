@@ -1,7 +1,8 @@
 //! Each vehicle connection over time (ADR-0004 2026-11-16), for the graph
 //! under a connection on the vehicle's page: a sample a second from the
 //! data plane of every connection a vehicle is heard on, with what its open
-//! cameras received over it. Kept in memory, never journaled.
+//! cameras received over it, its radio's noise and buffer and the MAVLink it
+//! carried (2026-11-22). Kept in memory, never journaled.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -10,6 +11,7 @@ use uxduck_contracts::dto::vehicle::{
 };
 use uxduck_core::domain::telemetry::LinkHealth;
 use uxduck_core::domain::vehicle::Vehicle;
+use uxduck_mavlink::session::Radio;
 
 use crate::Engine;
 use crate::video::route_in_use;
@@ -25,8 +27,11 @@ pub struct ConnectionReading {
     pub vehicle_id: String,
     pub link_id: String,
     pub health: LinkHealth,
-    /// Its telemetry radio's signal and the remote radio's, in percent.
-    pub radio: (Option<f64>, Option<f64>),
+    /// Its telemetry radio, while it reports.
+    pub radio: Radio,
+    /// The MAVLink received and sent on the connection, in bits a second,
+    /// once it has been measured for a second.
+    pub throughput: Option<(u64, u64)>,
 }
 
 /// Each connection's samples, by vehicle and link id, oldest first.
@@ -53,12 +58,22 @@ impl Engine {
             let sample = ConnectionSample {
                 time_us: now_us,
                 in_use: route_in_use(vehicle).is_some_and(|r| r.link_id == reading.link_id),
+                down: !vehicle
+                    .connections
+                    .iter()
+                    .flat_map(|c| &c.routes)
+                    .any(|r| r.link_id == reading.link_id && r.reachable),
                 round_trip_ms: reading.health.round_trip_ms,
                 loss_percent: reading.health.loss_percent,
                 age_ms: reading.health.age_ms,
                 camera_bps: self.camera_bps_on(vehicle, &reading.link_id),
-                rssi_percent: reading.radio.0,
-                remote_rssi_percent: reading.radio.1,
+                rssi_percent: reading.radio.rssi_percent,
+                remote_rssi_percent: reading.radio.remote_rssi_percent,
+                noise_percent: reading.radio.noise_percent,
+                remote_noise_percent: reading.radio.remote_noise_percent,
+                radio_buffer_percent: reading.radio.buffer_free_percent,
+                received_bps: reading.throughput.map(|(received, _)| received),
+                sent_bps: reading.throughput.map(|(_, sent)| sent),
             };
             let kept = self
                 .connection_history

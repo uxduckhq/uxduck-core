@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "7061d3eb9ec4f0e6c5c8f3a4d889b0d27a6bc199",
+  "sourceCommit": "f0768ed48f275cb8110ac422c2270977005c4e12",
   "licenseReady": true,
   "files": [
     {
@@ -6416,7 +6416,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/vehicle.rs",
-      "sha256": "714548e6e3951dab7714eae30e573d9d289821d1de569b98523198cf9ef4f031",
+      "sha256": "a58ce6f78415482763e39f4b2275b49f24d818014eb1658b5d27f9148294bd1e",
       "executable": false
     },
     {
@@ -6896,7 +6896,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/connection_history.rs",
-      "sha256": "d1c52e44c6f39838359f64a89768f9ab2bfbc2f7ed9236ce618edd0a2a1cb87b",
+      "sha256": "5a4f78825248ad430d07570b8ae8b213da84bbf0c6961700795902c827cde338",
       "executable": false
     },
     {
@@ -7991,7 +7991,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/link_health.rs",
-      "sha256": "76d015d70c32092cf0458b027f05b2f88605f3a1d7f8be6d3bf7e8e1e217aacf",
+      "sha256": "7dc6030ffd10aeb2b88f1113ebe3f6c98596e6795efd70aeccee79c110e2b15b",
       "executable": false
     },
     {
@@ -8166,7 +8166,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/session.rs",
-      "sha256": "3f31226011c781545f4e0b763ec020096c307b6dde598c748874843564a25358",
+      "sha256": "4d29234adbd356bfba669bcc9ebf9abf1795245a6c435840bab3c0f11b88c9d4",
       "executable": false
     },
     {
@@ -8856,7 +8856,7 @@
     },
     {
       "path": "crates/uxduck/src/daemon/data_plane.rs",
-      "sha256": "9770a901c8877a1ac1658cb9818d2fe18c25a05cd78feeeb8597e2a05268d75e",
+      "sha256": "d56f4e20c37f269f2410607b7105144ba6d3ccb633da49a3fac561428ad16e3c",
       "executable": false
     },
     {
@@ -9716,7 +9716,7 @@
     },
     {
       "path": "packages/protocol/src/generated/types.gen.ts",
-      "sha256": "c2ca68cfefabcb203878e01f06ab3f30d166c0d792a9a1210b305f2578a6d5db",
+      "sha256": "8ffb6a0d840aa64a067489ffa628907b05c7369b3045c90be7dec82edf665a4f",
       "executable": false
     },
     {

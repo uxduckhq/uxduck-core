@@ -1099,8 +1099,9 @@ pub struct Session {
     /// Terrain answers waiting to go, paced per vehicle (S118).
     terrain: crate::terrain::Outbox,
     /// Each link's telemetry radio as it last said in `RADIO_STATUS`: its
-    /// signal, the remote radio's, and when.
-    radios: BTreeMap<String, (u8, u8, u64)>,
+    /// signal, the remote radio's, its noise, the remote radio's, its free
+    /// transmit buffer, and when.
+    radios: BTreeMap<String, ([u8; 5], u64)>,
     /// `TERRAIN_CHECK`s waiting for their report (S119), by vehicle: the
     /// point and when it was asked.
     terrain_checks: BTreeMap<String, Vec<(i32, i32, u64)>>,
@@ -1119,6 +1120,23 @@ pub struct Session {
 /// which comes once a second.
 const STATION_US: u64 = 10_000_000;
 
+/// A link's telemetry radio as it last said in `RADIO_STATUS`
+/// ([`Session::radio`]). Each is absent while the radio does not say.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Radio {
+    /// Its signal, as a share of the radio's own scale.
+    pub rssi_percent: Option<f64>,
+    /// The signal at the radio on the other end, the same way.
+    pub remote_rssi_percent: Option<f64>,
+    /// The noise it hears, on the same scale as its signal.
+    pub noise_percent: Option<f64>,
+    /// The noise the radio on the other end hears, the same way.
+    pub remote_noise_percent: Option<f64>,
+    /// How much of its transmit buffer is free, in percent: near 0, it is
+    /// given more than it can send.
+    pub buffer_free_percent: Option<f64>,
+}
+
 /// A telemetry radio reports `RADIO_STATUS` about once a second. One silent
 /// this long, the time after which a vehicle not heard is not responding,
 /// says nothing of the link now.
@@ -1134,21 +1152,28 @@ impl Session {
         }
     }
 
-    /// The signal of a link's telemetry radio and of the radio at the other
-    /// end, each as a share of the radio's own scale (0 to 254), while it
-    /// reports them (`RADIO_STATUS`, S72). A radio that says 255 does not
-    /// know, and one silent for [`RADIO_SILENT_US`] says nothing now.
+    /// A link's telemetry radio and the radio at the other end, while it
+    /// reports them (`RADIO_STATUS`, S72, and its noise and buffer
+    /// 2026-11-22). Signal and noise are each a share of the radio's own
+    /// scale (0 to 254), where a radio that says 255 does not know. One
+    /// silent for [`RADIO_SILENT_US`] says nothing now.
     #[must_use]
-    pub fn radio_signal(&self, link_id: &str, now_us: u64) -> (Option<f64>, Option<f64>) {
-        let Some(&(rssi, remrssi, _)) = self
+    pub fn radio(&self, link_id: &str, now_us: u64) -> Radio {
+        let Some(&([rssi, remrssi, noise, remnoise, txbuf], _)) = self
             .radios
             .get(link_id)
-            .filter(|(_, _, at_us)| now_us.saturating_sub(*at_us) < RADIO_SILENT_US)
+            .filter(|(_, at_us)| now_us.saturating_sub(*at_us) < RADIO_SILENT_US)
         else {
-            return (None, None);
+            return Radio::default();
         };
         let percent = |v: u8| (v != u8::MAX).then(|| f64::from(v) * 100.0 / 254.0);
-        (percent(rssi), percent(remrssi))
+        Radio {
+            rssi_percent: percent(rssi),
+            remote_rssi_percent: percent(remrssi),
+            noise_percent: percent(noise),
+            remote_noise_percent: percent(remnoise),
+            buffer_free_percent: (txbuf <= 100).then(|| f64::from(txbuf)),
+        }
     }
 
     /// The system id to send as from now on, and to take replies for.
@@ -1337,12 +1362,16 @@ impl Session {
                 txbuf,
                 rssi,
                 remrssi,
+                noise,
+                remnoise,
                 ..
             } = decoded.message
             {
                 self.terrain.radio_status(link_id, txbuf, received_us);
-                self.radios
-                    .insert(link_id.to_owned(), (rssi, remrssi, received_us));
+                self.radios.insert(
+                    link_id.to_owned(),
+                    ([rssi, remrssi, noise, remnoise, txbuf], received_us),
+                );
             }
             let protocol = matches!(
                 decoded.message,
@@ -6793,10 +6822,10 @@ mod tests {
     }
 
     #[test]
-    fn a_links_radio_signal_is_its_last_radio_status_while_the_radio_reports() {
+    fn a_links_radio_is_its_last_radio_status_while_the_radio_reports() {
         let mut session = Session::new(Config::default());
-        assert_eq!(session.radio_signal("l1", 0), (None, None));
-        let status = |rssi, remrssi| {
+        assert_eq!(session.radio("l1", 0), Radio::default());
+        let status = |rssi, remrssi, noise, remnoise, txbuf| {
             crate::sim::frame(
                 51,
                 68,
@@ -6804,25 +6833,43 @@ mod tests {
                 &mavio::dialects::ardupilotmega::messages::RadioStatus {
                     rssi,
                     remrssi,
+                    noise,
+                    remnoise,
+                    txbuf,
                     ..Default::default()
                 },
             )
         };
-        session.ingest("l1", PEER, &status(127, 254), 1_000_000);
+        session.ingest("l1", PEER, &status(127, 254, 0, 127, 80), 1_000_000);
         assert_eq!(
-            session.radio_signal("l1", 1_500_000),
-            (Some(50.0), Some(100.0))
+            session.radio("l1", 1_500_000),
+            Radio {
+                rssi_percent: Some(50.0),
+                remote_rssi_percent: Some(100.0),
+                noise_percent: Some(0.0),
+                remote_noise_percent: Some(50.0),
+                buffer_free_percent: Some(80.0),
+            }
         );
-        assert_eq!(session.radio_signal("l2", 1_500_000), (None, None));
-        session.ingest("l1", PEER, &status(254, u8::MAX), 2_000_000);
+        assert_eq!(session.radio("l2", 1_500_000), Radio::default());
+        session.ingest(
+            "l1",
+            PEER,
+            &status(254, u8::MAX, u8::MAX, 0, u8::MAX),
+            2_000_000,
+        );
         assert_eq!(
-            session.radio_signal("l1", 2_000_000),
-            (Some(100.0), None),
+            session.radio("l1", 2_000_000),
+            Radio {
+                rssi_percent: Some(100.0),
+                remote_noise_percent: Some(0.0),
+                ..Radio::default()
+            },
             "255 is a radio that does not know"
         );
         assert_eq!(
-            session.radio_signal("l1", 5_000_000),
-            (None, None),
+            session.radio("l1", 5_000_000),
+            Radio::default(),
             "silent for 3 s, it says nothing now"
         );
     }

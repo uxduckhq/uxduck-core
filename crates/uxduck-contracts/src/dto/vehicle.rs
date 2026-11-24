@@ -422,6 +422,10 @@ pub struct ConnectionSample {
     /// could carry commands.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_use: bool,
+    /// UXDuck counted the vehicle not responding on it then, as its
+    /// Connections list says: absent while it was up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub down: bool,
     /// MAVLink's round trip on it, the median of the last 5 s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round_trip_ms: Option<f64>,
@@ -445,6 +449,28 @@ pub struct ConnectionSample {
     /// The signal at the radio on the other end, the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_rssi_percent: Option<f64>,
+    /// The noise its telemetry radio hears, on the same scale as its
+    /// signal, while the radio reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise_percent: Option<f64>,
+    /// The noise the radio on the other end hears, the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_noise_percent: Option<f64>,
+    /// How much of its telemetry radio's transmit buffer is free, in
+    /// percent, while the radio reports it. Near 0, the radio is given more
+    /// than it can send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radio_buffer_percent: Option<f64>,
+    /// The MAVLink UXDuck received on it in the last second, in bits a
+    /// second, from every system on it. Absent before UXDuck has measured
+    /// a second of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub received_bps: Option<u64>,
+    /// The MAVLink UXDuck sent on it in the last second, the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub sent_bps: Option<u64>,
 }
 
 /// Discovered connections only. Configuring a link is never vehicle evidence.

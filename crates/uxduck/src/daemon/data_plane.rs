@@ -694,6 +694,9 @@ struct Plane {
     /// How each vehicle's link is doing (S261), on the clock of `started`.
     registration_vehicles: HashMap<String, std::collections::BTreeSet<String>>,
     health: uxduck_mavlink::link_health::Tracker,
+    /// The MAVLink each link received and carried out, for each connection's
+    /// graph (2026-11-22).
+    throughput: uxduck_mavlink::link_health::Throughput,
     /// The vehicle at each address last reported, for the last report of
     /// an address that is gone.
     reported: std::collections::BTreeMap<(String, String, u8), String>,
@@ -762,6 +765,7 @@ impl Plane {
             simulators,
             withheld: std::collections::HashSet::new(),
             health: uxduck_mavlink::link_health::Tracker::new(config.stale_after_us),
+            throughput: uxduck_mavlink::link_health::Throughput::default(),
             registration_vehicles: HashMap::new(),
             reported: std::collections::BTreeMap::new(),
             started: std::time::Instant::now(),
@@ -1065,6 +1069,9 @@ impl Plane {
                 (!addresses.values().any(|known| known == id)).then(|| (id.clone(), last))
             })
             .collect();
+        self.throughput
+            .retain(|link_id| self.open.contains_key(link_id));
+        let throughput = self.throughput.read(now_us);
         let mut readings = Vec::new();
         let wall_us = SystemClock.now_us();
         for (address, id) in &addresses {
@@ -1079,7 +1086,8 @@ impl Plane {
                 vehicle_id: id.clone(),
                 link_id: address.0.clone(),
                 health,
-                radio: self.session.radio_signal(&address.0, wall_us),
+                radio: self.session.radio(&address.0, wall_us),
+                throughput: throughput.get(&address.0).copied(),
             });
         }
         self.reported = addresses;
@@ -1620,6 +1628,7 @@ impl Plane {
         let Some(header) = header(frame) else {
             return;
         };
+        self.throughput.received(link_id, frame.len());
         crate::diagnostics::record(
             link_id,
             Some(peer),
@@ -2140,6 +2149,7 @@ impl Plane {
     /// writing never holds a send up.
     fn record_sent(&mut self, sent: Vec<(String, Vec<u8>, u64)>) {
         for (link_id, bytes, at_us) in sent {
+            self.throughput.sent(&link_id, bytes.len());
             if let Some(open) = self.open.get_mut(&link_id) {
                 record(&link_id, open, std::slice::from_ref(&bytes), at_us);
             }

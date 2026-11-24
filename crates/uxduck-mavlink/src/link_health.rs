@@ -41,6 +41,8 @@
 //!   A link that has answered `TIMESYNC` and is asked for
 //!   [`UPLINK_SILENT_US`] with no reply is silent one way, even while the
 //!   vehicle is still heard on it.
+//! - **Throughput**: the MAVLink bytes each link received and UXDuck sent
+//!   on it, as bits a second since they were last read ([`Throughput`]).
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -497,6 +499,66 @@ impl Health {
         {
             self.round_trips.pop_front();
         }
+    }
+}
+
+/// What each link carries, in MAVLink bytes received and sent, read as bits
+/// a second over the time since it was last read (2026-11-22). Only links
+/// that carried something since they were last forgotten are counted.
+#[derive(Debug, Default)]
+pub struct Throughput {
+    links: BTreeMap<String, (u64, u64)>,
+    read_us: Option<u64>,
+}
+
+impl Throughput {
+    /// A frame a link received.
+    pub fn received(&mut self, link_id: &str, bytes: usize) {
+        self.count(link_id, (bytes as u64, 0));
+    }
+
+    /// A frame UXDuck sent on a link.
+    pub fn sent(&mut self, link_id: &str, bytes: usize) {
+        self.count(link_id, (0, bytes as u64));
+    }
+
+    /// Each link's received and sent bits a second since the last read,
+    /// starting both again. Nothing the first time, which has no time to
+    /// divide by. A link counted before and silent since reads 0.
+    pub fn read(&mut self, now_us: u64) -> BTreeMap<String, (u64, u64)> {
+        let since = self.read_us.replace(now_us);
+        let Some(span_us) = since
+            .map(|at| now_us.saturating_sub(at))
+            .filter(|us| *us > 0)
+        else {
+            for count in self.links.values_mut() {
+                *count = (0, 0);
+            }
+            return BTreeMap::new();
+        };
+        let rate = |bytes: u64| bytes.saturating_mul(8_000_000) / span_us;
+        self.links
+            .iter_mut()
+            .map(|(link_id, count)| {
+                let read = (rate(count.0), rate(count.1));
+                *count = (0, 0);
+                (link_id.clone(), read)
+            })
+            .collect()
+    }
+
+    /// Forgets every link `keep` does not keep, such as closed ones.
+    pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.links.retain(|link_id, _| keep(link_id));
+    }
+
+    fn count(&mut self, link_id: &str, (received, sent): (u64, u64)) {
+        if let Some(count) = self.links.get_mut(link_id) {
+            count.0 += received;
+            count.1 += sent;
+            return;
+        }
+        self.links.insert(link_id.to_owned(), (received, sent));
     }
 }
 
@@ -1076,5 +1138,26 @@ mod tests {
             Some(0.0),
             "not silent before the session's own time to not responding"
         );
+    }
+
+    #[test]
+    fn throughput_is_each_links_bits_a_second_since_it_was_last_read() {
+        let mut throughput = Throughput::default();
+        throughput.received("radio", 100);
+        assert!(
+            throughput.read(1_000_000).is_empty(),
+            "nothing to divide by yet"
+        );
+        throughput.received("radio", 250);
+        throughput.received("radio", 250);
+        throughput.sent("radio", 50);
+        throughput.sent("4g", 125);
+        let read = throughput.read(3_000_000);
+        assert_eq!(read["radio"], (2_000, 200), "500 bytes and 50 over 2 s");
+        assert_eq!(read["4g"], (0, 500));
+        let read = throughput.read(4_000_000);
+        assert_eq!(read["radio"], (0, 0), "silent since: 0, not its last rate");
+        throughput.retain(|link_id| link_id != "4g");
+        assert!(!throughput.read(5_000_000).contains_key("4g"));
     }
 }

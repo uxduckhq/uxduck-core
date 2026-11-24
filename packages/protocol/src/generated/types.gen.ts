@@ -5614,6 +5614,11 @@ export type ConnectionSample = {
      */
     cameraBps?: number | null;
     /**
+     * UXDuck counted the vehicle not responding on it then, as its
+     * Connections list says: absent while it was up.
+     */
+    down?: boolean;
+    /**
      * It carried the vehicle's commands, or its telemetry while none
      * could carry commands.
      */
@@ -5622,6 +5627,27 @@ export type ConnectionSample = {
      * The share of the vehicle's messages lost on it over the last 10 s.
      */
     lossPercent?: number | null;
+    /**
+     * The noise its telemetry radio hears, on the same scale as its
+     * signal, while the radio reports it.
+     */
+    noisePercent?: number | null;
+    /**
+     * How much of its telemetry radio's transmit buffer is free, in
+     * percent, while the radio reports it. Near 0, the radio is given more
+     * than it can send.
+     */
+    radioBufferPercent?: number | null;
+    /**
+     * The MAVLink UXDuck received on it in the last second, in bits a
+     * second, from every system on it. Absent before UXDuck has measured
+     * a second of it.
+     */
+    receivedBps?: number | null;
+    /**
+     * The noise the radio on the other end hears, the same way.
+     */
+    remoteNoisePercent?: number | null;
     /**
      * The signal at the radio on the other end, the same way.
      */
@@ -5635,6 +5661,10 @@ export type ConnectionSample = {
      * radio's own scale, while the radio reports it.
      */
     rssiPercent?: number | null;
+    /**
+     * The MAVLink UXDuck sent on it in the last second, the same way.
+     */
+    sentBps?: number | null;
     timeUs: number;
 };
 
