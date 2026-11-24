@@ -594,6 +594,12 @@ impl Task {
         };
         running.reaped = true;
         forget_keys();
+        // Everything it showed reaches the socket before its end does, and
+        // nothing of its pseudo-terminal's closing does.
+        tokio::select! {
+            () = running.drained() => {}
+            end = told(&mut self.end) => return Attended::Done(Outcome::Told(end)),
+        }
         let said = said();
         if !companions::signed_in(&said) {
             if companions::refused(&said) {
@@ -612,12 +618,6 @@ impl Task {
                 &self.order.computer,
                 &said,
             )));
-        }
-        // Everything it showed reaches the socket before its end does.
-        running.finish();
-        tokio::select! {
-            _ = &mut running.pumped => {}
-            end = told(&mut self.end) => return Attended::Done(Outcome::Told(end)),
         }
         Attended::Done(Outcome::Own(TerminalEnded {
             how: EndDto::Exited,
@@ -716,13 +716,27 @@ impl Running {
         }
     }
 
-    /// Lets the last of its output end: `ConPTY` ends it only when the
-    /// pseudo-terminal closes.
+    /// Closes its pseudo-terminal.
     fn finish(&mut self) {
         if let Kind::Pty { master, writer, .. } = &mut self.kind {
             writer.take();
             master.take();
         }
+    }
+
+    /// Waits until the last of its output is queued for the socket, and
+    /// closes its pseudo-terminal. `ConPTY` ends the output only when the
+    /// pseudo-terminal closes, so there it closes first. Elsewhere the
+    /// output ends when `ssh` and what it started have, and the closing
+    /// comes after: it writes an end of input (`portable-pty`), which the
+    /// pseudo-terminal echoes as a new line to whoever still reads it, and
+    /// that is nothing the computer showed.
+    async fn drained(&mut self) {
+        if cfg!(windows) {
+            self.finish();
+        }
+        let _ = (&mut self.pumped).await;
+        self.finish();
     }
 }
 
@@ -1178,6 +1192,66 @@ mod tests {
             "{missing}"
         );
         assert!(!missing.contains(';'));
+    }
+
+    /// A program that outlives `ssh` on the pseudo-terminal, as the `ssh`
+    /// it went through can for a moment, keeps it read after `ssh` has
+    /// ended. Closed then, the pseudo-terminal echoed its closing as a new
+    /// line into what the terminal showed.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_terminal_that_never_signed_in_shows_nothing_of_its_own_closing() {
+        let files = tempfile::tempdir().unwrap();
+        let (shown_tx, mut shown) = mpsc::channel(QUEUED);
+        let (_size, size) = watch::channel((80, 24));
+        let (_end, end) = watch::channel(None);
+        let mut task = Task {
+            dir: files.path().to_owned(),
+            program: "/bin/sh".into(),
+            order: TerminalOrder {
+                terminal_id: "t1".into(),
+                computer: Box::new(computer()),
+                through: None,
+                cols: 80,
+                rows: 24,
+                command: None,
+                collect: None,
+            },
+            pasted: None,
+            own: own(),
+            through_key: None,
+            typed: None,
+            shown: shown_tx.clone(),
+            shown_err: None,
+            size,
+            end,
+        };
+        let built = Ssh {
+            args: vec!["-c".into(), "trap '' HUP; sleep 0.3 & exit 255".into()],
+            envs: Vec::new(),
+        };
+        let running = spawn_pty(&task.program, &built, (80, 24), shown_tx).unwrap();
+        let attended = tokio::time::timeout(
+            Duration::from_secs(30),
+            task.attend(
+                running,
+                &files.path().join("log"),
+                &files.path().join("key"),
+                None,
+            ),
+        )
+        .await
+        .expect("the session ends");
+        assert!(
+            !matches!(attended, Attended::Done(Outcome::Told(_))),
+            "it ended by itself"
+        );
+        drop(task);
+        let mut all = Vec::new();
+        while let Some(bytes) = shown.recv().await {
+            all.extend(bytes);
+        }
+        assert_eq!(String::from_utf8_lossy(&all), "");
     }
 
     #[test]
