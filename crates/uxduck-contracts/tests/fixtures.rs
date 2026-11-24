@@ -140,6 +140,20 @@ fn an_older_page_does_not_claim_to_show_shell_commands() {
     assert!(!hello.capabilities.shell_commands);
 }
 
+/// So UXDuck sends it no `request/held`, which it would not act on.
+#[test]
+fn an_older_page_does_not_say_it_waits_for_held_requests() {
+    let mut value = fixture("initialize.request.json");
+    let waits: InitializeParams = serde_json::from_value(value["params"].clone()).unwrap();
+    assert!(waits.capabilities.held_requests);
+    value["params"]["capabilities"]
+        .as_object_mut()
+        .unwrap()
+        .remove("heldRequests");
+    let hello: InitializeParams = serde_json::from_value(value["params"].clone()).unwrap();
+    assert!(!hello.capabilities.held_requests);
+}
+
 #[test]
 fn mission_read_and_replay_mark_capabilities_default_independently() {
     for mission in [None, Some(false), Some(true)] {

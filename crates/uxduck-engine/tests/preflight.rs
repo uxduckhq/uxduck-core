@@ -200,6 +200,11 @@ fn later(client: &mut Client) -> Option<Value> {
 }
 
 fn connect(engine: &mut Engine, kind: &str) -> Client {
+    connect_saying(engine, kind, json!({ "protocolVersion": 1 }))
+}
+
+/// A client that says this of itself as it connects.
+fn connect_saying(engine: &mut Engine, kind: &str, capabilities: Value) -> Client {
     let (outbox, inbox) = unbounded();
     let id = engine.connect(Transport::Socket, Trust::LocalUser, outbox);
     let mut client = Client {
@@ -214,7 +219,7 @@ fn connect(engine: &mut Engine, kind: &str) -> Client {
         "initialize",
         json!({
             "clientInfo": { "name": kind, "version": "0.1.0", "kind": kind },
-            "capabilities": { "protocolVersion": 1 }
+            "capabilities": capabilities
         }),
     );
     assert!(init.get("result").is_some(), "{init}");
@@ -2006,6 +2011,171 @@ fn an_agents_take_off_from_another_mode_goes_past_failing_checks_only_once_appro
     };
     assert_eq!(steps, from_another_mode());
     assert_eq!(reply["result"]["status"], "accepted", "{reply}");
+}
+
+/// A client whose arming is held for an operator, which waits for held
+/// requests as long as UXDuck says. Its request's id and the approval.
+fn held_arming(b: &mut Bench) -> (Client, i64, uxduck_core::domain::approval::Approval) {
+    let mut asker = connect_saying(
+        &mut b.engine,
+        "agent",
+        json!({ "protocolVersion": 1, "heldRequests": true }),
+    );
+    let held = send(
+        &mut b.engine,
+        &mut asker,
+        "command/send",
+        json!({ "vehicleId": "v", "command": { "type": "arm" } }),
+    );
+    assert!(held.is_none(), "held: {held:?}");
+    assert!(b.wire.take().is_empty());
+    let approval = b.engine.state().approvals.values().next().cloned().unwrap();
+    assert_eq!(approval.summary, "arm Alpha");
+    let id = asker.next_id;
+    (asker, id, approval)
+}
+
+/// What an operator is told of a request that was withdrawn.
+fn withdrawn_notice(b: &Bench) -> Vec<(String, Option<String>)> {
+    b.engine
+        .state()
+        .notifications
+        .values()
+        .filter(|n| {
+            n.condition
+                .as_deref()
+                .is_some_and(|c| c.starts_with("approval-withdrawn:"))
+        })
+        .map(|n| (n.title.clone(), n.body.clone()))
+        .collect()
+}
+
+/// The asker of a held command is told it waits and for how long, the
+/// daemon's one number, and an answer in time sends the command as ever
+/// (2026-11-21).
+#[test]
+fn a_held_commands_asker_is_told_how_long_it_waits_and_an_answer_in_time_sends_it() {
+    let mut b = bench();
+    let (mut asker, id, approval) = held_arming(&mut b);
+    assert_eq!(
+        asker.queued.iter().collect::<Vec<_>>(),
+        [&json!({
+            "jsonrpc": "2.0", "method": "request/held",
+            "params": { "id": id, "summary": "arm Alpha", "waitMs": 60_000 }
+        })]
+    );
+    // A client that does not say it waits so is told nothing, as before.
+    let mut older = connect(&mut b.engine, "agent");
+    assert!(
+        send(
+            &mut b.engine,
+            &mut older,
+            "command/send",
+            json!({ "vehicleId": "v", "command": { "type": "disarm" } }),
+        )
+        .is_none()
+    );
+    assert!(older.queued.is_empty(), "{:?}", older.queued);
+
+    // Just inside the wait: allowed, and it goes.
+    b.time.advance(59_000_000);
+    let allowed = b.call(
+        "approval/resolve",
+        json!({ "id": approval.id, "allow": true }),
+    );
+    assert_eq!(allowed["result"]["state"], "allowed", "{allowed}");
+    let sent = b.wire.take();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].command, Command::Arm);
+    assert!(withdrawn_notice(&b).is_empty());
+    assert!(later(&mut asker).is_none(), "answered by the vehicle");
+}
+
+/// The asker stopped waiting, by a Cancel or by its own deadline, and said
+/// so: the request is taken away, the operator is told why the question
+/// went, and an Allow afterwards sends the vehicle nothing.
+#[test]
+fn an_allow_after_the_asker_stopped_waiting_sends_the_vehicle_nothing() {
+    let mut b = bench();
+    let (mut asker, id, approval) = held_arming(&mut b);
+    b.engine.receive(
+        asker.id,
+        &json!({ "jsonrpc": "2.0", "method": "cancel", "params": { "id": id } }).to_string(),
+    );
+    assert!(b.engine.state().approvals.is_empty());
+    assert!(
+        b.engine
+            .state()
+            .notifications
+            .values()
+            .all(|n| n.condition != Some(format!("approval:{}", approval.id))),
+        "the question is gone"
+    );
+    assert_eq!(
+        withdrawn_notice(&b),
+        [(
+            format!("{} stopped waiting", approval.client_name),
+            Some("Its request to arm Alpha was withdrawn. Nothing was done.".to_owned())
+        )]
+    );
+    let late = b.call(
+        "approval/resolve",
+        json!({ "id": approval.id, "allow": true }),
+    );
+    assert_eq!(late["error"]["data"]["kind"], "not-found", "{late}");
+    assert!(b.wire.take().is_empty());
+    assert!(later(&mut asker).is_none(), "it gave the request up");
+}
+
+/// The asker's connection ended: the same, and the operator reads that it
+/// disconnected.
+#[test]
+fn an_allow_after_the_askers_connection_ended_sends_the_vehicle_nothing() {
+    let mut b = bench();
+    let (asker, _, approval) = held_arming(&mut b);
+    b.engine.disconnect(asker.id);
+    assert!(b.engine.state().approvals.is_empty());
+    assert_eq!(
+        withdrawn_notice(&b),
+        [(
+            format!("{} disconnected", approval.client_name),
+            Some("Its request to arm Alpha was withdrawn. Nothing was done.".to_owned())
+        )]
+    );
+    let late = b.call(
+        "approval/resolve",
+        json!({ "id": approval.id, "allow": true }),
+    );
+    assert_eq!(late["error"]["data"]["kind"], "not-found", "{late}");
+    assert!(b.wire.take().is_empty());
+}
+
+/// The wait is the daemon's and exact. An Allow that arrives after it, even
+/// before the pass that takes overdue requests away has run, sends nothing,
+/// and the asker reads that nobody answered.
+#[test]
+fn an_allow_after_the_deadline_sends_the_vehicle_nothing() {
+    let mut b = bench();
+    let (mut asker, id, approval) = held_arming(&mut b);
+    b.time.advance(60_000_000);
+    let late = b.call(
+        "approval/resolve",
+        json!({ "id": approval.id, "allow": true }),
+    );
+    assert_eq!(late["error"]["data"]["kind"], "not-found", "{late}");
+    assert!(b.wire.take().is_empty());
+    assert!(b.engine.state().approvals.is_empty());
+    let answer = later(&mut asker).expect("the held request is answered");
+    assert_eq!(answer["id"], id);
+    assert_eq!(answer["error"]["data"]["kind"], "capability-denied");
+    assert_eq!(
+        answer["error"]["message"],
+        "It was not done, because nobody answered on the computer UXDuck runs on in time."
+    );
+    // The pass, when it comes, finds nothing left to do.
+    b.engine.expire_approvals(b.time.now());
+    assert!(later(&mut asker).is_none());
+    assert!(b.wire.take().is_empty());
 }
 
 /// Someone at this computer agreed to the Terms of Service (ADR-0047), so a

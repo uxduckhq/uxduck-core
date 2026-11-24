@@ -11,6 +11,7 @@ use uxduck_contracts::dto::analytics::{ApprovalDecision, DaemonEvent};
 use uxduck_contracts::dto::client::{
     Approval as ApprovalDto, ApprovalListResult, ApprovalResolveParams, CapabilitiesChanged,
     ClientListResult, ClientRecord as ClientDto, ClientRow, ClientSetCapabilitiesParams,
+    RequestHeld,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::{ClientRequest, ServerNotification};
@@ -30,6 +31,18 @@ use crate::{ConnectionId, Engine, rpc};
 
 /// How long an operator has to answer before the safe default, deny.
 pub const APPROVAL_DEADLINE_US: u64 = 60_000_000;
+
+/// What an asker reads when the deadline passed with no answer.
+const NOBODY_ANSWERED: &str =
+    "It was not done, because nobody answered on the computer UXDuck runs on in time.";
+/// What an asker reads when its request was answered with no.
+const NOT_ALLOWED: &str = "It was not done, because the operator denied it.";
+
+/// The condition of the notice that a request was withdrawn, before its
+/// approval's id: shown to those who answer approvals, and for a terminal
+/// to operators alone, as the question was.
+const WITHDRAWN: &str = "approval-withdrawn:";
+const WITHDRAWN_FROM_OPERATORS: &str = "approval-withdrawn:operators:";
 
 /// A request waiting for its approval.
 #[derive(Debug)]
@@ -335,6 +348,23 @@ impl Engine {
             version: 1,
         };
         let id = approval.id.clone();
+        // The asker is told its request waits, and for how long: its wait
+        // and the approval's deadline are this one number, never the
+        // asker's own shorter one, after which an answer would carry out
+        // what the asker was told had failed.
+        let told = self
+            .connections
+            .get(&connection)
+            .and_then(|c| c.admitted.as_ref())
+            .is_some_and(|a| a.reads.held_requests);
+        if told && let Ok(held) = serde_json::from_value(request_id.clone()) {
+            let frame = rpc::router::notification(&ServerNotification::RequestHeld(RequestHeld {
+                id: held,
+                summary: approval.summary.clone(),
+                wait_ms: APPROVAL_DEADLINE_US / 1000,
+            }));
+            self.send(connection, &frame);
+        }
         self.held.insert(
             id.clone(),
             Held {
@@ -1032,6 +1062,17 @@ impl Engine {
 
     /// The same for the notice of a pending approval, by its condition.
     pub(crate) fn hides_notice(&self, connection: ConnectionId, condition: Option<&str>) -> bool {
+        // That a request was withdrawn is told to whoever was asked.
+        if let Some(condition) = condition.filter(|c| c.starts_with(WITHDRAWN)) {
+            return self
+                .connections
+                .get(&connection)
+                .and_then(|c| c.admitted.as_ref())
+                .is_some_and(|a| {
+                    !a.answers_approvals()
+                        || (condition.starts_with(WITHDRAWN_FROM_OPERATORS) && !a.operator)
+                });
+        }
         condition
             .and_then(|condition| condition.strip_prefix("approval:"))
             .and_then(|id| self.state.approvals.get(id))
@@ -1146,7 +1187,7 @@ impl Engine {
                 }
                 // A terminal's asker is a person at a page: plain words.
                 request => crate::terminals::not_allowed(request, state == ApprovalState::Expired)
-                    .map_or_else(|| format!("{why} (approval {id})"), str::to_owned),
+                    .map_or_else(|| why.to_owned(), str::to_owned),
             };
             let error = ApiError::new(ErrorKind::CapabilityDenied, message);
             self.send(
@@ -1281,7 +1322,7 @@ impl Engine {
             .map(|a| a.id.clone())
             .collect();
         for id in due {
-            self.finish(&id, ApprovalState::Expired, None, "nobody answered in time");
+            self.finish(&id, ApprovalState::Expired, None, NOBODY_ANSWERED);
         }
     }
 
@@ -1294,11 +1335,11 @@ impl Engine {
             .map(|(id, _)| id.clone())
             .collect();
         for id in gone {
-            self.held.remove(&id);
-            self.finish(&id, ApprovalState::Expired, None, "the client disconnected");
+            self.withdraw(&id, "disconnected");
         }
     }
 
+    /// The asker stopped waiting, by a Cancel or by its own deadline.
     pub(crate) fn cancel_approval(&mut self, connection: ConnectionId, request_id: &Value) {
         let cancelled: Vec<String> = self
             .held
@@ -1307,14 +1348,42 @@ impl Engine {
             .map(|(id, _)| id.clone())
             .collect();
         for id in cancelled {
-            self.held.remove(&id);
-            self.finish(
-                &id,
-                ApprovalState::Expired,
-                None,
-                "the client cancelled the request",
-            );
+            self.withdraw(&id, "stopped waiting");
         }
+    }
+
+    /// Takes a held request away because its asker no longer waits for it:
+    /// nothing is carried out, whatever is answered afterwards. Those who
+    /// could have answered are told why their question went.
+    fn withdraw(&mut self, id: &str, did: &str) {
+        self.held.remove(id);
+        let Some(approval) = self.state.approvals.get(id) else {
+            return;
+        };
+        let told = Raise {
+            severity: Severity::Info,
+            kind: NotificationKind::Transient,
+            subject: Subject::Client {
+                id: approval.client_id.clone(),
+            },
+            title: format!("{} {did}", approval.client_name),
+            body: Some(format!(
+                "Its request to {} was withdrawn. Nothing was done.",
+                approval.summary
+            )),
+            actions: Vec::new(),
+            condition: Some(format!(
+                "{}{id}",
+                if approval.capability == Capability::Terminal {
+                    WITHDRAWN_FROM_OPERATORS
+                } else {
+                    WITHDRAWN
+                }
+            )),
+            report: None,
+        };
+        self.finish(id, ApprovalState::Expired, None, "");
+        self.raise(told);
     }
 
     /// Pending approvals left by a previous run cannot be answered.
@@ -1536,11 +1605,20 @@ fn resolve_approval(
             "This request is to run a command, and this client cannot show the command. Answer it in an up-to-date UXDuck window, or with `uxduck approvals`.",
         ));
     }
+    // The deadline is the daemon's and exact: an answer after it carries
+    // nothing out, even before the next expiry pass has taken the request.
+    if done.deadline_us <= engine.clock.now_us() {
+        engine.finish(&id, ApprovalState::Expired, None, NOBODY_ANSWERED);
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            format!("approval {id} ran out of time before this answer, so nothing was done"),
+        ));
+    }
     let remember = allow.then(|| remember.map_or(Remember::Once, Into::into));
     if allow {
         engine.finish(&id, ApprovalState::Allowed, remember, "");
     } else {
-        engine.finish(&id, ApprovalState::Denied, None, "an operator denied it");
+        engine.finish(&id, ApprovalState::Denied, None, NOT_ALLOWED);
     }
     done.state = if allow {
         ApprovalState::Allowed

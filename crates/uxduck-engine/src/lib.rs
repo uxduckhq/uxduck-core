@@ -245,11 +245,17 @@ struct Shutdown {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is its own capability the page declared"
+)]
 struct ReadCapabilities {
     mission_read_float_bits: bool,
     replay_step_marks: bool,
     /// It shows a command an agent asks to run, whole (ADR-0065 T14).
     shell_commands: bool,
+    /// It is told when its own request is held, and waits as long as told.
+    held_requests: bool,
 }
 
 #[derive(Debug)]

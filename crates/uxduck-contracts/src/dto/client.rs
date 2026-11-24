@@ -65,6 +65,22 @@ pub struct CapabilitiesChanged {
     pub granted: Vec<Capability>,
 }
 
+/// A request of this connection's waits for an operator's answer. Its own
+/// answer comes when the operator answers or the wait ends, so the client
+/// waits that long and no shorter of its own. A client that stops waiting
+/// sooner says so with `cancel`, which withdraws the request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestHeld {
+    /// The held request's id.
+    pub id: crate::dto::trace::RequestId,
+    /// What is asked for, as the operator reads it after "wants to".
+    pub summary: String,
+    /// How long from now UXDuck waits for an answer before nothing is done.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub wait_ms: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovalState {

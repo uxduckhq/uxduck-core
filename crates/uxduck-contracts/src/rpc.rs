@@ -21,7 +21,7 @@ use crate::dto::camera::{
 use crate::dto::client::{
     Approval, ApprovalResolveParams, CapabilitiesChanged, ClientForgetParams,
     ClientSetCapabilitiesParams, DisplayPullParams, DisplayRegisterParams, DisplayReplyParams,
-    DisplayRequested,
+    DisplayRequested, RequestHeld,
 };
 use crate::dto::command::{CommandSendParams, ModeListParams};
 use crate::dto::controller::{
@@ -2968,6 +2968,10 @@ pub enum ServerNotification {
     /// This connection's capabilities were edited; the next request uses them.
     #[serde(rename = "client/capabilitiesChanged")]
     ClientCapabilitiesChanged(CapabilitiesChanged),
+    /// A request of this connection's waits for an operator, to the asker
+    /// alone. It waits as long as this says, or says `cancel`.
+    #[serde(rename = "request/held")]
+    RequestHeld(RequestHeld),
     /// An approval to answer, to clients that declared `approvals: true`.
     #[serde(rename = "approval/requested")]
     ApprovalRequested(Approval),

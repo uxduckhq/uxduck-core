@@ -629,6 +629,7 @@ impl Engine {
                     mission_read_float_bits: false,
                     replay_step_marks: false,
                     shell_commands: false,
+                    held_requests: false,
                 },
                 operator: false,
                 record,

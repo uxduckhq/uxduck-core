@@ -1809,6 +1809,7 @@ fn initialize(
                 mission_read_float_bits: capabilities.mission_read_float_bits,
                 replay_step_marks: capabilities.replay_step_marks,
                 shell_commands: capabilities.shell_commands,
+                held_requests: capabilities.held_requests,
             },
             operator,
             record,

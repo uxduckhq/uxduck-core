@@ -97,6 +97,12 @@ pub struct ClientCapabilities {
     /// and takes no answer for one from it.
     #[serde(default)]
     pub shell_commands: bool,
+    /// It is told when a request of its own waits for an operator
+    /// (`request/held`), waits for the answer as long as that says and no
+    /// shorter of its own, and says `cancel` when it stops waiting. So what
+    /// it was told had failed is never carried out afterwards (2026-11-21).
+    #[serde(default)]
+    pub held_requests: bool,
 }
 
 /// Parameters of `initialize`.

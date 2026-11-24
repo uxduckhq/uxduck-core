@@ -9,7 +9,8 @@
       "optOutNotifications": ["log/line"],
       "markerShapes": true,
       "replayStepMarks": true,
-      "shellCommands": true
+      "shellCommands": true,
+      "heldRequests": true
     }
   }
 }

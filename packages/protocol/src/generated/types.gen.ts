@@ -3204,6 +3204,13 @@ export type ClientCapabilities = {
      */
     binaryChannels?: boolean;
     /**
+     * It is told when a request of its own waits for an operator
+     * (`request/held`), waits for the answer as long as that says and no
+     * shorter of its own, and says `cancel` when it stops waiting. So what
+     * it was told had failed is never carried out afterwards (2026-11-21).
+     */
+    heldRequests?: boolean;
+    /**
      * It reads a marker's `shape`, `colour`, `dashed` and `outlineOnly`,
      * and the look `building` with its `outline` and `heightM` (ADR-0052,
      * ADR-0053). UXDuck's page from before them is told to update: it
@@ -15825,6 +15832,27 @@ export type ReportedCheck = {
 export type ReportedStatus = 'pass' | 'fail' | 'waiting';
 
 /**
+ * A request of this connection's waits for an operator's answer. Its own
+ * answer comes when the operator answers or the wait ends, so the client
+ * waits that long and no shorter of its own. A client that stops waiting
+ * sooner says so with `cancel`, which withdraws the request.
+ */
+export type RequestHeld = {
+    /**
+     * The held request's id.
+     */
+    id: RequestId;
+    /**
+     * What is asked for, as the operator reads it after "wants to".
+     */
+    summary: string;
+    /**
+     * How long from now UXDuck waits for an answer before nothing is done.
+     */
+    waitMs: number;
+};
+
+/**
  * A JSON-RPC id: a number or a string.
  */
 export type RequestId = number | string;
@@ -16238,6 +16266,9 @@ export type ServerNotification = {
 } | {
     method: 'client/capabilitiesChanged';
     params: CapabilitiesChanged;
+} | {
+    method: 'request/held';
+    params: RequestHeld;
 } | {
     method: 'approval/requested';
     params: Approval;
