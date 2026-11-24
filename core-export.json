@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "683859cb75910cb9cc7532b82f353f7f3b47055f",
+  "sourceCommit": "43661dd7be3c06f8b8140abc16f049d4753ce45e",
   "licenseReady": true,
   "files": [
     {
@@ -186,7 +186,7 @@
     },
     {
       "path": "crates/uxduck-agent/src/turn.rs",
-      "sha256": "e967a6cdd1695d500fc2cd20e15240d76a99470b6b90dd8bd406215ce7ae228f",
+      "sha256": "1867a71f1f15ba53802b1086791adca28259ae0d0a9e404c12a62d23b3323a08",
       "executable": false
     },
     {
