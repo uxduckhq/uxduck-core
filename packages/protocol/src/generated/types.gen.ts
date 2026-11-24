@@ -374,6 +374,10 @@ export type Action = {
     type: 'open-setup';
     vehicleId: string;
 } | {
+    computerId: string;
+    type: 'open-companion-software';
+    vehicleId: string;
+} | {
     type: 'put-terrain-areas';
     vehicleId: string;
 } | {
@@ -3451,6 +3455,15 @@ export type ClientRequest = {
     method: 'computer/download';
     params: ComputerDownloadParams;
 } | {
+    method: 'computer/software';
+    params: ComputerSoftwareParams;
+} | {
+    method: 'computer/installPlan';
+    params: ComputerInstallParams;
+} | {
+    method: 'computer/install';
+    params: ComputerInstallParams;
+} | {
     method: 'computer/network';
     params: ComputerNetworkParams;
 } | {
@@ -5069,6 +5082,11 @@ export type CompanionCheck = {
      * as its `componentId`.
      */
     reportsAs?: number | null;
+    /**
+     * What its own setup says about UXDuck there (S297). `computer/software`
+     * compares it with this computer's.
+     */
+    software?: SoftwareFound | null;
     state: CheckState;
     /**
      * `uxduck --version`; absent when it has none.
@@ -5124,6 +5142,10 @@ export type CompanionComputer = {
      */
     host: string;
     id: string;
+    /**
+     * Its last Install, Update or Remove (S297).
+     */
+    install?: InstallRecord | null;
     /**
      * A private key is kept for it; absent, the person's SSH config and
      * agent sign in.
@@ -5367,6 +5389,25 @@ export type ComputerDownloadParams = {
 };
 
 /**
+ * `computer/installPlan` and `computer/install`.
+ */
+export type ComputerInstallParams = {
+    action: InstallAction;
+    computerId: string;
+    /**
+     * The serial port wired to the flight controller, `serial:DEVICE@BAUD`,
+     * for a computer that forwards its MAVLink.
+     */
+    serial?: string | null;
+    /**
+     * Where it sends its readings, `udp:HOST:PORT`, for a computer with no
+     * UXDuck service to copy it from.
+     */
+    to?: string | null;
+    vehicleId: string;
+};
+
+/**
  * Read networking, save Wi-Fi for automatic connection when available, or
  * configure internet health checks. At most one change per request.
  */
@@ -5594,6 +5635,63 @@ export type ComputerRunsResult = {
      * Newest first.
      */
     runs: Array<ComputerRun>;
+};
+
+/**
+ * One computer's UXDuck against this computer's.
+ */
+export type ComputerSoftware = {
+    /**
+     * It carries the vehicle's MAVLink, which pauses while it restarts.
+     */
+    carriesMavlink?: boolean;
+    computerId: string;
+    install?: InstallRecord | null;
+    /**
+     * UXDuck installed it, so Remove is offered.
+     */
+    managed?: boolean;
+    /**
+     * The features its `companion.toml` turns on that its version lacks.
+     */
+    missing?: Array<string>;
+    name: string;
+    /**
+     * What a person may do: Install or Update.
+     */
+    offer?: InstallAction | null;
+    status: SoftwareStatus;
+    /**
+     * Its version, as its last check read it.
+     */
+    version?: string | null;
+    /**
+     * The status in a few words.
+     */
+    words: string;
+};
+
+/**
+ * `computer/software`.
+ */
+export type ComputerSoftwareParams = {
+    vehicleId: string;
+};
+
+/**
+ * `computer/software`: each of a vehicle's computers' UXDuck.
+ */
+export type ComputerSoftwareResult = {
+    /**
+     * Whether the vehicle is armed: Install, Update and Remove wait for a
+     * disarm.
+     */
+    armed: boolean;
+    computers: Array<ComputerSoftware>;
+    /**
+     * This computer's UXDuck, which Install and Update put there.
+     */
+    ground: string;
 };
 
 /**
@@ -9219,6 +9317,29 @@ export type FoundTool = {
     title: string;
 };
 
+/**
+ * A systemd service on the computer that runs UXDuck.
+ */
+export type FoundUnit = {
+    /**
+     * It has drop-ins, which change what it runs.
+     */
+    dropIns?: boolean;
+    /**
+     * Its `ExecStart=`, as written.
+     */
+    exec: string;
+    name: string;
+    /**
+     * Written by UXDuck's Install.
+     */
+    own?: boolean;
+    /**
+     * Its `User=`. Absent, it runs as root.
+     */
+    user?: string | null;
+};
+
 export type FoundVehicle = {
     armed: boolean;
     autopilot: string;
@@ -9953,6 +10074,67 @@ export type InspectedMessage = {
     units?: {
         [key: string]: unknown;
     } | null;
+};
+
+export type InstallAction = 'install' | 'update' | 'remove';
+
+/**
+ * `computer/installPlan`: exactly what it will do, before it runs.
+ */
+export type InstallPlan = {
+    action: InstallAction;
+    groups?: Array<string>;
+    keeps?: Array<string>;
+    mavlinkPauses?: boolean;
+    /**
+     * The polkit rule, whole, as it will be written.
+     */
+    polkit?: string;
+    replaces?: Array<string>;
+    steps: Array<string>;
+    /**
+     * The build it copies, such as `aarch64-unknown-linux-gnu`.
+     */
+    target?: string | null;
+    /**
+     * The service's file, whole, as it will be written.
+     */
+    unit?: string;
+    /**
+     * The user the program runs as.
+     */
+    user: string;
+    version?: string | null;
+    warnings?: Array<string>;
+};
+
+/**
+ * The last Install, Update or Remove on a computer.
+ */
+export type InstallRecord = {
+    action: InstallAction;
+    /**
+     * When it started or finished.
+     */
+    atUs: number;
+    /**
+     * Why it failed or was put back, for people.
+     */
+    problem?: string | null;
+    state: InstallState;
+    steps?: Array<InstallStep>;
+    version?: string | null;
+};
+
+export type InstallState = 'running' | 'done' | 'failed' | 'rolled-back';
+
+/**
+ * One step as it ran on the computer, with what it said.
+ */
+export type InstallStep = {
+    ok: boolean;
+    output?: string;
+    title: string;
 };
 
 /**
@@ -16395,6 +16577,12 @@ export type Settings = {
      * line's).
      */
     closePolicySet: boolean;
+    /**
+     * Settings › Vehicles & connections (S297): a notice when a vehicle's
+     * companion computer runs an older UXDuck than this computer, once per
+     * version. On when an older daemon left it out.
+     */
+    companionUpdateNotices?: boolean;
     connectionOrder?: Array<string>;
     /**
      * Settings › Controllers (S419): a controller that can rumble does,
@@ -16589,6 +16777,7 @@ export type SettingsUpdateParams = {
      */
     batteryLowPct?: number | null;
     closePolicy?: ClosePolicy | null;
+    companionUpdateNotices?: boolean | null;
     /**
      * Shared preference for all vehicles. Connections not listed follow in creation order.
      */
@@ -17866,6 +18055,58 @@ export type SocketSend = {
     outcome: string;
     registration: boolean;
 };
+
+/**
+ * What a computer's own setup says about UXDuck there, as a check reads it.
+ */
+export type SoftwareFound = {
+    /**
+     * `getconf LONG_BIT`: 32 on a 32-bit system, even on a 64-bit kernel.
+     */
+    bits?: number | null;
+    /**
+     * Whether `/etc/uxduck/companion.toml` is there.
+     */
+    config?: boolean;
+    /**
+     * What its UXDuck offers by option, such as `config`.
+     */
+    has?: Array<string>;
+    /**
+     * The versions kept under `/opt/uxduck`.
+     */
+    kept?: Array<string>;
+    /**
+     * Where `/usr/local/bin/uxduck` points, or `file` when it is a file
+     * someone put there. Absent when there is none.
+     */
+    link?: string | null;
+    /**
+     * Its serial ports, for `uxduck forward`.
+     */
+    serial?: Array<string>;
+    /**
+     * Whether the user UXDuck signs in as may run `sudo` without a password.
+     */
+    sudo?: boolean | null;
+    /**
+     * Whether it runs systemd.
+     */
+    systemd?: boolean;
+    /**
+     * The systemd services that run `uxduck companion` or `uxduck forward`.
+     */
+    units?: Array<FoundUnit>;
+    /**
+     * The features that file turns on: `sender`, `recorder`.
+     */
+    uses?: Array<string>;
+};
+
+/**
+ * How a computer's UXDuck compares with this computer's.
+ */
+export type SoftwareStatus = 'not-checked' | 'checking' | 'not-installed' | 'up-to-date' | 'unreachable' | 'update-available' | 'update-needed' | 'newer' | 'unsupported' | 'unknown';
 
 /**
  * A sound input chosen with a local camera (S148): a microphone, or a

@@ -122,6 +122,12 @@ pub enum Action {
         vehicle_id: String,
         row: crate::dto::setup::SetupRow,
     },
+    /// Opens the vehicle's Setup at UXDuck on its computers (S297), where
+    /// Update shows what it will change before it runs.
+    OpenCompanionSoftware {
+        vehicle_id: String,
+        computer_id: String,
+    },
     /// Calls `terrain/putArea` for the vehicle: puts its areas on it, as
     /// asked first over a radio or on a real vehicle (ADR-0051 A7).
     PutTerrainAreas { vehicle_id: String },

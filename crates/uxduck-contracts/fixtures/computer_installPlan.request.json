@@ -1,0 +1,10 @@
+{
+  "method": "computer/installPlan",
+  "params": {
+    "vehicleId": "5b0c2e1a-7d3f-5e8b-9c4a-2f1e0d3c4b5a",
+    "computerId": "cc3f9a1b2c4d5e6f",
+    "action": "install",
+    "to": "udp:192.168.144.10:14550",
+    "serial": "serial:/dev/ttyAMA0@921600"
+  }
+}

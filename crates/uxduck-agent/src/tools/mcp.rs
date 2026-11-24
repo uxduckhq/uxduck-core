@@ -231,6 +231,8 @@ pub fn output_schema(method: &str) -> Option<Value> {
         "telemetry/get" => schema::<dto::telemetry::VehicleTelemetry>(),
         "telemetry/window" => schema::<dto::telemetry_window::TelemetryWindowResult>(),
         "computer/run" => schema::<dto::terminal::ComputerRunResult>(),
+        "computer/software" => schema::<dto::companion_software::ComputerSoftwareResult>(),
+        "computer/installPlan" => schema::<dto::companion_software::InstallPlan>(),
         "terrain/keepArea" => schema::<dto::terrain::TerrainArea>(),
         "terrain/areaSize" => schema::<dto::terrain::TerrainAreaSize>(),
         "terrain/areas" => schema::<dto::terrain::TerrainAreasResult>(),

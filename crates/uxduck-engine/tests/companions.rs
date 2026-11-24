@@ -23,9 +23,14 @@ use uxduck_core::domain::companion_cameras::{
     CameraLinger, CameraWatchdog, CompanionCameraPath, CompanionCameras, CompanionMicrophone,
     CompanionMicrophoneDevice, PicturePreset, VehicleRecordMode, VehicleRecording,
 };
+use uxduck_core::domain::companion_software::{
+    InstallAction, InstallRecord, InstallState, InstallStep, SoftwareFound,
+};
 use uxduck_core::domain::link::Link;
+use uxduck_core::domain::notification::{Action, NotificationAction, NotificationState, Severity};
 use uxduck_core::domain::vehicle::{Observation, Presence};
 use uxduck_core::policy::admission::Trust;
+use uxduck_engine::companion_software::InstallAnswer;
 use uxduck_engine::companions::{CheckAnswer, CompanionOrder, CompanionPort, Found};
 use uxduck_engine::runtime::{
     Clock, CommandOrder, Credentials, Forget, LinkPort, NoAgent, NoSystem, Ports, Random,
@@ -452,6 +457,7 @@ fn a_computer_takes_the_id_its_uxduck_sends_as() {
         reports_as,
         network: None,
         cameras: None,
+        software: None,
     };
     let check = |engine: &mut Engine, ui: &mut Client, computer: &str, reports_as| {
         ok(
@@ -508,6 +514,7 @@ fn a_computer_takes_the_id_its_uxduck_sends_as() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines, reason = "one check's whole story")]
 fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
     let keys = Keys::default();
     let mut engine = engine(State::default(), &keys);
@@ -542,6 +549,7 @@ fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
         result: Ok(Found {
             network: None,
             cameras: None,
+            software: None,
             os: Some("Debian GNU/Linux 12 (bookworm)".into()),
             arch: Some("aarch64".into()),
             uxduck: None,
@@ -1625,6 +1633,9 @@ fn checks_and_changes_carry_the_computer_they_go_through() {
         }
         | CompanionOrder::Cameras {
             computer, through, ..
+        }
+        | CompanionOrder::Install {
+            computer, through, ..
         } => (
             computer.id.clone(),
             through.as_ref().map(|t| {
@@ -1675,4 +1686,267 @@ fn checks_and_changes_carry_the_computer_they_go_through() {
     );
     let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
     assert_eq!(hop(&orders[0]), (gateway, None));
+}
+
+fn older_computer(engine: &mut Engine, id: &str, version: &str, uses: &[&str]) {
+    engine.companion_checked(CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.into(),
+        result: Ok(Found {
+            host_key: Some("SHA256:known".into()),
+            arch: Some("aarch64".into()),
+            uxduck: Some(version.into()),
+            software: Some(SoftwareFound {
+                systemd: true,
+                sudo: Some(true),
+                bits: Some(64),
+                config: !uses.is_empty(),
+                uses: uses.iter().map(|u| (*u).to_owned()).collect(),
+                ..SoftwareFound::default()
+            }),
+            ..Found::default()
+        }),
+    });
+}
+
+fn update_notices(engine: &Engine) -> Vec<(String, NotificationState, u64)> {
+    engine
+        .state()
+        .notifications
+        .values()
+        .filter(|n| {
+            n.condition
+                .as_deref()
+                .is_some_and(|c| c.starts_with("companion-update:"))
+        })
+        .map(|n| (n.title.clone(), n.state, n.version))
+        .collect()
+}
+
+/// S297: Install, Update and Remove show their plan first, run only on a
+/// checked computer of a disarmed vehicle, one at a time, and keep how they
+/// went with the computer; one a restart cut short is marked failed.
+#[test]
+#[allow(clippy::too_many_lines, reason = "one update's whole story")]
+fn an_update_shows_its_plan_and_runs_only_while_disarmed() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let ssh = Ssh::default();
+    engine.set_companions(Box::new(ssh.clone()));
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({"vehicleId":"v","host":"pi.local"}),
+    );
+    let id = vehicle["companions"][0]["id"].as_str().unwrap().to_owned();
+    let update =
+        json!({"vehicleId":"v","computerId":id,"action":"update","to":"udp:192.168.1.10:14550"});
+    assert!(
+        refused(&mut engine, &mut ui, "computer/installPlan", update.clone()).contains("first")
+    );
+    assert!(refused(&mut engine, &mut ui, "computer/install", update.clone()).contains("first"));
+    older_computer(&mut engine, &id, "0.0.9", &[]);
+    let software = ok(
+        &mut engine,
+        &mut ui,
+        "computer/software",
+        json!({"vehicleId":"v"}),
+    );
+    assert_eq!(software["ground"], "0.1.0");
+    assert_eq!(
+        software["computers"][0]["status"], "update-available",
+        "{software}"
+    );
+    assert_eq!(software["computers"][0]["offer"], "update");
+    let plan = ok(&mut engine, &mut ui, "computer/installPlan", update.clone());
+    assert_eq!(plan["version"], "0.1.0");
+    assert_eq!(plan["target"], "aarch64-unknown-linux-gnu");
+    assert!(
+        plan["unit"].as_str().unwrap().contains("User=uxduck"),
+        "{plan}"
+    );
+    assert!(
+        plan["unit"]
+            .as_str()
+            .unwrap()
+            .contains("--to udp:192.168.1.10:14550"),
+        "{plan}"
+    );
+    assert!(ssh.0.lock().unwrap().is_empty(), "a plan changes nothing");
+
+    observed(&mut engine, true);
+    assert!(refused(&mut engine, &mut ui, "computer/install", update.clone()).contains("Disarm"));
+    assert!(ssh.0.lock().unwrap().is_empty());
+    observed(&mut engine, false);
+
+    let running = ok(&mut engine, &mut ui, "computer/install", update.clone());
+    assert_eq!(
+        running["companions"][0]["install"]["state"], "running",
+        "{running}"
+    );
+    let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
+    assert!(
+        matches!(&orders[..], [CompanionOrder::Install { plan, .. }] if plan.version.as_deref() == Some("0.1.0") && plan.action == InstallAction::Update),
+        "{orders:?}"
+    );
+    assert!(
+        refused(&mut engine, &mut ui, "computer/install", update.clone())
+            .contains("already running")
+    );
+
+    let restarted = self::engine(engine.state().clone(), &keys);
+    let cut = restarted.state().vehicles["v"].companions[0]
+        .install
+        .clone()
+        .unwrap();
+    assert_eq!(cut.state, InstallState::Failed);
+    assert!(cut.problem.unwrap().contains("restarted"));
+
+    engine.companion_installed(InstallAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.clone(),
+        record: InstallRecord {
+            action: InstallAction::Update,
+            state: InstallState::Done,
+            at_us: 0,
+            version: Some("0.1.0".into()),
+            steps: vec![InstallStep {
+                title: "Write uxduck-companion.service".into(),
+                ok: true,
+                output: String::new(),
+            }],
+            problem: None,
+        },
+        found: Some(Found {
+            host_key: Some("SHA256:known".into()),
+            arch: Some("aarch64".into()),
+            uxduck: Some("0.1.0".into()),
+            software: Some(SoftwareFound {
+                systemd: true,
+                sudo: Some(true),
+                bits: Some(64),
+                link: Some("/opt/uxduck/0.1.0/uxduck".into()),
+                ..SoftwareFound::default()
+            }),
+            ..Found::default()
+        }),
+    });
+    let software = ok(
+        &mut engine,
+        &mut ui,
+        "computer/software",
+        json!({"vehicleId":"v"}),
+    );
+    assert_eq!(
+        software["computers"][0]["status"], "up-to-date",
+        "{software}"
+    );
+    assert_eq!(software["computers"][0]["managed"], true);
+    assert_eq!(software["computers"][0]["install"]["state"], "done");
+    // The computer is free again for the next change.
+    ok(
+        &mut engine,
+        &mut ui,
+        "computer/installPlan",
+        json!({"vehicleId":"v","computerId":id,"action":"remove"}),
+    );
+    ok(
+        &mut engine,
+        &mut ui,
+        "computer/install",
+        json!({"vehicleId":"v","computerId":id,"action":"remove"}),
+    );
+}
+
+/// S297, ADR-0061 B10: a connected, disarmed vehicle whose computer runs an
+/// older UXDuck says so once per version, never while armed, and takes it
+/// back when the computer is up to date or the setting is turned off.
+#[test]
+fn an_older_uxduck_is_noticed_once_per_version_and_only_on_the_ground() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    observed(&mut engine, true);
+    engine.set_companions(Box::new(Ssh::default()));
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({"vehicleId":"v","host":"pi.local"}),
+    );
+    let id = vehicle["companions"][0]["id"].as_str().unwrap().to_owned();
+    older_computer(&mut engine, &id, "0.0.9", &["recorder"]);
+    engine.review_companion_software();
+    assert!(update_notices(&engine).is_empty(), "never while armed");
+
+    observed(&mut engine, false);
+    engine.review_companion_software();
+    engine.review_companion_software();
+    let notices = update_notices(&engine);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].0.ends_with("runs UXDuck 0.0.9"), "{notices:?}");
+    let notice = engine
+        .state()
+        .notifications
+        .values()
+        .find(|n| n.title == notices[0].0)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        notice.severity,
+        Severity::Warning,
+        "a feature it uses is missing"
+    );
+    assert!(
+        notice
+            .body
+            .as_deref()
+            .unwrap()
+            .contains("This computer has 0.1.0. Update while disarmed.")
+    );
+    assert!(!notice.body.as_deref().unwrap().contains(';'));
+    assert!(matches!(
+        &notice.actions[..],
+        [NotificationAction { action: Action::OpenCompanionSoftware { computer_id, .. }, .. }] if *computer_id == id
+    ));
+
+    older_computer(&mut engine, &id, "0.1.0", &["recorder"]);
+    engine.review_companion_software();
+    let resolved = update_notices(&engine);
+    assert!(
+        resolved.iter().all(|n| n.1 == NotificationState::Resolved),
+        "{resolved:?}"
+    );
+    engine.review_companion_software();
+    assert_eq!(
+        update_notices(&engine),
+        resolved,
+        "a resolved notice is left alone"
+    );
+
+    older_computer(&mut engine, &id, "0.0.8", &[]);
+    engine.review_companion_software();
+    assert_eq!(
+        update_notices(&engine)
+            .iter()
+            .filter(|n| n.1 != NotificationState::Resolved)
+            .count(),
+        1
+    );
+    let version = engine.state().settings.version;
+    ok(
+        &mut engine,
+        &mut ui,
+        "settings/update",
+        json!({"expectedVersion": version, "companionUpdateNotices": false}),
+    );
+    engine.review_companion_software();
+    assert!(
+        update_notices(&engine)
+            .iter()
+            .all(|n| n.1 == NotificationState::Resolved)
+    );
 }

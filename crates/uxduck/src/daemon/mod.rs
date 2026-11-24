@@ -894,6 +894,8 @@ async fn expire_approvals(engine: EngineHandle) {
                 // Commands agents ran that are past their deadlines (S425).
                 e.stop_runs_at_deadline(now);
                 e.connectivity_tick(now);
+                // A vehicle's computer running an older UXDuck (S297).
+                e.review_companion_software();
                 e.expire_pairings();
                 // Aircraft not heard for a minute (S168).
                 e.expire_traffic(now);

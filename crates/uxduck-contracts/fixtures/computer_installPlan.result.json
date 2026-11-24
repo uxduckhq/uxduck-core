@@ -1,0 +1,19 @@
+{
+  "action": "install",
+  "version": "0.42.0",
+  "target": "aarch64-unknown-linux-gnu",
+  "user": "uxduck",
+  "steps": [
+    "Copy UXDuck 0.42.0 for aarch64 and check its SHA-256",
+    "Install it under /opt/uxduck/0.42.0",
+    "Write uxduck-companion.service and start it",
+    "Put back what was there if it is not running within 30 s"
+  ],
+  "keeps": ["/etc/uxduck/companion.toml"],
+  "warnings": ["MAVLink pauses while the service restarts"],
+  "mavlinkPauses": true,
+  "unit": "[Unit]\nDescription=UXDuck companion\n\n[Service]\nUser=uxduck\nExecStart=/usr/local/bin/uxduck companion --config /etc/uxduck/companion.toml\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n",
+  "polkit": "polkit.addRule(function(action, subject) {\n  if (subject.user == \"uxduck\" && action.id == \"org.freedesktop.systemd1.manage-units\") return polkit.Result.YES;\n});\n",
+  "groups": ["dialout"],
+  "replaces": ["mavlink-router.service"]
+}

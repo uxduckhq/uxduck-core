@@ -9,6 +9,7 @@ pub mod client;
 pub mod command;
 pub mod companion;
 pub mod companion_cameras;
+pub mod companion_software;
 pub mod controller;
 pub mod diagnostics;
 pub mod dialect;

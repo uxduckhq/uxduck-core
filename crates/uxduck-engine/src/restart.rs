@@ -1249,6 +1249,9 @@ fn simulations_and_traffic(
     if let Some(on) = params.controller_rumble {
         settings.controller_rumble = on;
     }
+    if let Some(on) = params.companion_update_notices {
+        settings.companion_update_notices = on;
+    }
     if let Some(m) = params.traffic_alert_m {
         if !(100..=20_000).contains(&m) {
             return Err(ApiError::new(

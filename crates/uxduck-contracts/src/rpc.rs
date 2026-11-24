@@ -309,6 +309,26 @@ pub enum ClientRequest {
     /// `FileTransfer`.
     #[serde(rename = "computer/download")]
     ComputerDownload(crate::dto::companion_cameras::ComputerDownloadParams),
+    /// Each of a vehicle's companion computers' UXDuck against this computer's
+    /// (S297): up to date, update available, update needed for a feature its
+    /// `companion.toml` turns on, not installed, or can't reach it, from each
+    /// computer's last check. Reads nothing over SSH. Needs `read`. Result:
+    /// `ComputerSoftwareResult`.
+    #[serde(rename = "computer/software")]
+    ComputerSoftware(crate::dto::companion_software::ComputerSoftwareParams),
+    /// Exactly what Install, Update or Remove would do on a companion computer
+    /// (S297, ADR-0061 B9): the steps, the user the program runs as, the
+    /// service file and polkit rule whole, and what it keeps. Changes nothing.
+    /// Needs `read`. Result: `InstallPlan`.
+    #[serde(rename = "computer/installPlan")]
+    ComputerInstallPlan(crate::dto::companion_software::ComputerInstallParams),
+    /// Installs, updates or removes UXDuck on a companion computer over its
+    /// pinned SSH (S297, ADR-0061 B5): copies this computer's signed Linux
+    /// build, checks it there, installs it under `/opt/uxduck/<version>` and
+    /// puts back what was there if it is not running within 30 s. Only while
+    /// disarmed. Needs `config`. Result: `Vehicle`.
+    #[serde(rename = "computer/install")]
+    ComputerInstall(crate::dto::companion_software::ComputerInstallParams),
     /// Read or configure a companion network over pinned SSH. Needs `config`. Result: `Vehicle`.
     #[serde(rename = "computer/network")]
     ComputerNetwork(crate::dto::companion::ComputerNetworkParams),
@@ -2478,7 +2498,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 430] = [
+    pub const METHODS: [&'static str; 433] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2525,6 +2545,9 @@ impl ClientRequest {
         "computer/cameras",
         "computer/recordings",
         "computer/download",
+        "computer/software",
+        "computer/installPlan",
+        "computer/install",
         "computer/network",
         "computer/connectivity",
         "computer/run",

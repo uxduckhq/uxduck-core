@@ -234,6 +234,14 @@ fn check(name: &str) {
             round_trip::<VehicleListResult>(name, &json);
         }
         ("result", "computer_cameras") => round_trip::<Vehicle>(name, &json),
+        ("result", "computer_software") => {
+            round_trip::<uxduck_contracts::dto::companion_software::ComputerSoftwareResult>(
+                name, &json,
+            );
+        }
+        ("result", "computer_installPlan") => {
+            round_trip::<uxduck_contracts::dto::companion_software::InstallPlan>(name, &json);
+        }
         (
             "result",
             "vehicle_get"
@@ -252,6 +260,7 @@ fn check(name: &str) {
             | "computer_add"
             | "computer_check"
             | "computer_connectivity"
+            | "computer_install"
             | "computer_network"
             | "computer_remove"
             | "computer_rename"

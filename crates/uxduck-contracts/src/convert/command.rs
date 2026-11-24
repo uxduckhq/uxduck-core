@@ -320,6 +320,13 @@ fn action(action: n::Action) -> Option<nd::Action> {
             vehicle_id,
             row: row.into(),
         },
+        n::Action::OpenCompanionSoftware {
+            vehicle_id,
+            computer_id,
+        } => nd::Action::OpenCompanionSoftware {
+            vehicle_id,
+            computer_id,
+        },
         n::Action::PutTerrainAreas { vehicle_id } => nd::Action::PutTerrainAreas { vehicle_id },
         n::Action::UseConnection {
             vehicle_id,

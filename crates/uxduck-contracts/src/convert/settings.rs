@@ -241,6 +241,7 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         battery_low_pct: settings.battery_low_pct,
         battery_critical_pct: settings.battery_critical_pct,
         controller_rumble: settings.controller_rumble,
+        companion_update_notices: settings.companion_update_notices,
         traffic_controls: settings.traffic_controls.clone().into(),
         terrain_dataset: settings.terrain_dataset.into(),
         terrain_areas: settings

@@ -91,6 +91,10 @@ pub struct CompanionCheck {
     /// What its `MediaMTX` serves, as last read (ADR-0060).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cameras: Option<crate::dto::companion_cameras::CompanionCameras>,
+    /// What its own setup says about UXDuck there (S297). `computer/software`
+    /// compares it with this computer's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub software: Option<crate::dto::companion_software::SoftwareFound>,
 }
 
 /// A computer's clock as `computer/check` read it (S356): its time against
@@ -152,6 +156,9 @@ pub struct CompanionComputer {
     pub key: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<CompanionCheck>,
+    /// Its last Install, Update or Remove (S297).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<crate::dto::companion_software::InstallRecord>,
 }
 
 /// `computer/add`.

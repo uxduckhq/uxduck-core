@@ -1,0 +1,47 @@
+{
+  "ground": "0.42.0",
+  "armed": false,
+  "computers": [
+    {
+      "computerId": "cc3f9a1b2c4d5e6f",
+      "name": "pi-vision.local",
+      "status": "update-available",
+      "version": "0.41.0",
+      "words": "Update available, 0.41.0 to 0.42.0",
+      "offer": "update",
+      "managed": true,
+      "install": {
+        "action": "update",
+        "state": "done",
+        "atUs": 1790668865123456,
+        "version": "0.42.0",
+        "steps": [
+          {
+            "title": "Copy UXDuck 0.42.0 for aarch64",
+            "ok": true
+          },
+          {
+            "title": "Check its SHA-256",
+            "ok": true,
+            "output": "uxduck-aarch64-unknown-linux-gnu: OK"
+          },
+          {
+            "title": "Start uxduck-companion.service",
+            "ok": true,
+            "output": "active"
+          }
+        ]
+      }
+    },
+    {
+      "computerId": "dd4a0b2c3d5e6f70",
+      "name": "jetson.local",
+      "status": "update-needed",
+      "version": "0.38.1",
+      "missing": ["recorder"],
+      "words": "Update needed for recording",
+      "offer": "update",
+      "carriesMavlink": true
+    }
+  ]
+}

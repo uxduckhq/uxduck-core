@@ -100,6 +100,9 @@ pub struct CompanionCheck {
     /// What its `MediaMTX` serves, as last read (ADR-0060).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cameras: Option<super::companion_cameras::CompanionCameras>,
+    /// What its own setup says about UXDuck there (S297).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub software: Option<super::companion_software::SoftwareFound>,
 }
 
 /// A computer's clock as a check read it (S356): its time against this
@@ -161,6 +164,13 @@ pub struct CompanionComputer {
     pub key: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<CompanionCheck>,
+    /// Its last Install, Update or Remove (S297).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<super::companion_software::InstallRecord>,
+    /// The versions it was last said to be behind on, `<theirs>><ours>`, so
+    /// the notice comes once per version (S297).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_noticed: Option<String>,
 }
 
 impl CompanionComputer {

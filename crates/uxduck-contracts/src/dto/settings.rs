@@ -234,6 +234,11 @@ pub struct Settings {
     /// older daemon left it out.
     #[serde(default = "controller_rumble")]
     pub controller_rumble: bool,
+    /// Settings › Vehicles & connections (S297): a notice when a vehicle's
+    /// companion computer runs an older UXDuck than this computer, once per
+    /// version. On when an older daemon left it out.
+    #[serde(default = "companion_update_notices")]
+    pub companion_update_notices: bool,
     #[serde(default)]
     pub traffic_controls: TrafficControls,
     /// Settings › Terrain: the dataset the map reads and vehicles are
@@ -379,6 +384,8 @@ pub struct SettingsUpdateParams {
     pub battery_critical_pct: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_rumble: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion_update_notices: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_controls: Option<TrafficControls>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -721,6 +728,10 @@ pub struct PhysicsModel {
 }
 
 const fn controller_rumble() -> bool {
+    true
+}
+
+const fn companion_update_notices() -> bool {
     true
 }
 

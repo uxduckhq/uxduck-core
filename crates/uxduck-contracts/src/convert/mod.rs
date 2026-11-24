@@ -7,6 +7,7 @@ mod client;
 mod command;
 mod companion;
 mod companion_cameras;
+mod companion_software;
 mod controller;
 mod dialect;
 mod feedback;

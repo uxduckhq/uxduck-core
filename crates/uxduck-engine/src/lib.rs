@@ -28,6 +28,7 @@ mod cameras;
 mod checklist;
 mod checklist_runs;
 pub mod commands;
+pub mod companion_software;
 pub mod companions;
 pub mod connection_history;
 mod controller_cleanup;

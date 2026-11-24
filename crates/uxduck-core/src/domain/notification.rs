@@ -137,6 +137,12 @@ pub enum Action {
         vehicle_id: String,
         row: crate::domain::setup::SetupRow,
     },
+    /// The vehicle's Setup at UXDuck on its computers (S297), for a computer
+    /// that runs an older UXDuck.
+    OpenCompanionSoftware {
+        vehicle_id: String,
+        computer_id: String,
+    },
     /// `terrain/putArea`: puts the areas on a vehicle that asks first
     /// (ADR-0051 A7).
     PutTerrainAreas {

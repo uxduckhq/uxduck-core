@@ -54,6 +54,14 @@ pub enum CompanionOrder {
         /// JSON on SSH stdin: empty to read, else one change.
         input: String,
     },
+    /// Install, update or remove UXDuck (S297), as the plan shown to the
+    /// person says, through the exact pinned host key only.
+    Install {
+        vehicle_id: String,
+        computer: Box<CompanionComputer>,
+        through: Option<Box<CompanionComputer>>,
+        plan: Box<uxduck_core::domain::companion_software::Plan>,
+    },
     /// Forget its pinned host key.
     Forget { computer_id: String },
 }
@@ -195,11 +203,13 @@ pub struct Found {
     pub reports_as: Option<u8>,
     pub network: Option<companion::CompanionNetwork>,
     pub cameras: Option<CompanionCameras>,
+    /// What its own setup says about UXDuck there (S297).
+    pub software: Option<uxduck_core::domain::companion_software::SoftwareFound>,
 }
 
 #[derive(Default)]
 pub(crate) struct Companions {
-    port: Option<Box<dyn CompanionPort>>,
+    pub(crate) port: Option<Box<dyn CompanionPort>>,
     busy: std::collections::BTreeSet<String>,
     /// Computers whose running operation is a background network read.
     reading: std::collections::BTreeSet<String>,
@@ -378,6 +388,8 @@ impl Engine {
                     c.check.as_ref().is_some_and(|check| {
                         check.state == CheckState::Checking
                             || check.network.as_ref().is_some_and(|n| n.sampled_at_us > 0)
+                    }) || c.install.as_ref().is_some_and(|i| {
+                        i.state == uxduck_core::domain::companion_software::InstallState::Running
                     })
                 })
             })
@@ -396,6 +408,12 @@ impl Engine {
                     check.problem = Some("UXDuck restarted before the computer answered. Check it, or read its networks or cameras again, to see what completed.".into());
                     check.problem_kind = Some(CheckProblem::Other);
                     check.detail = None;
+                }
+                if let Some(install) = computer.install.as_mut().filter(|i| {
+                    i.state == uxduck_core::domain::companion_software::InstallState::Running
+                }) {
+                    install.state = uxduck_core::domain::companion_software::InstallState::Failed;
+                    install.problem = Some("UXDuck restarted before the computer answered. The computer finishes or puts back what was there by itself. Check it to see what it runs.".into());
                 }
             }
             self.save_companions(None, vehicle);
@@ -416,7 +434,11 @@ impl Engine {
     /// `Ok(true)` when it is a person's and waits for the background read
     /// running there. A check or another person's operation, running or
     /// waiting, refuses it, and a background read never waits.
-    fn take_computer(&mut self, computer_id: &str, background: bool) -> Result<bool, ApiError> {
+    pub(crate) fn take_computer(
+        &mut self,
+        computer_id: &str,
+        background: bool,
+    ) -> Result<bool, ApiError> {
         if self.companions.busy.insert(computer_id.to_owned()) {
             if background {
                 self.companions.reading.insert(computer_id.to_owned());
@@ -434,7 +456,7 @@ impl Engine {
 
     /// Sends an order, or keeps it for when the background read it waits for
     /// answers, with whether it `changes` the computer.
-    fn send_companion(
+    pub(crate) fn send_companion(
         &mut self,
         computer_id: String,
         order: CompanionOrder,
@@ -450,7 +472,7 @@ impl Engine {
         }
     }
 
-    fn save_companions(
+    pub(crate) fn save_companions(
         &mut self,
         connection: Option<ConnectionId>,
         mut vehicle: Vehicle,
@@ -535,6 +557,8 @@ impl Engine {
             component_id,
             key: key.is_some(),
             check: None,
+            install: None,
+            update_noticed: None,
         };
         if let Some(key) = key {
             self.credentials
@@ -914,6 +938,7 @@ impl Engine {
             reports_as: last.as_ref().and_then(|c| c.reports_as),
             network: last.as_ref().and_then(|c| c.network.clone()),
             cameras: last.and_then(|c| c.cameras),
+            software: None,
         });
         let order = CompanionOrder::Check {
             vehicle_id: vehicle.id.clone(),
@@ -924,6 +949,19 @@ impl Engine {
         let vehicle = self.save_companions(Some(connection), vehicle);
         self.send_companion(computer_id, order, waits, false);
         to_value(&vehicle)
+    }
+
+    /// Frees a computer whose operation answered with nothing to read, and
+    /// sends what waited for it.
+    pub(crate) fn companions_free(&mut self, computer_id: &str) {
+        self.companions.busy.remove(computer_id);
+        self.companions.reading.remove(computer_id);
+        if let Some((order, _)) = self.companions.waiting.remove(computer_id) {
+            self.companions.busy.insert(computer_id.to_owned());
+            if let Some(port) = self.companions.port.as_mut() {
+                port.request(order);
+            }
+        }
     }
 
     /// A check's answer from the host. The pinned host key is kept through
@@ -974,6 +1012,7 @@ impl Engine {
                 detail: None,
                 clock: found.clock,
                 reports_as: found.reports_as.or(reports_as),
+                software: found.software,
             },
             Err(failure) => CompanionCheck {
                 state: CheckState::Failed,
@@ -989,6 +1028,7 @@ impl Engine {
                 reports_as,
                 network,
                 cameras,
+                software: None,
             },
         });
         if let Some(check) = &mut computer.check {
@@ -998,6 +1038,15 @@ impl Engine {
                 check.problem_kind = None;
                 check.detail = None;
             } else if stopped {
+                if let Some(install) = computer.install.as_mut().filter(|i| {
+                    i.state == uxduck_core::domain::companion_software::InstallState::Running
+                }) {
+                    install.state = uxduck_core::domain::companion_software::InstallState::Failed;
+                    install.problem = Some(
+                        "The vehicle armed before it started, so nothing changed. Disarm it to try again."
+                            .into(),
+                    );
+                }
                 check.state = CheckState::Failed;
                 check.problem = Some(
                     "The vehicle armed before the change started, so nothing changed. Disarm it to try again."

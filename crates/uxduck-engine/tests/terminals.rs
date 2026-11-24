@@ -515,6 +515,7 @@ impl Harness {
                     reports_as: None,
                     network: None,
                     cameras: None,
+                    software: None,
                 }),
             });
         }

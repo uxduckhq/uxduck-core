@@ -1121,3 +1121,18 @@ RecordedOnVehicle.computer_id
 RecordedOnVehicle.recording
 RemoteSegment.path
 RemoteSegment.size
+
+# UXDuck on a companion computer, read, planned and installed (S297,
+# 2026-11-23): new types inside optional fields of a companion computer
+# and a new notification action, which no release has stored.
+Action::OpenCompanionSoftware.computer_id
+Action::OpenCompanionSoftware.vehicle_id
+FoundUnit.exec
+FoundUnit.name
+InstallRecord.action
+InstallRecord.at_us
+InstallRecord.state
+InstallStep.ok
+InstallStep.title
+Plan.action
+Plan.steps

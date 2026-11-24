@@ -49,6 +49,7 @@
           "batteryLowPct": 20,
           "batteryCriticalPct": 10,
           "controllerRumble": true,
+          "companionUpdateNotices": true,
           "trafficControls": {
             "rangeM": 10000,
             "limitRange": true,

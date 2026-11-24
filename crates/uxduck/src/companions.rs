@@ -24,6 +24,10 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use uxduck_core::domain::companion::{CheckProblem, CompanionClock, CompanionComputer};
+use uxduck_core::domain::companion_software::{
+    FoundUnit, InstallAction, InstallRecord, InstallState, InstallStep, Plan, SoftwareFound,
+};
+use uxduck_engine::companion_software::InstallAnswer;
 use uxduck_engine::companions::{CheckAnswer, CheckFailure, CompanionOrder, CompanionPort, Found};
 use uxduck_engine::runtime::Credentials as _;
 
@@ -31,6 +35,8 @@ use crate::adapters::credentials::{
     FileCredentials, create_private, create_private_dir, private_dir_problem,
 };
 use crate::daemon::engine_task::EngineHandle;
+
+mod builds;
 
 /// How long a check may take, signing in included.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -47,6 +53,9 @@ enum Adapter {
     Network,
     /// `MediaMTX`'s cameras (ADR-0060).
     Cameras,
+    /// Install, Update or Remove UXDuck (S297), with a tar of
+    /// `install.sh` and what it reads.
+    Install,
 }
 
 /// The environment variable naming the file `ssh`'s password prompt reads.
@@ -408,7 +417,7 @@ pub(crate) fn pinned_ways<'a>(pasted: Option<&'a str>, own: Option<&'a OwnKey>) 
 /// runs (`systemctl`, where there is one), then the arguments of each
 /// process naming UXDuck (S372), split by the unit separator, for the id its
 /// readings go out as.
-const SCRIPT: &str = r#"if [ -r /etc/os-release ]; then . /etc/os-release; fi; echo "os=${PRETTY_NAME:-$(uname -sr)}"; echo "arch=$(uname -m)"; v=$(uxduck --version 2>/dev/null || "$HOME/.local/bin/uxduck" --version 2>/dev/null); echo "uxduck=$v"; echo "clock=$(date +%s%N 2>/dev/null)"; if command -v timedatectl >/dev/null 2>&1; then timedatectl show -p NTP -p NTPSynchronized 2>/dev/null; fi; if command -v systemctl >/dev/null 2>&1; then for s in systemd-timesyncd chrony chronyd ntpsec ntp ntpd openntpd; do if systemctl is-active --quiet "$s" 2>/dev/null; then echo "timeservice=$s"; fi; done; fi; for f in /proc/[0-9]*/cmdline; do a=$(tr '\000' '\037' < "$f" 2>/dev/null) || continue; case "$a" in *uxduck*) echo "process=$a";; esac; done"#;
+const SCRIPT: &str = r#"if [ -r /etc/os-release ]; then . /etc/os-release; fi; echo "os=${PRETTY_NAME:-$(uname -sr)}"; echo "arch=$(uname -m)"; v=$(uxduck --version 2>/dev/null || "$HOME/.local/bin/uxduck" --version 2>/dev/null); echo "uxduck=$v"; echo "clock=$(date +%s%N 2>/dev/null)"; if command -v timedatectl >/dev/null 2>&1; then timedatectl show -p NTP -p NTPSynchronized 2>/dev/null; fi; if command -v systemctl >/dev/null 2>&1; then for s in systemd-timesyncd chrony chronyd ntpsec ntp ntpd openntpd; do if systemctl is-active --quiet "$s" 2>/dev/null; then echo "timeservice=$s"; fi; done; fi; u=$(command -v uxduck 2>/dev/null || echo "$HOME/.local/bin/uxduck"); if "$u" companion --help 2>/dev/null | grep -q -e '--config'; then echo has=config; fi; if [ -L /usr/local/bin/uxduck ]; then echo "link=$(readlink /usr/local/bin/uxduck)"; elif [ -e /usr/local/bin/uxduck ]; then echo link=file; fi; for k in /opt/uxduck/*/; do if [ -x "${k}uxduck" ]; then echo "kept=$(basename "$k")"; fi; done; if [ -e /etc/uxduck/companion.toml ]; then echo config=yes; if grep -q '^\[video\]' /etc/uxduck/companion.toml 2>/dev/null; then echo uses=sender; fi; if grep -q '^[[:space:]]*record_path' /etc/uxduck/companion.toml 2>/dev/null; then echo uses=recorder; fi; fi; for f in /etc/systemd/system/*.service; do [ -f "$f" ] || continue; e=$(grep -m1 '^ExecStart=' "$f" | cut -d= -f2-); case "$e" in *uxduck*' companion'*|*uxduck*' forward'*) if head -n 1 "$f" | grep -q '^# Written by UXDuck'; then o=yes; else o=no; fi; w=$(grep -m1 '^User=' "$f" | cut -d= -f2-); if [ -d "$f.d" ]; then i=yes; else i=no; fi; printf 'unit=%s\t%s\t%s\t%s\t%s\n' "$(basename "$f")" "$o" "$w" "$i" "$e"; for g in "$f" "$f".d/*.conf; do [ -f "$g" ] || continue; grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*[#;]' "$g" | while IFS= read -r l; do printf 'unitline=%s\t%s\n' "$(basename "$f")" "$l"; done; done; for n in $(sed -n -e 's/^After=//p' -e 's/^Wants=//p' -e 's/^Requires=//p' -e 's/^BindsTo=//p' "$f" "$f".d/*.conf 2>/dev/null); do if [ "$(systemctl show -p LoadState --value "$n" 2>/dev/null)" = loaded ]; then echo "present=$n"; fi; done;; esac; done; for f in /etc/systemd/system/*.before-uxduck; do if [ -f "$f" ]; then echo "before=$(basename "$f" .before-uxduck)"; fi; done; if [ -e /usr/local/bin/uxduck.before-uxduck ]; then echo before=/usr/local/bin/uxduck; fi; if [ "$(id -u)" = 0 ]; then echo sudo=yes; else case " $(id -nG 2>/dev/null) " in *' sudo '*|*' wheel '*|*' admin '*) if sudo -n true 2>/dev/null; then echo sudo=yes; else echo sudo=no; fi;; *) echo sudo=no;; esac; fi; for s in /dev/serial[0-9] /dev/ttyAMA* /dev/ttyACM* /dev/ttyUSB* /dev/ttyTHS*; do if [ -e "$s" ]; then echo "serial=$s"; fi; done; if [ -d /run/systemd/system ]; then echo systemd=yes; fi; echo "bits=$(getconf LONG_BIT 2>/dev/null)"; for f in /proc/[0-9]*/cmdline; do a=$(tr '\000' '\037' < "$f" 2>/dev/null) || continue; case "$a" in *uxduck*) echo "process=$a";; esac; done"#;
 
 /// One `ssh`'s output, and when it started and ended on this computer's
 /// wall clock, in nanoseconds since 1970, which bound when the computer read
@@ -626,6 +635,59 @@ impl Host {
             let _ = engine.run(move |e| e.companion_checked(answer)).await;
         });
     }
+
+    /// Runs an Install, Update or Remove through the computer's exact
+    /// pinned host key and tells the engine how it went.
+    fn run_install(
+        &self,
+        vehicle_id: String,
+        computer: Box<CompanionComputer>,
+        through: Option<Box<CompanionComputer>>,
+        plan: Box<Plan>,
+    ) {
+        let dir = self.dir.clone();
+        let data_dir = self.data_dir.clone();
+        let saved = saved_sign_in(&self.data_dir, &computer).and_then(|saved| {
+            Ok((
+                saved,
+                saved_through_key(&self.data_dir, through.as_deref())?,
+            ))
+        });
+        let engine = self.engine.clone();
+        tokio::spawn(async move {
+            let (record, found) = match (saved, builds::Source::releases()) {
+                (Err(why), _) | (_, Err(why)) => (failed(&plan, Vec::new(), why), None),
+                (Ok(((key, own), through_key)), Ok(source)) => {
+                    let through = through.as_deref().map(|computer| Through {
+                        computer,
+                        pasted: through_key.as_deref(),
+                        own: Some(&own),
+                    });
+                    install(
+                        &dir,
+                        &data_dir,
+                        &source,
+                        &computer,
+                        SignIn {
+                            pasted: key.as_deref(),
+                            own: Some(&own),
+                            password: None,
+                            through: through.as_ref(),
+                        },
+                        &plan,
+                    )
+                    .await
+                }
+            };
+            let answer = InstallAnswer {
+                vehicle_id,
+                computer_id: computer.id,
+                record,
+                found,
+            };
+            let _ = engine.run(move |e| e.companion_installed(answer)).await;
+        });
+    }
 }
 
 impl CompanionPort for Host {
@@ -700,6 +762,12 @@ impl CompanionPort for Host {
                     request.to_string(),
                 );
             }
+            CompanionOrder::Install {
+                vehicle_id,
+                computer,
+                through,
+                plan,
+            } => self.run_install(vehicle_id, computer, through, plan),
             CompanionOrder::Forget { computer_id } => {
                 let path = self.dir.join(format!("{computer_id}.known_hosts"));
                 if let Err(error) = std::fs::remove_file(&path)
@@ -883,6 +951,7 @@ async fn pinned(
     let what = match adapter {
         Adapter::Network => "networks",
         Adapter::Cameras => "cameras",
+        Adapter::Install => "UXDuck",
     };
     let pinned = computer
         .check
@@ -904,7 +973,7 @@ async fn pinned(
             computer,
             &trusted,
             way,
-            Some((adapter, input)),
+            Some((adapter, input.as_bytes())),
             sign_in.through,
         )
         .await
@@ -949,6 +1018,274 @@ async fn pinned(
     Err(format!(
         "SSH could not sign in. Check the computer again before setting up its {what}."
     ))
+}
+
+/// What an Install, Update or Remove runs on the computer, with a tar of
+/// `install.sh` and what it reads on its stdin: it unpacks them into a new
+/// folder, gives it to root, runs `install.sh` as root in a transient
+/// systemd unit, which a dropped SSH link does not stop, prints what it
+/// said and deletes the folder.
+const INSTALL_COMMAND: &str = r#"if [ "$(id -u)" = 0 ]; then s=; else s="sudo -n"; fi; d=$(mktemp -d /var/tmp/uxduck-install.XXXXXX) && tar -xf - -C "$d" && $s chown -R root:root "$d" && $s systemd-run --quiet --wait --collect --unit "uxduck-install-$$" -p "StandardOutput=file:$d/log" -p StandardError=inherit /bin/sh "$d/install.sh" "$d"; if [ -n "$d" ]; then $s cat "$d/log" 2>/dev/null; $s rm -rf "$d" 2>/dev/null || rm -rf "$d"; fi;"#;
+
+/// A record of an Install, Update or Remove that failed with `problem`.
+fn failed(plan: &Plan, steps: Vec<InstallStep>, problem: String) -> InstallRecord {
+    InstallRecord {
+        action: plan.action,
+        state: InstallState::Failed,
+        at_us: 0,
+        version: plan.version.clone(),
+        steps,
+        problem: Some(problem),
+    }
+}
+
+/// The tar an Install, Update or Remove sends: `install.sh` and the files
+/// it reads, with the build for an Install or Update, downloaded and
+/// checked first. What fetching the build did is the first step.
+async fn payload(
+    data_dir: &Path,
+    source: &builds::Source,
+    plan: &Plan,
+    steps: &mut Vec<InstallStep>,
+) -> Result<Vec<u8>, String> {
+    let mut files: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "install.sh",
+            include_bytes!("companions/install.sh").to_vec(),
+        ),
+        (
+            "action",
+            if plan.action == InstallAction::Remove {
+                "remove"
+            } else {
+                "install"
+            }
+            .into(),
+        ),
+    ];
+    if plan.action != InstallAction::Remove {
+        let (Some(version), Some(target)) = (&plan.version, &plan.target) else {
+            return Err("The plan names no version or build to install.".into());
+        };
+        let title =
+            format!("Download UXDuck {version} for {target} and check the release's signature");
+        let build = match builds::build(data_dir, source, version, target).await {
+            Ok(build) => build,
+            Err(why) => {
+                steps.push(InstallStep {
+                    title,
+                    ok: false,
+                    output: why.clone(),
+                });
+                return Err(why);
+            }
+        };
+        let bytes =
+            std::fs::read(&build.path).map_err(|e| format!("{}: {e}", build.path.display()))?;
+        steps.push(InstallStep {
+            title,
+            ok: true,
+            output: build.said,
+        });
+        let lines = |words: &[String]| {
+            words
+                .iter()
+                .map(|w| w.clone() + "\n")
+                .collect::<String>()
+                .into_bytes()
+        };
+        files.extend([
+            ("version", version.clone().into_bytes()),
+            ("sha256", build.sha256.into_bytes()),
+            ("build.tar.gz", bytes),
+            ("unit", plan.unit.clone().into_bytes()),
+            ("polkit", plan.polkit.clone().into_bytes()),
+            ("groups", lines(&plan.groups)),
+            ("replaces", lines(&plan.replaces)),
+        ]);
+    }
+    let mut tar = tar::Builder::new(Vec::new());
+    for (name, bytes) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o600);
+        header.set_cksum();
+        tar.append_data(&mut header, name, bytes.as_slice())
+            .map_err(|e| format!("Cannot pack what the computer is sent: {e}"))?;
+    }
+    tar.into_inner()
+        .map_err(|e| format!("Cannot pack what the computer is sent: {e}"))
+}
+
+/// Reads what `install.sh` said: its steps, how it ended, and why the last
+/// step that failed did.
+fn install_said(log: &[&str]) -> (Vec<InstallStep>, Option<String>, Option<String>) {
+    let mut steps: Vec<InstallStep> = Vec::new();
+    let mut end = None;
+    let mut why = None;
+    for line in log {
+        if let Some(title) = line.strip_prefix("@step ") {
+            steps.push(InstallStep {
+                title: title.trim().to_owned(),
+                ok: true,
+                output: String::new(),
+            });
+        } else if let Some(fail) = line.strip_prefix("@fail ") {
+            if let Some(step) = steps.last_mut() {
+                step.ok = false;
+            }
+            why = Some(fail.trim().to_owned());
+        } else if let Some(state) = line.strip_prefix("@end ") {
+            end = Some(state.trim().to_owned());
+        } else if let Some(step) = steps.last_mut() {
+            if !step.output.is_empty() {
+                step.output.push('\n');
+            }
+            step.output.push_str(line);
+        }
+    }
+    (steps, end, why)
+}
+
+/// Runs an Install, Update or Remove (ADR-0061 B5) through the computer's
+/// exact pinned host key, as [`pinned`] runs an adapter, and reads the
+/// computer again once it has ended.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one install, read top to bottom: the build, the files, the run and what it said"
+)]
+async fn install(
+    dir: &Path,
+    data_dir: &Path,
+    source: &builds::Source,
+    computer: &CompanionComputer,
+    sign_in: SignIn<'_>,
+    plan: &Plan,
+) -> (InstallRecord, Option<Found>) {
+    let mut steps = Vec::new();
+    let payload = match payload(data_dir, source, plan, &mut steps).await {
+        Ok(payload) => payload,
+        Err(why) => return (failed(plan, steps, why), None),
+    };
+    let Some(pinned) = computer.check.as_ref().and_then(|c| c.host_key.as_deref()) else {
+        return (
+            failed(
+                plan,
+                steps,
+                "Check this computer's SSH host key first. Nothing was changed.".into(),
+            ),
+            None,
+        );
+    };
+    let Ok(temporary) = tempfile::tempdir() else {
+        return (
+            failed(
+                plan,
+                steps,
+                "Cannot prepare SSH host verification. Nothing was changed.".into(),
+            ),
+            None,
+        );
+    };
+    let trusted = temporary.path().join("known_hosts");
+    match trust_pinned(dir, computer, pinned, &trusted).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (failed(plan, steps, "The pinned SSH host key is missing from known_hosts. Check the computer again first. Nothing was changed.".into()), None);
+        }
+        Err(why) => return (failed(plan, steps, why), None),
+    }
+    for way in pinned_ways(sign_in.pasted, sign_in.own) {
+        let mut ran = match run_adapter(
+            dir,
+            None,
+            computer,
+            &trusted,
+            way,
+            Some((Adapter::Install, &payload)),
+            sign_in.through,
+        )
+        .await
+        {
+            Ok(ran) => ran,
+            Err(failure) => return (failed(plan, steps, failure.problem), None),
+        };
+        let stderr = String::from_utf8_lossy(&ran.output.stderr);
+        if [ran.log.as_str(), &stderr].iter().any(|said| {
+            said.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+                || said.contains("Host key verification failed")
+        }) {
+            return (
+                failed(
+                    plan,
+                    steps,
+                    "The companion's SSH host key no longer matches. Nothing was changed.".into(),
+                ),
+                None,
+            );
+        }
+        if refused(&ran.log) {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&ran.output.stdout).into_owned();
+        let mut lines = stdout.lines();
+        let log: Vec<&str> = lines
+            .by_ref()
+            .take_while(|line| *line != "@check")
+            .collect();
+        let after: String = lines.map(|line| line.to_owned() + "\n").collect();
+        let (said, end, why) = install_said(&log);
+        let started = !said.is_empty();
+        steps.extend(said);
+        let version = plan.version.as_deref().unwrap_or_default();
+        let (state, problem) = match end.as_deref() {
+            Some("done") => (InstallState::Done, None),
+            Some("rolled-back") => (
+                InstallState::RolledBack,
+                Some(format!(
+                    "{} UXDuck put back what was there before.",
+                    why.unwrap_or_else(|| format!("UXDuck {version} did not start."))
+                )),
+            ),
+            Some(_) => (
+                InstallState::Failed,
+                Some(why.unwrap_or_else(|| "It failed on the computer.".into())),
+            ),
+            None if started => (
+                InstallState::Failed,
+                Some(format!(
+                    "The link to {} ended before the change finished. It goes on there by itself, and puts back what was there if UXDuck does not start. Check the computer to see what it runs.",
+                    computer.name
+                )),
+            ),
+            None => (
+                InstallState::Failed,
+                Some(format!(
+                    "UXDuck could not start the change on {}. It needs passwordless sudo, systemd-run and tar there. Nothing was changed.",
+                    computer.name
+                )),
+            ),
+        };
+        ran.output.stdout = after.into_bytes();
+        let found = answer(computer, sign_in, way, &ran).ok();
+        let record = InstallRecord {
+            action: plan.action,
+            state,
+            at_us: 0,
+            version: plan.version.clone(),
+            steps,
+            problem,
+        };
+        return (record, found);
+    }
+    (
+        failed(
+            plan,
+            steps,
+            "SSH could not sign in. Check the computer again first. Nothing was changed.".into(),
+        ),
+        None,
+    )
 }
 
 /// Writes `trusted`, a known-hosts file holding only the raw host key whose
@@ -1059,7 +1396,7 @@ async fn run(
         computer,
         known_hosts,
         way,
-        network.map(|input| (Adapter::Network, input)),
+        network.map(|input| (Adapter::Network, input.as_bytes())),
         through,
     )
     .await
@@ -1397,7 +1734,7 @@ async fn run_adapter(
     computer: &CompanionComputer,
     known_hosts: &Path,
     way: Way<'_>,
-    adapter: Option<(Adapter, &str)>,
+    adapter: Option<(Adapter, &[u8])>,
     through: Option<&Through<'_>>,
 ) -> Result<Ran, CheckFailure> {
     let hop_files = RunFiles::new(dir)?;
@@ -1603,12 +1940,13 @@ async fn run_route(
     computer: &CompanionComputer,
     known_hosts: &Path,
     way: Way<'_>,
-    adapter: Option<(Adapter, &str)>,
+    adapter: Option<(Adapter, &[u8])>,
     route: Route<'_>,
 ) -> Result<Ran, String> {
     let network = adapter.map(|(_, input)| input);
     let cameras = matches!(adapter, Some((Adapter::Cameras, _)));
-    let mut timeout = CHECK_TIMEOUT;
+    let installs = matches!(adapter, Some((Adapter::Install, _)));
+    let mut timeout = Some(CHECK_TIMEOUT);
     let files = RunFiles::new(dir)?;
     let key_file = files.path.join("key");
     let askpass_file = files.path.join("askpass");
@@ -1623,9 +1961,15 @@ async fn run_route(
         Way::Password(own, _) => format!("{}; {SCRIPT}", add_key(&own.public)),
         _ => SCRIPT.to_owned(),
     };
-    if network.is_some() {
+    if installs {
+        // No limit on how long it takes: copying the build over a slow link
+        // takes as long as it takes, and the computer finishes it or puts
+        // back what was there even if SSH ends first.
+        timeout = None;
+        script = format!("{INSTALL_COMMAND} echo @check; {SCRIPT}");
+    } else if network.is_some() {
         let script_python = include_str!("companions/network.py").replace('\'', "'\"'\"'");
-        let input: serde_json::Value = serde_json::from_str(network.unwrap_or_default())
+        let input: serde_json::Value = serde_json::from_slice(network.unwrap_or_default())
             .map_err(|_| "Invalid network request".to_owned())?;
         let sudo = if ["wifi", "connectivity", "preference", "confirm"]
             .iter()
@@ -1643,7 +1987,7 @@ async fn run_route(
                 || input["record"].is_object()
                 || input["microphone"].is_object();
             if change {
-                timeout = CAMERA_CHANGE_TIMEOUT;
+                timeout = Some(CAMERA_CHANGE_TIMEOUT);
             }
             let sudo = if change { "sudo -n " } else { "" };
             let quoted = include_str!("companions/camera.py").replace('\'', "'\"'\"'");
@@ -1686,9 +2030,18 @@ async fn run_route(
     let mut command = tokio::process::Command::new("ssh");
     // What `ssh` says about itself goes to its own log, apart from a
     // server's banner and what runs on the computer (FB-268).
+    command.arg("-E").arg(&log_file);
+    if installs {
+        // An Install has no time limit, so a link that has been silent for a
+        // minute ends its `ssh` instead. The computer goes on by itself.
+        command.args([
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=4",
+        ]);
+    }
     command
-        .arg("-E")
-        .arg(&log_file)
         .args(&built.args)
         .envs(built.envs.iter().map(|(name, value)| (*name, value)))
         .stdin(if network.is_some() {
@@ -1700,7 +2053,7 @@ async fn run_route(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let started_ns = wall_ns();
-    let ran = tokio::time::timeout(timeout, async {
+    let running = async {
         use tokio::io::AsyncWriteExt as _;
         let mut child = command.spawn()?;
         if let Some(input) = network {
@@ -1708,12 +2061,24 @@ async fn run_route(
                 .stdin
                 .take()
                 .ok_or_else(|| std::io::Error::other("SSH stdin is missing"))?;
-            stdin.write_all(input.as_bytes()).await?;
-            stdin.shutdown().await?;
+            // A computer that stops reading has ended what ran there, and
+            // its output says how.
+            match stdin.write_all(input).await {
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                written => {
+                    written?;
+                    stdin.shutdown().await?;
+                }
+            }
         }
         child.wait_with_output().await
-    })
-    .await;
+    };
+    let ran = match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, running)
+            .await
+            .map_err(|_| timeout),
+        None => Ok(running.await),
+    };
     let ended_ns = wall_ns();
     for file in [&key_file, &askpass_file] {
         let _ = std::fs::remove_file(file);
@@ -1735,7 +2100,7 @@ async fn run_route(
         );
     }
     match ran {
-        Err(_) => Err(format!(
+        Err(timeout) => Err(format!(
             "{route} did not answer within {} s",
             timeout.as_secs()
         )),
@@ -1757,6 +2122,10 @@ async fn run_route(
 
 /// What a finished `ssh`, signed in one `way`, says: the computer's
 /// system, or why not.
+#[allow(
+    clippy::too_many_lines,
+    reason = "every section of a check's answer is read in one place"
+)]
 fn answer(
     computer: &CompanionComputer,
     sign_in: SignIn<'_>,
@@ -1826,6 +2195,49 @@ fn answer(
             .map(str::to_owned)
     };
     let yes = |name: &str| field(name).map(|v| v == "yes");
+    let all = |name: &str| -> Vec<String> {
+        stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix(name)?.strip_prefix('='))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let software = stdout
+        .lines()
+        .any(|line| line.starts_with("bits="))
+        .then(|| SoftwareFound {
+            link: field("link"),
+            kept: all("kept"),
+            config: yes("config") == Some(true),
+            uses: all("uses"),
+            has: all("has"),
+            units: stdout
+                .lines()
+                .filter_map(|line| found_unit(line.strip_prefix("unit=")?))
+                .map(|mut unit| {
+                    unit.lines = stdout
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("unitline=")?.split_once('\t'))
+                        .filter(|(name, _)| *name == unit.name)
+                        .map(|(_, line)| line.trim_end_matches('\r').to_owned())
+                        .collect();
+                    unit
+                })
+                .collect(),
+            present: {
+                let mut present = all("present");
+                present.sort();
+                present.dedup();
+                present
+            },
+            before: all("before"),
+            sudo: yes("sudo"),
+            serial: all("serial"),
+            systemd: yes("systemd") == Some(true),
+            bits: field("bits").and_then(|bits| bits.parse().ok()),
+        });
     let clock = field("clock")
         .and_then(|read| clock_read(&read, (ran.started_ns, ran.ended_ns)))
         .map(|(offset_ms, within_ms)| CompanionClock {
@@ -1850,6 +2262,27 @@ fn answer(
         host_key: Some(host_key),
         clock,
         reports_as: reported_id(&stdout),
+        software,
+    })
+}
+
+/// A `unit=` line of a check: a service's file name, whether UXDuck wrote
+/// it, its `User=`, whether it has drop-ins and its `ExecStart=`, apart by
+/// tabs.
+fn found_unit(line: &str) -> Option<FoundUnit> {
+    let mut fields = line.trim_end_matches('\r').splitn(5, '\t');
+    let name = fields.next()?.to_owned();
+    let own = fields.next()? == "yes";
+    let user = Some(fields.next()?.trim().to_owned()).filter(|u| !u.is_empty());
+    let drop_ins = fields.next()? == "yes";
+    let exec = fields.next()?.trim().to_owned();
+    Some(FoundUnit {
+        name,
+        own,
+        user,
+        drop_ins,
+        exec,
+        lines: Vec::new(),
     })
 }
 
@@ -2591,6 +3024,8 @@ mod tests {
             component_id: 191,
             key: true,
             check: None,
+            install: None,
+            update_noticed: None,
         }
     }
 
@@ -2634,6 +3069,7 @@ mod tests {
             reports_as: None,
             network: None,
             cameras: None,
+            software: None,
         });
         let port = first.port;
         drop(first);
@@ -2679,6 +3115,7 @@ mod tests {
             reports_as: None,
             network: None,
             cameras: None,
+            software: None,
         });
         let port = first.port;
         drop(first);
@@ -2747,6 +3184,7 @@ mod tests {
             reports_as: None,
             network: None,
             cameras: None,
+            software: None,
         });
         let again = check(
             keys.path(),
@@ -2789,6 +3227,7 @@ mod tests {
             reports_as: None,
             network: None,
             cameras: None,
+            software: None,
         });
         let port = first.port;
         drop(first);
@@ -2882,6 +3321,7 @@ mod tests {
             reports_as: None,
             network: None,
             cameras: None,
+            software: None,
         });
         let port = first.port;
         drop(first);
@@ -2940,6 +3380,891 @@ mod tests {
         }
     }
 
+    /// The computer S297's container test installs on: systemd with D-Bus,
+    /// sshd and passwordless sudo for `pi`, as on Raspberry Pi OS.
+    const INSTALL_IMAGE: &str = "FROM ubuntu:24.04\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus openssh-server sudo && rm -rf /var/lib/apt/lists/*\nRUN useradd -m -s /bin/bash -G sudo pi && echo 'pi ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/pi && mkdir -p /etc/polkit-1/rules.d && systemctl enable ssh\nSTOPSIGNAL SIGRTMIN+3\nCMD [\"/lib/systemd/systemd\"]\n";
+
+    /// A stand-in for `uxduck`: says its version, lists `--config`, and runs
+    /// until stopped, or ends at once when `broken`. On SIGHUP, as `uxduck
+    /// companion` reloads its settings, it leaves `reloaded` in its state folder.
+    const STAND_IN: &str = r#"#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+static volatile sig_atomic_t hup;
+static void on_hup(int s) { (void)s; hup = 1; }
+int main(int argc, char **argv) {
+  if (argc > 1 && !strcmp(argv[1], "--version")) { puts("uxduck " VERSION); return 0; }
+  if (argc > 2 && !strcmp(argv[2], "--help")) { puts("--config <PATH>"); return 0; }
+  if (BROKEN) return 1;
+  signal(SIGHUP, on_hup);
+  for (;;) {
+    pause();
+    if (hup) {
+      const char *dir = getenv("STATE_DIRECTORY");
+      if (dir) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/reloaded", dir);
+        int f = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (f >= 0) close(f);
+      }
+      hup = 0;
+    }
+  }
+}
+"#;
+
+    struct Container(String);
+
+    impl Drop for Container {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", &self.0])
+                .output();
+        }
+    }
+
+    fn docker(args: &[&str]) -> String {
+        let out = std::process::Command::new("docker")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "docker {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    fn run_in(container: &Container, script: &str) -> String {
+        docker(&["exec", &container.0, "sh", "-c", script])
+    }
+
+    /// A computer in a container: Ubuntu with systemd, sshd and sudo, a user
+    /// pi whose key is the returned one, and its SSH port on this computer.
+    fn computer_in_a_container(work: &Path) -> (Container, u16, PathBuf) {
+        std::fs::write(work.join("Dockerfile"), INSTALL_IMAGE).unwrap();
+        docker(&[
+            "build",
+            "-q",
+            "-t",
+            "uxduck-companion-install-test",
+            &work.display().to_string(),
+        ]);
+        let container = Container(docker(&[
+            "run",
+            "-d",
+            "--privileged",
+            "--tmpfs",
+            "/run",
+            "--tmpfs",
+            "/run/lock",
+            "-p",
+            "127.0.0.1::22",
+            "uxduck-companion-install-test",
+        ]));
+        let port: u16 = docker(&["port", &container.0, "22"])
+            .lines()
+            .next()
+            .unwrap()
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let client = work.join("client");
+        keygen(&client);
+        for _ in 0..60 {
+            if std::process::Command::new("docker")
+                .args([
+                    "exec",
+                    &container.0,
+                    "systemctl",
+                    "is-active",
+                    "--quiet",
+                    "ssh",
+                ])
+                .status()
+                .unwrap()
+                .success()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        docker(&[
+            "cp",
+            &format!("{}.pub", client.display()),
+            &format!("{}:/home/pi/authorized_keys", container.0),
+        ]);
+        run_in(
+            &container,
+            "mkdir -p /home/pi/.ssh && mv /home/pi/authorized_keys /home/pi/.ssh/ && chown -R pi:pi /home/pi && chmod 700 /home/pi/.ssh",
+        );
+        (container, port, client)
+    }
+
+    /// A static stand-in `uxduck` for `version`, at `dir/<version>/uxduck`.
+    fn stand_in(dir: &Path, version: &str, broken: bool) -> PathBuf {
+        let source = dir.join("uxduck.c");
+        std::fs::write(&source, STAND_IN).unwrap();
+        let out = dir.join(version);
+        std::fs::create_dir_all(&out).unwrap();
+        let binary = out.join("uxduck");
+        let ok = std::process::Command::new("cc")
+            .args(["-static", "-O2"])
+            .arg(format!("-DVERSION=\"{version}\""))
+            .arg(format!("-DBROKEN={}", u8::from(broken)))
+            .arg("-o")
+            .arg(&binary)
+            .arg(&source)
+            .status()
+            .expect("a C compiler is needed for the container test")
+            .success();
+        assert!(ok, "cc failed");
+        binary
+    }
+
+    fn packed(binary: &Path) -> Vec<u8> {
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let bytes = std::fs::read(binary).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, "uxduck", bytes.as_slice())
+            .unwrap();
+        tar.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// Serves each `(version, build)` as a release signed by a new key.
+    async fn releases(target: &str, builds: Vec<(&str, Vec<u8>)>) -> builds::Source {
+        use axum::response::IntoResponse as _;
+        use sha2::Digest as _;
+        let key = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let public = key.pk.to_box().unwrap().into_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let mut files = std::collections::HashMap::new();
+        for (version, build) in builds {
+            let file = format!("uxduck-{version}-{target}.companion.tar.gz");
+            let manifest = uxduck_contracts::dto::release::ReleaseManifest {
+                schema: 1,
+                channel: "stable".into(),
+                version: version.into(),
+                published_at: "2026-11-23T00:00:00Z".into(),
+                rollback: false,
+                notes_url: None,
+                desktop_app: None,
+                artifacts: vec![uxduck_contracts::dto::release::ReleaseArtifact {
+                    target: target.into(),
+                    kind: builds::KIND.into(),
+                    file: file.clone(),
+                    url: format!("{base}/v{version}/{file}"),
+                    sha256: format!(
+                        "{:x}",
+                        uxduck_core::encoding::Hex(&sha2::Sha256::digest(&build))
+                    ),
+                    size: build.len() as u64,
+                }],
+            };
+            let bytes = serde_json::to_vec(&manifest).unwrap();
+            let signature =
+                minisign::sign(None, &key.sk, std::io::Cursor::new(&bytes), None, None).unwrap();
+            files.insert(format!("/v{version}/stable.json"), bytes);
+            files.insert(
+                format!("/v{version}/stable.json.minisig"),
+                signature.into_string().into_bytes(),
+            );
+            files.insert(format!("/v{version}/{file}"), build);
+        }
+        let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+            let files = files.clone();
+            async move {
+                match files.get(uri.path()) {
+                    Some(body) => body.clone().into_response(),
+                    None => axum::http::StatusCode::NOT_FOUND.into_response(),
+                }
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        builds::Source {
+            base,
+            key: public.lines().nth(1).unwrap().to_owned(),
+        }
+    }
+
+    fn reached_with(found: Found) -> CompanionCheck {
+        CompanionCheck {
+            state: CheckState::Reached,
+            at_us: 1,
+            os: found.os,
+            arch: found.arch,
+            uxduck: found.uxduck,
+            host_key: found.host_key,
+            problem: None,
+            problem_kind: None,
+            detail: None,
+            clock: None,
+            reports_as: found.reports_as,
+            network: None,
+            cameras: None,
+            software: found.software,
+        }
+    }
+
+    /// S297, ADR-0061 B5: Update over a hand-made service, an update whose
+    /// UXDuck does not start put back, and Remove, through the real SSH
+    /// path to a computer that runs systemd, sshd and sudo, with a static
+    /// stand-in for `uxduck`. Needs Docker and a C compiler:
+    /// `cargo test -p uxduck --bin uxduck companions::tests::install_ -- --ignored --nocapture --test-threads=1`.
+    #[tokio::test]
+    #[ignore = "needs Docker, a C compiler and a few minutes"]
+    #[allow(clippy::too_many_lines, reason = "one computer's whole story")]
+    async fn install_update_rollback_and_remove_in_a_systemd_container() {
+        use uxduck_core::domain::companion_software::{InstallInputs, plan};
+        let work = tempfile::tempdir().unwrap();
+        let (container, port, client) = computer_in_a_container(work.path());
+        let old = stand_in(work.path(), "0.1.0", false);
+        let good = stand_in(work.path(), "0.2.0", false);
+        let broken = stand_in(work.path(), "0.3.0", true);
+        docker(&[
+            "cp",
+            &old.display().to_string(),
+            &format!("{}:/usr/local/bin/uxduck", container.0),
+        ]);
+        run_in(
+            &container,
+            "printf '[Unit]\\nDescription=UXDuck by hand\\n[Service]\\nUser=pi\\nExecStart=/usr/local/bin/uxduck companion --to udp:127.0.0.1:14550 --computer-id 1\\n[Install]\\nWantedBy=multi-user.target\\n' > /etc/systemd/system/uxduck-companion.service && \
+             systemctl daemon-reload && systemctl enable --now uxduck-companion.service",
+        );
+        let target = "x86_64-unknown-linux-gnu";
+        let source = releases(
+            target,
+            vec![("0.2.0", packed(&good)), ("0.3.0", packed(&broken))],
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let key = std::fs::read_to_string(&client).unwrap();
+        let mut computer = CompanionComputer {
+            connectivity: None,
+            id: "cctest".into(),
+            name: "camera computer".into(),
+            host: "127.0.0.1".into(),
+            user: Some("pi".into()),
+            port: Some(port),
+            other_hosts: Vec::new(),
+            through: None,
+            role: CompanionRole::Report,
+            component_id: 191,
+            key: true,
+            check: None,
+            install: None,
+            update_noticed: None,
+        };
+        let found = check(dir.path(), None, &computer, pasted(&key))
+            .await
+            .unwrap();
+        assert_eq!(found.uxduck.as_deref(), Some("0.1.0"));
+        let software = found.software.clone().unwrap();
+        assert_eq!(software.sudo, Some(true));
+        assert!(software.systemd);
+        assert_eq!(software.has, ["config"]);
+        assert_eq!(software.link.as_deref(), Some("file"));
+        assert_eq!(software.units.len(), 1, "{software:?}");
+        assert!(!software.units[0].own);
+        assert_eq!(software.units[0].user.as_deref(), Some("pi"));
+        computer.check = Some(reached_with(found));
+
+        let update = plan(
+            "0.2.0",
+            &computer,
+            InstallAction::Update,
+            &InstallInputs::default(),
+        )
+        .unwrap();
+        assert_eq!(update.replaces, ["uxduck-companion.service"]);
+        let (record, found) = install(
+            dir.path(),
+            data.path(),
+            &source,
+            &computer,
+            pasted(&key),
+            &update,
+        )
+        .await;
+        eprintln!("{record:#?}");
+        assert_eq!(record.state, InstallState::Done, "{record:#?}");
+        assert!(record.steps.iter().all(|s| s.ok), "{record:#?}");
+        let found = found.expect("the computer is read after it");
+        assert_eq!(found.uxduck.as_deref(), Some("0.2.0"));
+        let software = found.software.clone().unwrap();
+        assert_eq!(software.link.as_deref(), Some("/opt/uxduck/0.2.0/uxduck"));
+        assert!(
+            software
+                .units
+                .iter()
+                .any(|u| u.own && u.user.as_deref() == Some("uxduck")),
+            "{software:?}"
+        );
+        assert_eq!(run_in(&container, "ps -o user= -C uxduck"), "uxduck");
+        assert_eq!(
+            run_in(&container, "systemctl is-active uxduck-companion.service"),
+            "active"
+        );
+        run_in(
+            &container,
+            "test -f /usr/local/bin/uxduck.before-uxduck && test -f /etc/systemd/system/uxduck-companion.service.before-uxduck && test -f /etc/polkit-1/rules.d/50-uxduck.rules && grep -q 'CAP_SYS_TIME' /etc/systemd/system/uxduck-companion.service",
+        );
+        computer.check = Some(reached_with(found));
+
+        let bad = plan(
+            "0.3.0",
+            &computer,
+            InstallAction::Update,
+            &InstallInputs::default(),
+        )
+        .unwrap();
+        let (record, found) = install(
+            dir.path(),
+            data.path(),
+            &source,
+            &computer,
+            pasted(&key),
+            &bad,
+        )
+        .await;
+        eprintln!("{record:#?}");
+        assert_eq!(record.state, InstallState::RolledBack, "{record:#?}");
+        assert!(
+            record
+                .problem
+                .as_deref()
+                .unwrap()
+                .contains("not running within 30 s"),
+            "{record:#?}"
+        );
+        let found = found.unwrap();
+        assert_eq!(
+            found.uxduck.as_deref(),
+            Some("0.2.0"),
+            "what was there is back"
+        );
+        assert_eq!(
+            run_in(&container, "readlink /usr/local/bin/uxduck"),
+            "/opt/uxduck/0.2.0/uxduck"
+        );
+        assert_eq!(
+            run_in(&container, "systemctl is-active uxduck-companion.service"),
+            "active"
+        );
+        assert_eq!(run_in(&container, "ps -o user= -C uxduck"), "uxduck");
+        computer.check = Some(reached_with(found));
+
+        let remove = plan(
+            "0.2.0",
+            &computer,
+            InstallAction::Remove,
+            &InstallInputs::default(),
+        )
+        .unwrap();
+        let (record, found) = install(
+            dir.path(),
+            data.path(),
+            &source,
+            &computer,
+            pasted(&key),
+            &remove,
+        )
+        .await;
+        eprintln!("{record:#?}");
+        assert_eq!(record.state, InstallState::Done, "{record:#?}");
+        assert_eq!(
+            found.unwrap().uxduck.as_deref(),
+            Some("0.1.0"),
+            "the hand-made uxduck is back"
+        );
+        run_in(
+            &container,
+            "test ! -e /opt/uxduck && test ! -L /usr/local/bin/uxduck && test -f /usr/local/bin/uxduck && test ! -e /etc/polkit-1/rules.d/50-uxduck.rules && ! id uxduck && grep -q 'UXDuck by hand' /etc/systemd/system/uxduck-companion.service && test ! -e /etc/systemd/system/uxduck-companion.service.before-uxduck && test ! -e /usr/local/bin/uxduck.before-uxduck",
+        );
+        assert_eq!(
+            run_in(&container, "systemctl is-active uxduck-companion.service"),
+            "active",
+            "Remove starts the hand-made service it put back"
+        );
+        assert_eq!(run_in(&container, "ps -o user= -C uxduck"), "pi");
+        for step in &record.steps {
+            assert!(!step.title.contains(';'), "{}", step.title);
+        }
+        run_in(
+            &container,
+            "systemctl disable --now uxduck-companion.service && rm /etc/systemd/system/uxduck-companion.service /usr/local/bin/uxduck && systemctl daemon-reload",
+        );
+
+        // A computer with no UXDuck service: Install makes one from what
+        // the person typed.
+        computer.check = Some(reached_with(
+            check(dir.path(), None, &computer, pasted(&key))
+                .await
+                .unwrap(),
+        ));
+        let fresh = plan(
+            "0.2.0",
+            &computer,
+            InstallAction::Install,
+            &InstallInputs {
+                to: Some("udp:127.0.0.1:14560".into()),
+                serial: None,
+            },
+        )
+        .unwrap();
+        assert!(fresh.replaces.is_empty(), "{fresh:?}");
+        let (record, found) = install(
+            dir.path(),
+            data.path(),
+            &source,
+            &computer,
+            pasted(&key),
+            &fresh,
+        )
+        .await;
+        assert_eq!(record.state, InstallState::Done, "{record:#?}");
+        assert_eq!(found.unwrap().uxduck.as_deref(), Some("0.2.0"));
+        assert_eq!(
+            run_in(&container, "systemctl is-enabled uxduck-companion.service"),
+            "enabled"
+        );
+        assert!(run_in(&container, "cat /proc/$(systemctl show -p MainPID --value uxduck-companion.service)/cmdline | tr '\\0' ' '").contains("--to udp:127.0.0.1:14560"));
+    }
+
+    /// Plane's hand-made service, as the maintainer installed it (2026-11-23).
+    const PLANE_UNIT: &str = "[Unit]
+Description=UXDuck companion
+After=network-online.target uxduck-camera-rtsp.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uxduck
+Group=uxduck
+ExecStart=/usr/local/bin/uxduck companion --config /etc/uxduck/companion.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+Environment=RUST_LOG=info
+StateDirectory=uxduck
+StateDirectoryMode=0750
+# Viewers come over the radio LAN and Tailscale only, never the 4G modem.
+IPAddressAllow=localhost 192.168.50.0/24 100.64.0.0/10 fd7a:115c:a1e0::/48
+IPAddressDeny=any
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+";
+
+    /// S297: an update over Plane's hand-made service, which keeps the WHEP
+    /// sender off the 4G modem. An update whose UXDuck does not start puts
+    /// that file back byte for byte. One that runs keeps its network limit,
+    /// sandbox, environment, what it starts after and the SIGHUP reload a
+    /// recording mode change uses. Remove puts the hand-made service back,
+    /// byte for byte, and starts it. Needs Docker and a C compiler:
+    /// `cargo test -p uxduck --bin uxduck companions::tests::an_update_keeps -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "needs Docker, a C compiler and a few minutes"]
+    #[allow(clippy::too_many_lines, reason = "one computer's whole story")]
+    async fn an_update_keeps_a_hand_made_services_limits_and_remove_puts_it_back() {
+        use uxduck_core::domain::companion_software::{InstallInputs, plan};
+        let work = tempfile::tempdir().unwrap();
+        let (container, port, client) = computer_in_a_container(work.path());
+        let old = stand_in(work.path(), "0.1.0", false);
+        let good = stand_in(work.path(), "0.2.0", false);
+        let broken = stand_in(work.path(), "0.3.0", true);
+        std::fs::write(work.path().join("plane.service"), PLANE_UNIT).unwrap();
+        docker(&[
+            "cp",
+            &old.display().to_string(),
+            &format!("{}:/usr/local/bin/uxduck", container.0),
+        ]);
+        docker(&[
+            "cp",
+            &work.path().join("plane.service").display().to_string(),
+            &format!(
+                "{}:/etc/systemd/system/uxduck-companion.service",
+                container.0
+            ),
+        ]);
+        run_in(
+            &container,
+            "useradd --system --user-group --no-create-home --shell /usr/sbin/nologin uxduck && \
+             mkdir -p /etc/uxduck && touch /etc/uxduck/companion.toml && \
+             printf '[Service]\\nExecStart=/bin/sleep infinity\\n[Install]\\nWantedBy=multi-user.target\\n' > /etc/systemd/system/uxduck-camera-rtsp.service && \
+             chown root:root /etc/systemd/system/uxduck-companion.service && \
+             systemctl daemon-reload && systemctl enable --now uxduck-camera-rtsp.service uxduck-companion.service",
+        );
+        let sha = |path: &str| run_in(&container, &format!("sha256sum {path} | cut -d' ' -f1"));
+        let hand_made = sha("/etc/systemd/system/uxduck-companion.service");
+        assert_eq!(
+            run_in(
+                &container,
+                "cat /etc/systemd/system/uxduck-companion.service"
+            ),
+            PLANE_UNIT.trim_end(),
+            "the container has Plane's file"
+        );
+        let binary = sha("/usr/local/bin/uxduck");
+        assert_eq!(
+            run_in(&container, "systemctl is-active uxduck-companion.service"),
+            "active"
+        );
+        let source = releases(
+            "x86_64-unknown-linux-gnu",
+            vec![("0.2.0", packed(&good)), ("0.3.0", packed(&broken))],
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let key = std::fs::read_to_string(&client).unwrap();
+        let mut computer = CompanionComputer {
+            connectivity: None,
+            id: "plane".into(),
+            name: "camera computer".into(),
+            host: "127.0.0.1".into(),
+            user: Some("pi".into()),
+            port: Some(port),
+            other_hosts: Vec::new(),
+            through: None,
+            role: CompanionRole::Report,
+            component_id: 191,
+            key: true,
+            check: None,
+            install: None,
+            update_noticed: None,
+        };
+        let found = check(dir.path(), None, &computer, pasted(&key))
+            .await
+            .unwrap();
+        let software = found.software.clone().unwrap();
+        assert!(
+            software.units[0]
+                .lines
+                .iter()
+                .any(|l| l == "IPAddressDeny=any"),
+            "{software:?}"
+        );
+        assert!(
+            software
+                .present
+                .iter()
+                .any(|p| p == "uxduck-camera-rtsp.service"),
+            "{software:?}"
+        );
+        assert!(
+            !software.present.iter().any(|p| p == "tailscaled.service"),
+            "{software:?}"
+        );
+        computer.check = Some(reached_with(found));
+
+        // An update whose UXDuck does not start puts the hand-made file back
+        // byte for byte, running as it was.
+        let bad = plan(
+            "0.3.0",
+            &computer,
+            InstallAction::Update,
+            &InstallInputs::default(),
+        )
+        .unwrap();
+        let (record, found) = install(
+            dir.path(),
+            data.path(),
+            &source,
+            &computer,
+            pasted(&key),
+            &bad,
+        )
+        .await;
+        eprintln!("{record:#?}");
+        assert_eq!(record.state, InstallState::RolledBack, "{record:#?}");
+        assert_eq!(
+            sha("/etc/systemd/system/uxduck-companion.service"),
+            hand_made,
+            "the hand-made file is back byte for byte"
+        );
+        assert_eq!(sha("/usr/local/bin/uxduck"), binary);
+        run_in(
+            &container,
+            "test ! -e /etc/systemd/system/uxduck-companion.service.before-uxduck && test ! -e /usr/local/bin/uxduck.before-uxduck && test ! -e /etc/polkit-1/rules.d/50-uxduck.rules && test ! -e /opt/uxduck/0.3.0",
+        );
+        assert_eq!(
+            run_in(&container, "systemctl is-active uxduck-companion.service"),
+            "active"
+        );
+        assert_eq!(
+            run_in(&container, "systemctl is-enabled uxduck-companion.service"),
+            "enabled"
+        );
+        computer.check = Some(reached_with(found.unwrap()));
+
+        // An update that runs keeps the limits, and says so first.
+        let update = plan(
+            "0.2.0",
+            &computer,
+            InstallAction::Update,
+            &InstallInputs::default(),
+        )
+        .unwrap();
+        let keeps = update.keeps.join("\n");
+        assert!(
+            keeps.contains(
+                "viewers and every other connection only from this computer, 192.168.50.0/24 and Tailscale"
+            ),
+            "{keeps}"
+        );
+        assert!(keeps.contains("Reloading with SIGHUP"), "{keeps}");
+        assert!(
+            update
+                .warnings
+                .join("\n")
+                .contains("tailscaled.service, which this computer doesn't have"),
+            "{:?}",
+            update.warnings
+        );
+        let (record, found) = install(
+            dir.path(),
+            data.path(),
+            &source,
+            &computer,
+            pasted(&key),
+            &update,
+        )
+        .await;
+        eprintln!("{record:#?}");
+        assert_eq!(record.state, InstallState::Done, "{record:#?}");
+        let show = |property: &str| {
+            run_in(
+                &container,
+                &format!("systemctl show -p {property} --value uxduck-companion.service"),
+            )
+        };
+        assert!(
+            show("IPAddressAllow").contains("192.168.50.0/24"),
+            "{}",
+            show("IPAddressAllow")
+        );
+        assert!(
+            show("IPAddressAllow").contains("100.64.0.0/10"),
+            "{}",
+            show("IPAddressAllow")
+        );
+        assert!(
+            !show("IPAddressDeny").is_empty(),
+            "IPAddressDeny=any is kept"
+        );
+        assert_eq!(show("ProtectSystem"), "strict");
+        assert_eq!(show("ProtectHome"), "yes");
+        assert_eq!(show("PrivateTmp"), "yes");
+        assert_eq!(show("StateDirectory"), "uxduck");
+        assert_eq!(show("StateDirectoryMode"), "0750");
+        assert!(show("Environment").contains("RUST_LOG=info"));
+        assert!(show("After").contains("uxduck-camera-rtsp.service"));
+        assert!(
+            show("ExecReload").contains("-HUP"),
+            "{}",
+            show("ExecReload")
+        );
+        assert_eq!(run_in(&container, "ps -o user= -C uxduck"), "uxduck");
+        let pid = show("MainPID");
+        assert_eq!(
+            run_in(&container, &format!("readlink /proc/{pid}/exe")),
+            "/opt/uxduck/0.2.0/uxduck"
+        );
+        run_in(
+            &container,
+            "rm -f /var/lib/uxduck/reloaded && systemctl reload uxduck-companion.service && sleep 1 && test -f /var/lib/uxduck/reloaded",
+        );
+        assert_eq!(show("MainPID"), pid, "a reload keeps the process");
+        assert_eq!(show("ActiveState"), "active");
+        let software = found.unwrap().software.unwrap();
+        assert_eq!(
+            software.before,
+            ["uxduck-companion.service", "/usr/local/bin/uxduck"],
+            "{software:?}"
+        );
+
+        // Remove puts the hand-made service back byte for byte and starts it.
+        computer.check = Some(reached_with(
+            check(dir.path(), None, &computer, pasted(&key))
+                .await
+                .unwrap(),
+        ));
+        let remove = plan(
+            "0.2.0",
+            &computer,
+            InstallAction::Remove,
+            &InstallInputs::default(),
+        )
+        .unwrap();
+        assert!(
+            remove
+                .steps
+                .iter()
+                .any(|s| s.starts_with("Put back the hand-made uxduck-companion.service")),
+            "{:?}",
+            remove.steps
+        );
+        let (record, found) = install(
+            dir.path(),
+            data.path(),
+            &source,
+            &computer,
+            pasted(&key),
+            &remove,
+        )
+        .await;
+        eprintln!("{record:#?}");
+        assert_eq!(record.state, InstallState::Done, "{record:#?}");
+        assert_eq!(found.unwrap().uxduck.as_deref(), Some("0.1.0"));
+        assert_eq!(
+            sha("/etc/systemd/system/uxduck-companion.service"),
+            hand_made,
+            "Remove puts the hand-made file back byte for byte"
+        );
+        assert_eq!(sha("/usr/local/bin/uxduck"), binary);
+        assert_eq!(show("ActiveState"), "active");
+        assert_eq!(
+            run_in(&container, "systemctl is-enabled uxduck-companion.service"),
+            "enabled"
+        );
+        assert_eq!(
+            run_in(
+                &container,
+                &format!("readlink /proc/{}/exe", show("MainPID"))
+            ),
+            "/usr/local/bin/uxduck"
+        );
+        run_in(
+            &container,
+            "id uxduck && test ! -e /opt/uxduck && test ! -e /etc/polkit-1/rules.d/50-uxduck.rules && test ! -e /etc/systemd/system/uxduck-companion.service.before-uxduck",
+        );
+    }
+
+    /// S297: a check reads what Install needs from the computer's own
+    /// setup, and a computer that runs nothing of UXDuck's says so.
+    #[test]
+    fn a_check_reads_uxducks_setup_on_the_computer() {
+        let stdout = "os=Debian\narch=aarch64\nuxduck=uxduck 0.20.0\nhas=config\nlink=/opt/uxduck/0.20.0/uxduck\nkept=0.19.0\nkept=0.20.0\nconfig=yes\nuses=sender\nuses=recorder\nunit=uxduck-companion.service\tno\tpi\tyes\t/home/pi/uxduck companion --config /etc/uxduck/companion.toml\nunitline=uxduck-companion.service\t[Service]\nunitline=uxduck-companion.service\tIPAddressDeny=any\nunit=forward.service\tyes\t\tno\t/usr/local/bin/uxduck forward --onboard\npresent=tailscaled.service\npresent=tailscaled.service\nbefore=uxduck-companion.service\nsudo=yes\nserial=/dev/serial0\nserial=/dev/ttyACM0\nsystemd=yes\nbits=64\n";
+        let computer = CompanionComputer {
+            connectivity: None,
+            id: "c".into(),
+            name: "camera".into(),
+            host: "pi.local".into(),
+            user: None,
+            port: None,
+            other_hosts: Vec::new(),
+            through: None,
+            role: CompanionRole::Report,
+            component_id: 191,
+            key: false,
+            check: None,
+            install: None,
+            update_noticed: None,
+        };
+        let found = answer(
+            &computer,
+            SignIn::default(),
+            Way::Person,
+            &ran(stdout, (0, 0)),
+        )
+        .unwrap();
+        assert_eq!(found.uxduck.as_deref(), Some("0.20.0"));
+        let software = found.software.unwrap();
+        assert_eq!(software.link.as_deref(), Some("/opt/uxduck/0.20.0/uxduck"));
+        assert_eq!(software.kept, ["0.19.0", "0.20.0"]);
+        assert!(software.config);
+        assert_eq!(software.uses, ["sender", "recorder"]);
+        assert_eq!(software.has, ["config"]);
+        assert_eq!(software.sudo, Some(true));
+        assert_eq!(software.serial, ["/dev/serial0", "/dev/ttyACM0"]);
+        assert!(software.systemd);
+        assert_eq!(software.bits, Some(64));
+        assert_eq!(software.present, ["tailscaled.service"]);
+        assert_eq!(software.before, ["uxduck-companion.service"]);
+        assert_eq!(
+            software.units,
+            [
+                FoundUnit {
+                    name: "uxduck-companion.service".into(),
+                    own: false,
+                    user: Some("pi".into()),
+                    drop_ins: true,
+                    exec: "/home/pi/uxduck companion --config /etc/uxduck/companion.toml".into(),
+                    lines: vec!["[Service]".into(), "IPAddressDeny=any".into()],
+                },
+                FoundUnit {
+                    name: "forward.service".into(),
+                    own: true,
+                    user: None,
+                    drop_ins: false,
+                    exec: "/usr/local/bin/uxduck forward --onboard".into(),
+                    lines: Vec::new(),
+                },
+            ]
+        );
+        let older = answer(
+            &computer,
+            SignIn::default(),
+            Way::Person,
+            &ran("os=Debian\n", (0, 0)),
+        )
+        .unwrap();
+        assert_eq!(
+            older.software, None,
+            "an answer from before S297 reads nothing"
+        );
+    }
+
+    /// S297: what install.sh says becomes the steps people read, and how it
+    /// ended.
+    #[test]
+    fn what_install_sh_said_becomes_its_steps() {
+        let log = "@step Check the copied build\nOK\nuxduck 0.21.0\n@step Start it\nfailed to start\n@fail UXDuck 0.21.0 was not running within 30 s.\n@step Put back what was there\n@end rolled-back";
+        let lines: Vec<&str> = log.lines().collect();
+        let (steps, end, why) = install_said(&lines);
+        assert_eq!(steps.len(), 3);
+        assert!(steps[0].ok);
+        assert_eq!(steps[0].output, "OK\nuxduck 0.21.0");
+        assert!(!steps[1].ok);
+        assert_eq!(steps[1].output, "failed to start");
+        assert!(steps[2].ok);
+        assert_eq!(end.as_deref(), Some("rolled-back"));
+        assert_eq!(
+            why.as_deref(),
+            Some("UXDuck 0.21.0 was not running within 30 s.")
+        );
+        let script = include_str!("companions/install.sh");
+        for line in script
+            .lines()
+            .filter(|l| l.contains("step \"") || l.contains("fail \""))
+        {
+            let said = line.split('"').nth(1).unwrap_or_default();
+            assert!(
+                !said.contains(';'),
+                "no semicolons in what people read: {said}"
+            );
+        }
+    }
+
     #[test]
     fn a_check_reads_the_clock_and_whether_it_keeps_time() {
         // 13 November 2026, the command taking 400 ms, and a computer that
@@ -2960,6 +4285,8 @@ mod tests {
             key: false,
             check: None,
             connectivity: None,
+            install: None,
+            update_noticed: None,
         };
         let out = format!(
             "os=Debian GNU/Linux 13 (trixie)\narch=aarch64\nuxduck=\nclock={read}\nNTP=yes\nNTPSynchronized=no\ntimeservice=systemd-timesyncd\n"
@@ -3247,6 +4574,8 @@ mod tests {
             component_id: 191,
             key: false,
             check: None,
+            install: None,
+            update_noticed: None,
         };
         let why = check(keys.path(), Some(&config), &computer, SignIn::default())
             .await
@@ -3307,6 +4636,8 @@ mod tests {
             key: false,
             check: None,
             connectivity: None,
+            install: None,
+            update_noticed: None,
         };
         let own = OwnKey {
             private: String::new(),
@@ -3365,6 +4696,8 @@ mod tests {
             component_id: 191,
             key: false,
             check: None,
+            install: None,
+            update_noticed: None,
         };
         let own = OwnKey {
             private: String::new(),
@@ -3468,6 +4801,8 @@ mod tests {
             component_id: 191,
             key: false,
             check: None,
+            install: None,
+            update_noticed: None,
         };
         for (at, way) in [Way::Password(&own, "pw"), Way::PasswordOnly("pw")]
             .into_iter()
@@ -3527,6 +4862,8 @@ mod tests {
             component_id: 191,
             key: false,
             check: None,
+            install: None,
+            update_noticed: None,
         };
         let own = OwnKey {
             private: String::new(),
@@ -3583,6 +4920,8 @@ mod tests {
             component_id: 191,
             key: false,
             check: None,
+            install: None,
+            update_noticed: None,
         };
         let own = OwnKey {
             private: String::new(),
@@ -3995,6 +5334,8 @@ mod tests {
             component_id: 191,
             key: false,
             check: None,
+            install: None,
+            update_noticed: None,
         };
         let own = OwnKey {
             private: String::new(),
@@ -4240,6 +5581,8 @@ mod tests {
             component_id: 191,
             key: true,
             check: None,
+            install: None,
+            update_noticed: None,
         };
         let through = Through {
             computer: &gateway,
@@ -4318,6 +5661,7 @@ mod tests {
             reports_as: None,
             network: None,
             cameras: None,
+            software: None,
         }
     }
 

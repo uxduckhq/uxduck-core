@@ -42,6 +42,10 @@ pub const AGENT_METHODS: &[&str] = &[
     // for every transfer.
     "computer/recordings",
     "computer/download",
+    // Which UXDuck each companion computer runs, against this ground's
+    // (S297): reading it and the plan an Update would follow change nothing.
+    "computer/software",
+    "computer/installPlan",
     "place/search",
     "place/locate",
     // A named area's outline (FB-177): it waits on the map for the
@@ -325,6 +329,10 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "computer/cameras",
     "computer/network",
     "computer/connectivity",
+    // Installing, updating and removing UXDuck on a companion computer
+    // replaces what runs on the vehicle and restarts it (S297, ADR-0061 B5):
+    // the person's, after they have read the plan.
+    "computer/install",
     // What agents ran on companion computers is the operator's to read.
     "computer/runs",
     // A terminal on a companion computer is a shell on the vehicle, typed
@@ -633,6 +641,7 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
 /// loaded. MCP discovery searches the full generated catalogue separately.
 pub const DEFERRED_METHODS: &[&str] = &[
     "computer/run",
+    "computer/software",
     "tuning/state",
     "tuning/prepare",
     "place/search",

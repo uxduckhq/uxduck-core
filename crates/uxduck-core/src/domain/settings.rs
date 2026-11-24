@@ -319,6 +319,11 @@ pub struct Settings {
     /// to confirm a hold and mark a refusal or a lost link.
     #[serde(default = "controller_rumble")]
     pub controller_rumble: bool,
+    /// Settings › Vehicles & connections (S297): a notice when a vehicle's
+    /// companion computer runs an older UXDuck than this computer, once per
+    /// version.
+    #[serde(default = "companion_update_notices")]
+    pub companion_update_notices: bool,
     #[serde(default)]
     pub traffic_controls: TrafficControls,
     /// Settings › Terrain (S23, ADR-0026 T4): the dataset the map reads
@@ -524,6 +529,7 @@ impl Default for Settings {
             battery_low_pct: battery_low_pct(),
             battery_critical_pct: battery_critical_pct(),
             controller_rumble: controller_rumble(),
+            companion_update_notices: companion_update_notices(),
             traffic_controls: TrafficControls::default(),
             terrain_dataset: TerrainDataset::Alos,
             vehicle_terrain_datasets: BTreeMap::new(),
@@ -627,6 +633,11 @@ const fn battery_critical_pct() -> u8 {
 
 /// On, so a controller that can rumble does (S419).
 const fn controller_rumble() -> bool {
+    true
+}
+
+/// On, so an older UXDuck on a vehicle's computer is said (S297).
+const fn companion_update_notices() -> bool {
     true
 }
 

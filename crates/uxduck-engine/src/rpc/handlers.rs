@@ -219,6 +219,18 @@ pub(crate) fn handle(
             require(Config)?;
             engine.check_computer(connection, params)
         }
+        ClientRequest::ComputerSoftware(params) => {
+            require(Read)?;
+            engine.computer_software(&params)
+        }
+        ClientRequest::ComputerInstallPlan(params) => {
+            require(Read)?;
+            engine.computer_install_plan(&params)
+        }
+        ClientRequest::ComputerInstall(params) => {
+            require(Config)?;
+            engine.install_computer(connection, &params)
+        }
         request @ (ClientRequest::TerminalOpen(_) | ClientRequest::ComputerRun(_)) => {
             require(Terminal)?;
             crate::terminals::handle(engine, connection, request)

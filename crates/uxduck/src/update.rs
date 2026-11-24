@@ -202,6 +202,8 @@ pub fn artifact_for(manifest: &ReleaseManifest, target: &str) -> Option<ReleaseA
     let rank = |kind: &str| match kind {
         "pkg" | "msi" | "deb" => 0,
         uxduck_contracts::dto::release::BUNDLE_FILES_KIND => 2,
+        // A companion computer's uxduck alone (S297), never this app's update.
+        "companion" => 3,
         _ => 1,
     };
     let best = |wanted: &str| {

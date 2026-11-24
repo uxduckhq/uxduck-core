@@ -969,7 +969,10 @@ mod tests {
                 reports_as: None,
                 network: None,
                 cameras: None,
+                software: None,
             }),
+            install: None,
+            update_noticed: None,
         }
     }
 

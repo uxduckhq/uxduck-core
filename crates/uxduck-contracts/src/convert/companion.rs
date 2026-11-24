@@ -60,6 +60,7 @@ impl From<&c::CompanionComputer> for dto::CompanionComputer {
                 }),
                 detail: check.detail.clone(),
                 cameras: check.cameras.as_ref().map(Into::into),
+                software: check.software.as_ref().map(Into::into),
                 clock: check.clock.as_ref().map(|clock| dto::CompanionClock {
                     offset_ms: clock.offset_ms,
                     within_ms: clock.within_ms,
@@ -109,6 +110,7 @@ impl From<&c::CompanionComputer> for dto::CompanionComputer {
                         .collect(),
                 }),
             }),
+            install: v.install.as_ref().map(Into::into),
         }
     }
 }
