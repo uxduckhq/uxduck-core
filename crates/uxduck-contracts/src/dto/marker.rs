@@ -59,8 +59,16 @@ pub enum MarkerShape {
     /// 3 or more corners in order round it, not crossing itself; it closes
     /// by itself.
     Area { points: Vec<LatLon> },
-    /// 1 m to 50 km about the marker's point.
-    Circle { radius_m: f64 },
+    /// 1 m to 50 km about the marker's point. `center` is that point, given
+    /// on `marker/add` or `marker/update` in place of the marker's
+    /// `latitudeDeg` and `longitudeDeg`, or as the same place as them. A
+    /// marker never comes back with one: its own latitude and longitude are
+    /// its centre.
+    Circle {
+        radius_m: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        center: Option<LatLon>,
+    },
 }
 
 /// A marker's colour, from a fixed palette that reads on every map
@@ -255,8 +263,9 @@ pub struct MarkerListResult {
 /// circle (`shape`). Without a name it is named after its look ("Flag",
 /// "Boat") or its shape and count ("Area 2"). A line or an area needs no
 /// latitude and longitude: its point is its middle. A circle is about the
-/// latitude and longitude given. A building (look `building`, or an
-/// `outline` given) is centred there; without an outline it is 10 by 10 m,
+/// latitude and longitude given, or its `center`. Given both, they must be
+/// the same place, or it is refused. A building (look `building`, or an
+/// `outline` given) is centred there. Without an outline it is 10 by 10 m,
 /// and without a height 10 m tall.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -265,7 +274,8 @@ pub struct MarkerAddParams {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<MarkerLook>,
-    /// Needed unless the shape is a line or an area.
+    /// Needed unless the shape is a line, an area, or a circle with its
+    /// `center`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latitude_deg: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,17 +283,17 @@ pub struct MarkerAddParams {
     /// Degrees clockwise from true north, 0 to 360.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heading_deg: Option<f64>,
-    /// Live from this computer or a GPS receiver; by hand when absent. A
+    /// Live from this computer or a GPS receiver, or by hand when absent. A
     /// building is always by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<MarkerSource>,
-    /// A building's outline; giving one makes the marker a building.
+    /// A building's outline. Giving one makes the marker a building.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outline: Option<MarkerOutline>,
     /// A building's height above the ground, 0.5 to 1000 m.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height_m: Option<f64>,
-    /// A line, an area or a circle, set by hand; not with a live source or
+    /// A line, an area or a circle, set by hand. Not with a live source or
     /// a building.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<MarkerShape>,
@@ -297,8 +307,10 @@ pub struct MarkerAddParams {
 
 /// Changes a marker edited from `expectedVersion`: only the fields given.
 /// `headingDeg: null` takes its heading away. A new latitude and longitude
-/// move a line or an area whole, keeping its shape; `shape` replaces its
-/// points (and its middle), `shape: null` leaves a point at its middle.
+/// move a line or an area whole, keeping its shape. `shape` replaces its
+/// points (and its middle), and `shape: null` leaves a point at its middle.
+/// A circle's `center` moves the marker there. Given with a new latitude
+/// and longitude, it must be the same place, or it is refused.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MarkerUpdateParams {
@@ -319,7 +331,7 @@ pub struct MarkerUpdateParams {
         skip_serializing_if = "Option::is_none"
     )]
     pub heading_deg: Option<Option<f64>>,
-    /// Another source; `manual` keeps it where it was last seen.
+    /// Another source. `manual` keeps it where it was last seen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<MarkerSource>,
     /// Shown to watch links, or not.

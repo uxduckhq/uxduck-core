@@ -11492,8 +11492,9 @@ export type Marker = {
  * circle (`shape`). Without a name it is named after its look ("Flag",
  * "Boat") or its shape and count ("Area 2"). A line or an area needs no
  * latitude and longitude: its point is its middle. A circle is about the
- * latitude and longitude given. A building (look `building`, or an
- * `outline` given) is centred there; without an outline it is 10 by 10 m,
+ * latitude and longitude given, or its `center`. Given both, they must be
+ * the same place, or it is refused. A building (look `building`, or an
+ * `outline` given) is centred there. Without an outline it is 10 by 10 m,
  * and without a height 10 m tall.
  */
 export type MarkerAddParams = {
@@ -11508,24 +11509,25 @@ export type MarkerAddParams = {
      */
     heightM?: number | null;
     /**
-     * Needed unless the shape is a line or an area.
+     * Needed unless the shape is a line, an area, or a circle with its
+     * `center`.
      */
     latitudeDeg?: number | null;
     longitudeDeg?: number | null;
     look?: MarkerLook | null;
     name?: string | null;
     /**
-     * A building's outline; giving one makes the marker a building.
+     * A building's outline. Giving one makes the marker a building.
      */
     outline?: MarkerOutline | null;
     outlineOnly?: boolean | null;
     /**
-     * A line, an area or a circle, set by hand; not with a live source or
+     * A line, an area or a circle, set by hand. Not with a live source or
      * a building.
      */
     shape?: MarkerShape | null;
     /**
-     * Live from this computer or a GPS receiver; by hand when absent. A
+     * Live from this computer or a GPS receiver, or by hand when absent. A
      * building is always by hand.
      */
     source?: MarkerSource | null;
@@ -11635,6 +11637,7 @@ export type MarkerShape = {
     points: Array<LatLon>;
     type: 'area';
 } | {
+    center?: LatLon | null;
     radiusM: number;
     type: 'circle';
 };
@@ -11686,8 +11689,10 @@ export type MarkerSource = {
 /**
  * Changes a marker edited from `expectedVersion`: only the fields given.
  * `headingDeg: null` takes its heading away. A new latitude and longitude
- * move a line or an area whole, keeping its shape; `shape` replaces its
- * points (and its middle), `shape: null` leaves a point at its middle.
+ * move a line or an area whole, keeping its shape. `shape` replaces its
+ * points (and its middle), and `shape: null` leaves a point at its middle.
+ * A circle's `center` moves the marker there. Given with a new latitude
+ * and longitude, it must be the same place, or it is refused.
  */
 export type MarkerUpdateParams = {
     /**
@@ -11713,7 +11718,7 @@ export type MarkerUpdateParams = {
     outlineOnly?: boolean | null;
     shape?: MarkerShape | null;
     /**
-     * Another source; `manual` keeps it where it was last seen.
+     * Another source. `manual` keeps it where it was last seen.
      */
     source?: MarkerSource | null;
     /**

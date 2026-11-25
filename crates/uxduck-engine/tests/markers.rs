@@ -853,6 +853,98 @@ fn watch_links_leave_buildings_out_until_watchers_can_draw_them() {
 }
 
 #[test]
+fn a_circle_given_only_its_center_is_placed_there_and_a_center_elsewhere_is_refused() {
+    let mut engine = engine();
+    let mut window = join(&mut engine, "operator-ui");
+    let circle = |lat: f64, lon: f64| json!({ "type": "circle", "radiusM": 200.0, "center": { "latitudeDeg": lat, "longitudeDeg": lon } });
+
+    let ring = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "shape": circle(50.0, -1.0) }),
+    );
+    let ring = ring["result"].clone();
+    assert_eq!(ring["latitudeDeg"], 50.0, "{ring}");
+    assert_eq!(ring["longitudeDeg"], -1.0);
+    assert_eq!(
+        ring["shape"],
+        json!({ "type": "circle", "radiusM": 200.0 }),
+        "shown as before, the marker's point being its centre"
+    );
+    let id = ring["id"].as_str().unwrap().to_owned();
+    assert_eq!(engine.state().markers[&id].latitude_deg, 50.0);
+
+    let same = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "latitudeDeg": 51.0, "longitudeDeg": -2.0, "shape": circle(51.0, -2.0) }),
+    );
+    assert_eq!(same["result"]["latitudeDeg"], 51.0, "{same}");
+
+    let apart = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "latitudeDeg": 50.0, "longitudeDeg": -1.0, "shape": circle(50.5, -1.25) }),
+    );
+    let message = apart["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("50.5, -1.25") && message.contains("50, -1"),
+        "names both places: {apart}"
+    );
+    assert!(!message.contains(';'), "{message}");
+    let half = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "latitudeDeg": 50.0, "shape": circle(50.0, -1.0) }),
+    );
+    assert!(half["error"].is_object(), "{half}");
+    assert_eq!(engine.state().markers.len(), 2, "neither refused one added");
+
+    let moved = call(
+        &mut engine,
+        &mut window,
+        "marker/update",
+        json!({ "id": id, "expectedVersion": 1, "shape": circle(50.1, -1.1) }),
+    );
+    assert_eq!(moved["result"]["latitudeDeg"], 50.1, "{moved}");
+    assert_eq!(moved["result"]["longitudeDeg"], -1.1);
+    let refused = call(
+        &mut engine,
+        &mut window,
+        "marker/update",
+        json!({ "id": id, "expectedVersion": 2, "latitudeDeg": 50.0, "longitudeDeg": -1.0, "shape": circle(50.1, -1.1) }),
+    );
+    assert!(refused["error"].is_object(), "{refused}");
+    assert_eq!(engine.state().markers[&id].latitude_deg, 50.1);
+    assert_eq!(engine.state().markers[&id].version, 2);
+
+    let unknown = call(
+        &mut engine,
+        &mut window,
+        "marker/update",
+        json!({ "id": "mk-gone", "expectedVersion": 1, "latitudeDeg": 50.0, "longitudeDeg": -1.0, "shape": circle(50.1, -1.1) }),
+    );
+    assert_eq!(
+        unknown["error"]["message"], "no marker mk-gone",
+        "an unknown marker is named before the shape is read: {unknown}"
+    );
+    let stale = call(
+        &mut engine,
+        &mut window,
+        "marker/update",
+        json!({ "id": id, "expectedVersion": 1, "latitudeDeg": 50.0, "longitudeDeg": -1.0, "shape": circle(50.1, -1.1) }),
+    );
+    assert_eq!(
+        stale["error"]["data"]["currentVersion"], 2,
+        "a stale version is told first: {stale}"
+    );
+}
+
+#[test]
 fn a_line_an_area_and_a_circle_are_markers_in_colours_and_move_whole() {
     let mut engine = engine();
     let mut one = join(&mut engine, "operator-ui");

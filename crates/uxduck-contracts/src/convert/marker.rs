@@ -96,7 +96,10 @@ impl From<m::MarkerShape> for dto::MarkerShape {
             m::MarkerShape::Area { points } => Self::Area {
                 points: out(points),
             },
-            m::MarkerShape::Circle { radius_m } => Self::Circle { radius_m },
+            m::MarkerShape::Circle { radius_m } => Self::Circle {
+                radius_m,
+                center: None,
+            },
         }
     }
 }
@@ -111,7 +114,7 @@ impl From<dto::MarkerShape> for m::MarkerShape {
             dto::MarkerShape::Area { points } => Self::Area {
                 points: into(points),
             },
-            dto::MarkerShape::Circle { radius_m } => Self::Circle { radius_m },
+            dto::MarkerShape::Circle { radius_m, .. } => Self::Circle { radius_m },
         }
     }
 }

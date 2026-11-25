@@ -308,6 +308,38 @@ fn name(text: &str) -> Result<String, ApiError> {
     Ok(name)
 }
 
+/// Where a marker is added or moved to: its latitude and longitude, or a
+/// circle's `center`. Given both, they must be the same place, so neither
+/// is silently picked over the other.
+#[allow(
+    clippy::float_cmp,
+    reason = "the same numbers given twice, not nearly the same place"
+)]
+fn placed(
+    drawn: Option<&uxduck_contracts::dto::marker::MarkerShape>,
+    latitude_deg: Option<f64>,
+    longitude_deg: Option<f64>,
+) -> Result<(Option<f64>, Option<f64>), ApiError> {
+    let Some(uxduck_contracts::dto::marker::MarkerShape::Circle {
+        center: Some(centre),
+        ..
+    }) = drawn
+    else {
+        return Ok((latitude_deg, longitude_deg));
+    };
+    let (latitude, longitude) = (centre.latitude_deg, centre.longitude_deg);
+    match (latitude_deg, longitude_deg) {
+        (None, None) => Ok((Some(latitude), Some(longitude))),
+        (Some(lat), Some(lon)) if lat == latitude && lon == longitude => Ok((Some(lat), Some(lon))),
+        (Some(lat), Some(lon)) => Err(invalid(&format!(
+            "the circle's centre ({latitude}, {longitude}) is not the marker's latitude and longitude ({lat}, {lon}). Give the centre alone, or the same place in both"
+        ))),
+        _ => Err(invalid(
+            "give a circle's centre alone, or with both a latitude and a longitude",
+        )),
+    }
+}
+
 fn position(latitude_deg: f64, longitude_deg: f64) -> Result<(), ApiError> {
     if (-90.0..=90.0).contains(&latitude_deg) && (-180.0..=180.0).contains(&longitude_deg) {
         Ok(())
@@ -434,6 +466,8 @@ pub(crate) fn handle(
                     "a line, an area or a circle is drawn by hand and has no live source",
                 ));
             }
+            let (latitude_deg, longitude_deg) =
+                placed(drawn.as_ref(), latitude_deg, longitude_deg)?;
             let drawn = drawn.map(|s| shape(s.into())).transpose()?;
             let (latitude_deg, longitude_deg) =
                 match (drawn.as_ref().and_then(middle), latitude_deg, longitude_deg) {
@@ -489,7 +523,7 @@ pub(crate) fn handle(
             engine.watch_markers();
             to_value(&MarkerDto::from(&marker))
         }
-        ClientRequest::MarkerUpdate(params) => {
+        ClientRequest::MarkerUpdate(mut params) => {
             require(Capability::Config)?;
             let mut marker = engine
                 .state
@@ -505,6 +539,11 @@ pub(crate) fn handle(
                 error.data.current_version = Some(marker.version);
                 return Err(error);
             }
+            (params.latitude_deg, params.longitude_deg) = placed(
+                params.shape.as_ref().and_then(Option::as_ref),
+                params.latitude_deg,
+                params.longitude_deg,
+            )?;
             // Set by hand again ("Keep it here"): where it was last seen,
             // unless a position is given.
             let kept = (marker.source != MarkerSource::Manual
